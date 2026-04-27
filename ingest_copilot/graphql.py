@@ -1,12 +1,11 @@
 """GraphQL client for Copilot Money.
 
-Reverse-engineered endpoint at https://app.copilot.money/api/graphql. Schema
-is undocumented so we version our own queries — bump SCHEMA_VERSION when you
-edit them, and surface the version in ingestion_runs.metadata so debugging
-old logs is possible.
+Reverse-engineered endpoint at https://app.copilot.money/api/graphql.
+Schema is undocumented; queries here are kept in sync with the JaviSoto
+copilot-money-cli and Hermosilla copilot-money-mcp open-source projects.
 
-If a known field goes missing in a response, raise SchemaDriftError loudly.
-Don't silently drop columns; we'd rather see an explicit failure.
+Auth is a Firebase ID token (Bearer); see ingest_copilot.auth for how it's
+obtained from a long-lived refresh token.
 """
 
 from __future__ import annotations
@@ -30,34 +29,54 @@ log = get_logger(__name__)
 ENDPOINT = "https://app.copilot.money/api/graphql"
 TIMEOUT = 30.0
 
+# Bumped whenever the queries below change. Logged into ingestion_runs.metadata
+# so we can correlate schema drift with run failures.
+SCHEMA_VERSION = "2026-04-27"
+
+PAGE_SIZE = 100
+
 
 class SchemaDriftError(RuntimeError):
-    """A query returned data missing required fields. Indicates Copilot
-    changed their schema; we need to update SCHEMA_VERSION + queries."""
+    """A query returned data missing required fields."""
 
 
 class CopilotAPIError(RuntimeError):
     pass
 
 
-# ---- queries ---------------------------------------------------------------
-SCHEMA_VERSION = "2026-04-26"
-
+# ---- queries (verbatim from the public-source clients) ---------------------
 Q_TRANSACTIONS = """
-query Transactions($startDate: String!, $endDate: String!) {
-  transactions(startDate: $startDate, endDate: $endDate) {
-    id
-    date
-    postedAt
-    amount
-    currency
-    merchant
-    description: note
-    category { id name parent { id } }
-    account { id name institution type currency }
-    isPending
-    isRecurring
-    isExcluded
+query Transactions($first: Int, $after: String, $filter: TransactionFilter, $sort: [TransactionSort!]) {
+  transactions(first: $first, after: $after, filter: $filter, sort: $sort) {
+    edges {
+      cursor
+      node {
+        id
+        amount
+        date
+        name
+        type
+        accountId
+        categoryId
+        recurringId
+        parentId
+        isPending
+        isReviewed
+        isoCurrencyCode
+        tipAmount
+        userNotes
+        itemId
+        createdAt
+        __typename
+      }
+      __typename
+    }
+    pageInfo {
+      endCursor
+      hasNextPage
+      __typename
+    }
+    __typename
   }
 }
 """.strip()
@@ -67,9 +86,18 @@ query Categories {
   categories {
     id
     name
-    type
-    isHidden
-    parent { id }
+    colorName
+    isExcluded
+    templateId
+    childCategories {
+      id
+      name
+      colorName
+      isExcluded
+      templateId
+      __typename
+    }
+    __typename
   }
 }
 """.strip()
@@ -79,21 +107,24 @@ query Accounts {
   accounts {
     id
     name
-    institution
     type
-    currency
-    isHidden
+    subType
+    balance
+    mask
+    isUserHidden
+    isUserClosed
+    isManual
+    institutionId
+    __typename
   }
 }
 """.strip()
 
 
-# ---- client ----------------------------------------------------------------
 class GraphQLClient:
     def __init__(self) -> None:
         self._token: str | None = None
         self._client = httpx.Client(
-            base_url="",
             timeout=TIMEOUT,
             headers={"Content-Type": "application/json"},
         )
@@ -131,28 +162,90 @@ class GraphQLClient:
                 f"Copilot GraphQL {resp.status_code}: {resp.text[:300]}"
             )
         payload = resp.json()
-        if "errors" in payload:
+        if "errors" in payload and payload["errors"]:
             raise CopilotAPIError(f"Copilot GraphQL errors: {payload['errors']}")
         return payload.get("data") or {}
 
-    # ---- public ------------------------------------------------------------
+    # ---- public surface ----------------------------------------------------
     def transactions(self, start: date, end: date) -> list[dict]:
-        data = self._post(Q_TRANSACTIONS, {"startDate": start.isoformat(), "endDate": end.isoformat()})
-        rows = data.get("transactions")
-        if rows is None:
-            raise SchemaDriftError("transactions field missing from response")
-        for r in rows:
-            for required in ("id", "date", "amount"):
-                if required not in r:
-                    raise SchemaDriftError(f"transaction row missing {required}: {r}")
-        return rows
+        """Page through transactions and return everything in [start, end].
+
+        TransactionFilter shape is reverse-engineered from the web app's
+        introspection-disabled schema. We send the simplest possible filter
+        and fall back to client-side date filtering if Copilot rejects it.
+        """
+        all_rows: list[dict] = []
+        # Try server-side date filter first.
+        variables: dict[str, Any] = {
+            "first": PAGE_SIZE,
+            "after": None,
+            "sort": [{"field": "DATE", "direction": "DESC"}],
+            "filter": {
+                "startDate": start.isoformat(),
+                "endDate": end.isoformat(),
+            },
+        }
+
+        try:
+            return list(self._iterate_transactions(variables, start, end))
+        except CopilotAPIError as e:
+            if "filter" not in str(e).lower() and "TransactionFilter" not in str(e):
+                raise
+            log.warning(
+                "copilot.gql.filter_rejected_falling_back_to_clientside",
+                error=str(e)[:200],
+            )
+
+        # Fallback: no filter; we cap pages by date locally.
+        variables["filter"] = None
+        return list(self._iterate_transactions(variables, start, end))
+
+    def _iterate_transactions(
+        self, variables: dict, start: date, end: date
+    ) -> list[dict]:
+        out: list[dict] = []
+        after: str | None = None
+        while True:
+            v = {**variables, "after": after}
+            data = self._post(Q_TRANSACTIONS, v)
+            page = data.get("transactions")
+            if page is None:
+                raise SchemaDriftError("transactions field missing from response")
+            for edge in page.get("edges", []):
+                node = edge.get("node") or {}
+                if not node:
+                    continue
+                # Client-side bound check (works regardless of whether server
+                # honored the filter).
+                d = node.get("date")
+                if d:
+                    nd = date.fromisoformat(d[:10])
+                    if nd < start:
+                        return out
+                    if nd > end:
+                        continue
+                out.append(node)
+            page_info = page.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                break
+            after = page_info.get("endCursor")
+            if not after:
+                break
+        return out
 
     def categories(self) -> list[dict]:
+        """Return a flat list of categories with parent_id derived from the
+        nested childCategories shape."""
         data = self._post(Q_CATEGORIES)
-        rows = data.get("categories")
-        if rows is None:
+        roots = data.get("categories")
+        if roots is None:
             raise SchemaDriftError("categories field missing from response")
-        return rows
+        flat: list[dict] = []
+        for root in roots:
+            flat.append({**root, "_parent_id": None})
+            for child in root.get("childCategories") or []:
+                flat.append({**child, "_parent_id": root.get("id")})
+        return flat
 
     def accounts(self) -> list[dict]:
         data = self._post(Q_ACCOUNTS)

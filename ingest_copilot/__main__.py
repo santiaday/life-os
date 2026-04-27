@@ -1,4 +1,15 @@
-"""ingest_copilot CLI."""
+"""ingest_copilot CLI.
+
+Usage:
+    # one-time bootstrap (paste a Firebase refresh token captured from your
+    # browser — see ingest_copilot/auth.py docstring for how to grab it):
+    python -m ingest_copilot set-refresh-token --token AMf-...
+
+    # ongoing:
+    python -m ingest_copilot ingest                       # 35-day window
+    python -m ingest_copilot ingest --backfill 1825       # 5-year backfill
+    python -m ingest_copilot ingest --data-type accounts  # just one source
+"""
 
 from __future__ import annotations
 
@@ -6,11 +17,17 @@ import argparse
 import json
 import sys
 
-from ingest_copilot import ingest
+from ingest_copilot import auth, ingest
 from lifeos_core.logging import configure_logging
 
 
-def _cmd(args) -> int:
+def _cmd_set_refresh_token(args) -> int:
+    auth.store_refresh_token(args.token)
+    print("OK. Refresh token stored. Try: python -m ingest_copilot ingest")
+    return 0
+
+
+def _cmd_ingest(args) -> int:
     if args.data_type == "transactions":
         n = ingest.ingest_transactions(backfill_days=args.backfill)
         print(json.dumps({"transactions": n}))
@@ -31,6 +48,11 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging()
     p = argparse.ArgumentParser(prog="ingest_copilot")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    tok = sub.add_parser("set-refresh-token", help="One-time: store a Firebase refresh token.")
+    tok.add_argument("--token", required=True, help="Refresh token starting with AMf-")
+    tok.set_defaults(func=_cmd_set_refresh_token)
+
     ing = sub.add_parser("ingest")
     ing.add_argument("--backfill", type=int, default=None)
     ing.add_argument(
@@ -38,7 +60,8 @@ def main(argv: list[str] | None = None) -> int:
         choices=["transactions", "categories", "accounts"],
         default=None,
     )
-    ing.set_defaults(func=_cmd)
+    ing.set_defaults(func=_cmd_ingest)
+
     args = p.parse_args(argv) if argv is not None or len(sys.argv) > 1 else p.parse_args(["ingest"])
     return args.func(args)
 

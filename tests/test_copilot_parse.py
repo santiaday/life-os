@@ -1,7 +1,7 @@
 """Tests for ingest_copilot.transforms.
 
-Sign convention preservation, FK shape, pending/recurring/excluded flags,
-nullable parent on dim_category.
+Sign convention preservation, FK shape, pending/recurring flags, nullable
+parent on dim_category, account hide/close handling.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ def test_transform_transaction_grocery_expense(fx):
     row = transforms.transform_transaction(api)
     assert row["transaction_id"] == "txn_aa11"
     assert row["date"].isoformat() == "2025-04-01"
-    assert row["amount"] == pytest.approx(47.83)  # Copilot convention: positive = expense
+    assert row["amount"] == pytest.approx(47.83)
     assert row["merchant"] == "Whole Foods Market"
     assert row["category_id"] == "cat_groc"
     assert row["account_id"] == "acct_chase"
@@ -45,8 +45,7 @@ def test_transform_transaction_pending(fx):
     assert row["category_id"] == "cat_rest"
 
 
-def test_transform_transaction_income_negative(fx):
-    """Income is stored as negative — we preserve the sign."""
+def test_transform_transaction_income_negative_with_recurring(fx):
     api = _txn(fx)[2]
     row = transforms.transform_transaction(api)
     assert row["amount"] == pytest.approx(-2500.00)
@@ -55,7 +54,6 @@ def test_transform_transaction_income_negative(fx):
 
 
 def test_transform_transaction_handles_missing_posted_at(fx):
-    """posted_ts is optional — non-posted txns have None."""
     api = _txn(fx)[2]
     row = transforms.transform_transaction(api)
     assert row["posted_ts"] is None
@@ -63,36 +61,47 @@ def test_transform_transaction_handles_missing_posted_at(fx):
 
 # ---- categories -----------------------------------------------------------
 def test_transform_category_with_parent():
-    api = {"id": "cat_groc", "name": "Groceries", "type": "expense",
-           "isHidden": False, "parent": {"id": "cat_food"}}
+    """Parent ID is injected as `_parent_id` by the GraphQL client when it
+    flattens the nested childCategories shape."""
+    api = {"id": "cat_groc", "name": "Groceries", "isExcluded": False,
+           "_parent_id": "cat_food"}
     row = transforms.transform_category(api)
     assert row["category_id"] == "cat_groc"
     assert row["name"] == "Groceries"
     assert row["parent_category_id"] == "cat_food"
-    assert row["type"] == "expense"
     assert row["is_hidden"] is False
 
 
 def test_transform_category_root_has_null_parent():
-    api = {"id": "cat_food", "name": "Food", "type": "expense", "isHidden": False, "parent": None}
+    api = {"id": "cat_food", "name": "Food", "isExcluded": False, "_parent_id": None}
     row = transforms.transform_category(api)
     assert row["parent_category_id"] is None
 
 
+def test_transform_category_excluded_marks_hidden():
+    api = {"id": "cat_x", "name": "Hidden", "isExcluded": True, "_parent_id": None}
+    row = transforms.transform_category(api)
+    assert row["is_hidden"] is True
+
+
 # ---- accounts -------------------------------------------------------------
 def test_transform_account_basic():
-    api = {"id": "acct_chase", "name": "Chase Sapphire", "institution": "Chase",
-           "type": "credit", "currency": "USD", "isHidden": False}
+    api = {"id": "acct_chase", "name": "Chase Sapphire", "type": "credit_card",
+           "subType": "credit", "balance": -1234.56, "mask": "1234",
+           "isUserHidden": False, "isUserClosed": False, "institutionId": "inst_chase"}
     row = transforms.transform_account(api)
     assert row["account_id"] == "acct_chase"
+    # Prefer subType over type when both present
     assert row["type"] == "credit"
     assert row["currency"] == "USD"
+    assert row["is_hidden"] is False
 
 
-def test_transform_account_currency_uppercased():
-    api = {"id": "acct_x", "name": "X", "currency": "usd"}
-    row = transforms.transform_account(api)
-    assert row["currency"] == "USD"
+def test_transform_account_hidden_or_closed_marks_hidden():
+    closed = transforms.transform_account({"id": "x", "name": "X", "isUserClosed": True})
+    assert closed["is_hidden"] is True
+    hidden = transforms.transform_account({"id": "y", "name": "Y", "isUserHidden": True})
+    assert hidden["is_hidden"] is True
 
 
 def test_transform_account_default_currency():
