@@ -1,7 +1,7 @@
-# Replace lifeos.example.com with the real hostname before deploy.
+# Replace lifeos.ledion.io with the real hostname before deploy.
 # Caddy will automatically issue a TLS cert via Let's Encrypt on first request.
 
-lifeos.example.com {
+lifeos.ledion.io {
 	encode gzip
 
 	# Health endpoint exposed by mcp service (Phase 8). Open to the world so

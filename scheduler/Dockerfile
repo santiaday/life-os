@@ -44,5 +44,6 @@ COPY ingest_calendar ./ingest_calendar
 COPY ingest_cronometer ./ingest_cronometer
 COPY ingest_copilot ./ingest_copilot
 COPY mart_refresh ./mart_refresh
+COPY scheduler ./scheduler
 
 ENTRYPOINT ["python", "-m", "scheduler"]
