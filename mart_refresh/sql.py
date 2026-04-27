@@ -1,17 +1,20 @@
 """The big rebuild SQL strings, kept as constants so refresh.py reads cleanly.
 
-Each statement TRUNCATEs and re-INSERTs from fact_*. We do NOT use upsert —
-the entire mart table is recomputed from fact every refresh. Cheap because we
-only have thousands of rows.
+Each mart is rebuilt as TRUNCATE then INSERT … SELECT — we do NOT use upsert.
+The entire table is recomputed from fact every refresh. Cheap because we only
+have thousands of rows.
 
-Whitespace and column order are tuned to match the table definitions in
-0004_mart_tables.sql so the SELECT projection lines up positionally.
+The TRUNCATE and INSERT are kept as separate constants because psycopg's
+extended-query protocol (which kicks in whenever you pass parameters) cannot
+send multiple statements in one Execute message. refresh.py runs them
+back-to-back inside a single transaction.
 """
 
 from __future__ import annotations
 
 
 # ---- mart_daily ------------------------------------------------------------
+TRUNCATE_MART_DAILY = "TRUNCATE mart_daily"
 # Sources used:
 #   fact_recovery       (daily Whoop recovery)
 #   fact_sleep          (primary night sleep + naps split)
@@ -25,9 +28,7 @@ from __future__ import annotations
 #
 # Days come from a generate_series spanning the earliest-known data date
 # to today, so empty-data days still get a row with NULLs.
-MART_DAILY_REBUILD = """
-TRUNCATE mart_daily;
-
+INSERT_MART_DAILY = """
 INSERT INTO mart_daily (
   day,
   recovery_score, hrv_rmssd_ms, resting_heart_rate, spo2_percentage, skin_temp_celsius,
@@ -191,9 +192,8 @@ LEFT JOIN LATERAL (
 # Snack* to "snack" and Uncategorized to "snack" as a fallback (better than
 # losing the rows entirely; a smarter time-clustering pass can replace this
 # later if it matters).
-MART_MEAL_REBUILD = """
-TRUNCATE mart_meal;
-
+TRUNCATE_MART_MEAL = "TRUNCATE mart_meal"
+INSERT_MART_MEAL = """
 INSERT INTO mart_meal (
   day, meal_window, start_ts, end_ts, duration_min, item_count,
   total_kcal, protein_g, carbs_g, fat_g, fiber_g, food_names, refreshed_at
@@ -232,9 +232,8 @@ GROUP BY day,
 
 # ---- mart_weekly -----------------------------------------------------------
 # date_trunc('week', ...) gives Monday in Postgres (ISO 8601).
-MART_WEEKLY_REBUILD = """
-TRUNCATE mart_weekly;
-
+TRUNCATE_MART_WEEKLY = "TRUNCATE mart_weekly"
+INSERT_MART_WEEKLY = """
 INSERT INTO mart_weekly (
   week_start, avg_recovery_score, avg_hrv_rmssd_ms, avg_rhr,
   total_strain, total_workout_min, total_meeting_hours,

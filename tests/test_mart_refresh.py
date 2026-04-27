@@ -14,10 +14,18 @@ import re
 import pytest
 
 from mart_refresh.sql import (
-    MART_DAILY_REBUILD,
-    MART_MEAL_REBUILD,
-    MART_WEEKLY_REBUILD,
+    INSERT_MART_DAILY,
+    INSERT_MART_MEAL,
+    INSERT_MART_WEEKLY,
+    TRUNCATE_MART_DAILY,
+    TRUNCATE_MART_MEAL,
+    TRUNCATE_MART_WEEKLY,
 )
+
+# Aliases so the rest of the suite reads naturally.
+MART_DAILY_REBUILD = TRUNCATE_MART_DAILY + ";\n" + INSERT_MART_DAILY
+MART_MEAL_REBUILD = TRUNCATE_MART_MEAL + ";\n" + INSERT_MART_MEAL
+MART_WEEKLY_REBUILD = TRUNCATE_MART_WEEKLY + ";\n" + INSERT_MART_WEEKLY
 
 
 def test_mart_daily_truncates_and_inserts():

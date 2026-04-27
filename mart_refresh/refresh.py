@@ -18,9 +18,12 @@ from lifeos_core.logging import get_logger
 from lifeos_core.runs import ingestion_run
 from lifeos_core.settings import settings
 from mart_refresh.sql import (
-    MART_DAILY_REBUILD,
-    MART_MEAL_REBUILD,
-    MART_WEEKLY_REBUILD,
+    INSERT_MART_DAILY,
+    INSERT_MART_MEAL,
+    INSERT_MART_WEEKLY,
+    TRUNCATE_MART_DAILY,
+    TRUNCATE_MART_MEAL,
+    TRUNCATE_MART_WEEKLY,
 )
 
 log = get_logger(__name__)
@@ -28,21 +31,24 @@ log = get_logger(__name__)
 
 def refresh_mart_daily() -> int:
     with tx() as c, c.cursor() as cur:
-        cur.execute(MART_DAILY_REBUILD, {"tz": settings.LOCAL_TZ})
+        cur.execute(TRUNCATE_MART_DAILY)
+        cur.execute(INSERT_MART_DAILY, {"tz": settings.LOCAL_TZ})
         cur.execute("SELECT COUNT(*) AS n FROM mart_daily")
         return int(cur.fetchone()["n"])
 
 
 def refresh_mart_meal() -> int:
     with tx() as c, c.cursor() as cur:
-        cur.execute(MART_MEAL_REBUILD)
+        cur.execute(TRUNCATE_MART_MEAL)
+        cur.execute(INSERT_MART_MEAL)
         cur.execute("SELECT COUNT(*) AS n FROM mart_meal")
         return int(cur.fetchone()["n"])
 
 
 def refresh_mart_weekly() -> int:
     with tx() as c, c.cursor() as cur:
-        cur.execute(MART_WEEKLY_REBUILD)
+        cur.execute(TRUNCATE_MART_WEEKLY)
+        cur.execute(INSERT_MART_WEEKLY)
         cur.execute("SELECT COUNT(*) AS n FROM mart_weekly")
         return int(cur.fetchone()["n"])
 

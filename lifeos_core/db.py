@@ -24,7 +24,12 @@ _reader_pool: ConnectionPool | None = None
 
 
 def pool() -> ConnectionPool:
-    """Admin/service-role connection pool. Created on first call."""
+    """Admin/service-role connection pool. Created on first call.
+
+    `prepare_threshold=None` disables psycopg's server-side prepared
+    statements. Required when running through Supabase's transaction pooler
+    (port 6543), which multiplexes Postgres backends across clients and
+    causes name collisions on prepared statement reuse."""
     global _pool
     if _pool is None:
         if not settings.SUPABASE_DB_URL:
@@ -36,7 +41,7 @@ def pool() -> ConnectionPool:
             conninfo=settings.SUPABASE_DB_URL,
             min_size=1,
             max_size=8,
-            kwargs={"row_factory": dict_row, "autocommit": False},
+            kwargs={"row_factory": dict_row, "autocommit": False, "prepare_threshold": None},
             open=True,
         )
     return _pool
@@ -56,7 +61,7 @@ def reader_pool() -> ConnectionPool:
             conninfo=url,
             min_size=1,
             max_size=4,
-            kwargs={"row_factory": dict_row, "autocommit": True},
+            kwargs={"row_factory": dict_row, "autocommit": True, "prepare_threshold": None},
             open=True,
         )
     return _reader_pool
