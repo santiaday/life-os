@@ -17,6 +17,7 @@ from datetime import date
 
 from fastapi import Depends, FastAPI, Request
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from lifeos_core.db import close_pools, conn
 from lifeos_core.logging import configure_logging, get_logger
@@ -46,6 +47,22 @@ mcp = FastMCP(
     # /mcp/mcp double-prefix.
     streamable_http_path="/",
     stateless_http=True,
+    # FastMCP defaults Host-header allowlist to 127.0.0.1 only as DNS-rebind
+    # protection. We're behind Caddy which forwards the real Host, so we
+    # explicitly allow our public hostname.
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[
+            "lifeos.ledion.io",
+            "127.0.0.1",
+            "localhost",
+        ],
+        allowed_origins=[
+            "https://lifeos.ledion.io",
+            "https://claude.ai",
+            "https://*.claude.ai",
+        ],
+    ),
 )
 
 
