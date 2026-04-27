@@ -79,6 +79,23 @@ sleep_primary AS (
   WHERE NOT is_nap
   ORDER BY day, total_in_bed_min DESC
 ),
+cycle_primary AS (
+  -- Whoop occasionally produces multiple cycles per local day around tz
+  -- transitions / naps. Pick the longest one as the "main" daily cycle.
+  SELECT DISTINCT ON (day)
+    day, scaled_strain, day_kilojoules
+  FROM fact_cycle
+  ORDER BY day, COALESCE(end_ts - start_ts, INTERVAL '0') DESC
+),
+recovery_primary AS (
+  -- Recovery is keyed to cycle_id, not day. If there are multiple recoveries
+  -- per day (split cycles), pick the highest-scored one.
+  SELECT DISTINCT ON (day)
+    day, recovery_score, hrv_rmssd_ms, resting_heart_rate,
+    spo2_percentage, skin_temp_celsius
+  FROM fact_recovery
+  ORDER BY day, recovery_score DESC NULLS LAST
+),
 naps AS (
   SELECT day, COUNT(*) AS nap_count, SUM(total_in_bed_min) AS nap_total_min
   FROM fact_sleep WHERE is_nap GROUP BY day
@@ -164,10 +181,10 @@ SELECT
   bw.value, bf.value,
   now()
 FROM days d
-LEFT JOIN fact_recovery   r  ON r.day  = d.day
-LEFT JOIN sleep_primary   sp ON sp.day = d.day
-LEFT JOIN naps            n  ON n.day  = d.day
-LEFT JOIN fact_cycle      c  ON c.day  = d.day
+LEFT JOIN recovery_primary r  ON r.day  = d.day
+LEFT JOIN sleep_primary    sp ON sp.day = d.day
+LEFT JOIN naps             n  ON n.day  = d.day
+LEFT JOIN cycle_primary    c  ON c.day  = d.day
 LEFT JOIN workout_agg     w  ON w.day  = d.day
 LEFT JOIN calendar_agg    ca ON ca.day = d.day
 LEFT JOIN fact_food_daily fd ON fd.day = d.day
