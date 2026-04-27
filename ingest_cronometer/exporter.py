@@ -54,13 +54,16 @@ def export(data_type: str, start: date, end: date) -> str:
     if not settings.CRONOMETER_USERNAME or not settings.CRONOMETER_PASSWORD:
         raise RuntimeError("CRONOMETER_USERNAME and CRONOMETER_PASSWORD must be set in .env")
 
+    # The binary parses -s/-e as either RFC3339 timestamps or `-Nd/w/m/y`
+    # shorthand. A bare ISO date (YYYY-MM-DD) silently fails with exit 1
+    # and empty stderr, so we always send full RFC3339 with UTC midnight.
     cmd = [
         binary_path(),
         "-u", settings.CRONOMETER_USERNAME,
         "-p", settings.CRONOMETER_PASSWORD,
         "-t", data_type,
-        "-s", start.isoformat(),
-        "-e", end.isoformat(),
+        "-s", f"{start.isoformat()}T00:00:00Z",
+        "-e", f"{end.isoformat()}T23:59:59Z",
     ]
     log.info("cronometer.export.start", data_type=data_type, start=str(start), end=str(end))
 
