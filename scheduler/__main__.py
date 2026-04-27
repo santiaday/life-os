@@ -1,0 +1,172 @@
+"""APScheduler service.
+
+Long-running blocking process. Each cron job shells out to the corresponding
+ingester via subprocess (`python -m ingest_<source> ingest [...]`) so a
+crash in one job can't bring down the scheduler. After a successful run, the
+job optionally chains to `mart_refresh` so the mart layer reflects the new
+data without waiting for the nightly rebuild.
+
+Per SPEC.md §8.4. Jobs land alongside their ingesters as phases ship.
+"""
+
+from __future__ import annotations
+
+import subprocess
+import sys
+
+from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+from lifeos_core.logging import configure_logging, get_logger
+from lifeos_core.settings import settings
+
+log = get_logger(__name__)
+
+
+def run_subprocess(module: str, *args: str, chain_mart: bool = True) -> None:
+    """Invoke `python -m <module> <args>`. On success, optionally fire
+    `python -m mart_refresh` so the mart layer updates eagerly."""
+    cmd = [sys.executable, "-m", module, *args]
+    log.info("scheduler.job.start", cmd=cmd)
+    rc = subprocess.run(cmd, check=False)
+    log.info(
+        "scheduler.job.end",
+        cmd=cmd,
+        returncode=rc.returncode,
+        status="success" if rc.returncode == 0 else "failure",
+    )
+    if rc.returncode == 0 and chain_mart:
+        # Mart refresh is in Phase 4 — guarded so missing module doesn't crash.
+        try:
+            mart = subprocess.run(
+                [sys.executable, "-m", "mart_refresh"], check=False
+            )
+            log.info("scheduler.mart_refresh.end", returncode=mart.returncode)
+        except FileNotFoundError:
+            pass
+
+
+def build() -> BlockingScheduler:
+    sched = BlockingScheduler(timezone=settings.LOCAL_TZ)
+
+    # ---- Whoop (Phase 2) ---------------------------------------------------
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(minute=15),
+        args=["ingest_whoop", "ingest"],
+        id="whoop_hourly",
+        name="Whoop hourly incremental",
+        max_instances=1,
+        coalesce=True,
+    )
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(hour=6, minute=0),
+        args=["ingest_whoop", "ingest", "--backfill", "3"],
+        id="whoop_daily_backfill",
+        name="Whoop daily 3-day re-pull (Whoop back-edits older recoveries)",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # ---- Calendar (Phase 3) ------------------------------------------------
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(minute="*/30"),
+        args=["ingest_calendar", "ingest"],
+        id="calendar_30min",
+        name="Google Calendar incremental sync (every 30 min)",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # ---- Cronometer (Phase 6) ---------------------------------------------
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(hour=3, minute=0),
+        args=["ingest_cronometer", "ingest", "--backfill", "2"],
+        id="cronometer_daily",
+        name="Cronometer daily 2-day rebackfill (catches late edits)",
+        max_instances=1,
+        coalesce=True,
+    )
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(day_of_week="sun", hour=3, minute=30),
+        args=["ingest_cronometer", "ingest", "--backfill", "14"],
+        id="cronometer_weekly",
+        name="Cronometer Sunday 14-day rebackfill (catches late corrections)",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # ---- Copilot (Phase 7) ------------------------------------------------
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(minute=0, hour="*/4"),
+        args=["ingest_copilot", "ingest"],
+        id="copilot_4hr",
+        name="Copilot 4-hourly transaction sync (35-day window)",
+        max_instances=1,
+        coalesce=True,
+    )
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(hour=4, minute=0),
+        args=["ingest_copilot", "ingest", "--backfill", "1825"],
+        id="copilot_nightly",
+        name="Copilot nightly 5-year refresh",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # ---- Nightly mart rebuild (Phase 4) ------------------------------------
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(hour=4, minute=30),
+        args=["mart_refresh"],
+        kwargs={"chain_mart": False},
+        id="mart_nightly",
+        name="Nightly mart rebuild",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # ---- Stale-ingest alerting (Phase 8) -----------------------------------
+    sched.add_job(
+        _alert_check,
+        CronTrigger(minute=45),
+        id="alert_hourly",
+        name="Hourly stale-ingest survey + alert",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    return sched
+
+
+def _alert_check() -> None:
+    """In-process alert check (no subprocess — it's a few SQL queries)."""
+    from lifeos_core.alerts import check_and_alert
+
+    result = check_and_alert()
+    log.info("scheduler.alert_check", result=result)
+
+
+def main() -> int:
+    configure_logging()
+    sched = build()
+    log.info(
+        "scheduler.starting",
+        tz=settings.LOCAL_TZ,
+        jobs=[j.id for j in sched.get_jobs()],
+    )
+    try:
+        sched.start()
+    except (KeyboardInterrupt, SystemExit):
+        log.info("scheduler.stopping")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

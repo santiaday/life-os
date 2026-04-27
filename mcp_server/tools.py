@@ -1,0 +1,764 @@
+"""Tool implementations for the MCP server.
+
+Each tool returns a dict matching the SPEC.md §6.2 envelope:
+
+    {ok, tool, rows, row_count, truncated, warnings}
+    or
+    {ok=False, tool, error, error_type}
+
+Tools use `db.conn()` for the admin pool (mart/fact reads) and
+`db.reader_conn()` for the read-only `ask_sql` escape hatch.
+"""
+
+from __future__ import annotations
+
+import math
+import time
+from datetime import date, datetime, timezone
+from typing import Any
+
+from psycopg import sql
+
+from lifeos_core.db import conn, reader_conn
+from lifeos_core.logging import get_logger
+from mcp_server.schema_docs import docs_for
+from mcp_server.sql_safety import UnsafeQueryError, ensure_limit, validate
+
+log = get_logger(__name__)
+
+ASK_SQL_DEFAULT_LIMIT = 200
+ASK_SQL_TIMEOUT_MS = 5_000
+
+# Allowlist of mart_daily columns that may be passed to correlate_metrics.
+# Updated alongside any schema change.
+CORRELATE_ALLOWLIST = {
+    "recovery_score", "hrv_rmssd_ms", "resting_heart_rate", "spo2_percentage",
+    "skin_temp_celsius",
+    "sleep_total_hours", "sleep_rem_hours", "sleep_slow_wave_hours",
+    "sleep_efficiency_pct", "sleep_performance_pct", "sleep_consistency_pct",
+    "nap_count", "nap_total_min",
+    "strain", "day_kilojoules",
+    "workout_count", "workout_total_min", "workout_total_kj", "workout_max_strain",
+    "meeting_count", "meeting_hours", "meeting_internal_hours", "meeting_external_hours",
+    "longest_focus_block_min", "total_focus_block_min",
+    "total_kcal", "protein_g", "carbs_g", "fat_g", "fiber_g", "alcohol_g", "caffeine_mg",
+    "meal_count", "eating_window_hours",
+    "breakfast_kcal", "lunch_kcal", "dinner_kcal", "snack_kcal",
+    "total_spend", "food_spend", "restaurant_spend", "groceries_spend", "transportation_spend",
+    "weight_kg", "body_fat_pct",
+}
+
+
+# ---- envelope helpers -------------------------------------------------------
+def _ok(tool: str, rows: list[dict], *, truncated: bool = False, warnings: list[str] | None = None,
+        extra: dict | None = None) -> dict:
+    out: dict = {
+        "ok": True,
+        "tool": tool,
+        "rows": rows,
+        "row_count": len(rows),
+        "truncated": truncated,
+        "warnings": warnings or [],
+    }
+    if extra:
+        out.update(extra)
+    return out
+
+
+def _err(tool: str, exc: BaseException) -> dict:
+    return {
+        "ok": False,
+        "tool": tool,
+        "error": str(exc),
+        "error_type": type(exc).__name__,
+    }
+
+
+def _serialize(rows: list[dict]) -> list[dict]:
+    """Cast non-JSON-native values (date, datetime, Decimal, UUID) to strings.
+    psycopg's dict_row already returns Python types; we just stringify the
+    ones that don't json.dumps cleanly."""
+    out = []
+    for r in rows:
+        out.append({k: _coerce(v) for k, v in r.items()})
+    return out
+
+
+def _coerce(v: Any) -> Any:
+    if v is None or isinstance(v, (str, int, bool)):
+        return v
+    if isinstance(v, float):
+        return v
+    if isinstance(v, (datetime, date)):
+        return v.isoformat()
+    # psycopg returns Decimal for NUMERIC; preserve precision via float (we're
+    # already lossy via JSON).
+    try:
+        from decimal import Decimal
+        if isinstance(v, Decimal):
+            return float(v)
+    except ImportError:
+        pass
+    return str(v)
+
+
+# ---- get_schema_docs --------------------------------------------------------
+def get_schema_docs(table_name: str | None = None) -> dict:
+    return _ok("get_schema_docs", [docs_for(table_name)])
+
+
+# ---- get_daily_summary ------------------------------------------------------
+DEFAULT_DAILY_COLS = [
+    "day", "recovery_score", "hrv_rmssd_ms", "sleep_total_hours",
+    "strain", "meeting_hours", "total_kcal", "total_spend",
+]
+DAILY_MAX_ROWS = 366
+
+
+def get_daily_summary(start_date: date, end_date: date, columns: list[str] | None = None) -> dict:
+    cols = columns or DEFAULT_DAILY_COLS
+    bad = [c for c in cols if c not in CORRELATE_ALLOWLIST and c != "day"]
+    if bad:
+        return _err("get_daily_summary", ValueError(f"Unknown columns: {bad}"))
+
+    select = sql.SQL(", ").join(map(sql.Identifier, cols))
+    q = sql.SQL(
+        "SELECT {cols} FROM mart_daily WHERE day BETWEEN %s AND %s ORDER BY day"
+    ).format(cols=select)
+
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, [start_date, end_date])
+        rows = _serialize(cur.fetchall())
+
+    truncated = len(rows) > DAILY_MAX_ROWS
+    warnings: list[str] = []
+    if truncated:
+        rows = rows[:DAILY_MAX_ROWS]
+        warnings.append(f"Result truncated to {DAILY_MAX_ROWS} rows. Narrow the date window.")
+    return _ok("get_daily_summary", rows, truncated=truncated, warnings=warnings)
+
+
+# ---- get_recovery_trend -----------------------------------------------------
+def get_recovery_trend(start_date: date, end_date: date, smoothing: int | None = None) -> dict:
+    cols = ["day", "recovery_score", "hrv_rmssd_ms", "resting_heart_rate", "sleep_total_hours"]
+    select = sql.SQL(", ").join(map(sql.Identifier, cols))
+    q = sql.SQL(
+        "SELECT {cols} FROM mart_daily WHERE day BETWEEN %s AND %s ORDER BY day"
+    ).format(cols=select)
+
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, [start_date, end_date])
+        rows = _serialize(cur.fetchall())
+
+    if smoothing and smoothing > 1:
+        rows = _add_rolling(rows, ["recovery_score", "hrv_rmssd_ms", "resting_heart_rate"], smoothing)
+
+    return _ok("get_recovery_trend", rows)
+
+
+def _add_rolling(rows: list[dict], cols: list[str], window: int) -> list[dict]:
+    """Trailing N-day rolling average. NULL values skipped from the window."""
+    for col in cols:
+        rolling_col = f"{col}_roll{window}"
+        for i, r in enumerate(rows):
+            window_slice = rows[max(0, i - window + 1) : i + 1]
+            vals = [w[col] for w in window_slice if w.get(col) is not None]
+            r[rolling_col] = round(sum(vals) / len(vals), 2) if vals else None
+    return rows
+
+
+# ---- get_sleep_summary ------------------------------------------------------
+def get_sleep_summary(start_date: date, end_date: date, include_naps: bool = False) -> dict:
+    base_cols = [
+        "day", "sleep_total_hours", "sleep_rem_hours", "sleep_slow_wave_hours",
+        "sleep_efficiency_pct", "sleep_performance_pct", "sleep_consistency_pct",
+        "sleep_start_ts", "sleep_end_ts",
+    ]
+    if include_naps:
+        base_cols += ["nap_count", "nap_total_min"]
+
+    select = sql.SQL(", ").join(map(sql.Identifier, base_cols))
+    q = sql.SQL(
+        "SELECT {cols} FROM mart_daily WHERE day BETWEEN %s AND %s ORDER BY day"
+    ).format(cols=select)
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, [start_date, end_date])
+        return _ok("get_sleep_summary", _serialize(cur.fetchall()))
+
+
+# ---- get_workouts -----------------------------------------------------------
+def get_workouts(start_date: date, end_date: date, sport_name: str | None = None) -> dict:
+    where = "day BETWEEN %s AND %s"
+    params: list = [start_date, end_date]
+    if sport_name:
+        where += " AND sport_name ILIKE %s"
+        params.append(sport_name)
+    q = f"""
+        SELECT workout_id, day, start_ts, end_ts, sport_name, strain, kilojoules,
+               avg_heart_rate, max_heart_rate, distance_meters,
+               zone_two_min, zone_three_min, zone_four_min, zone_five_min
+        FROM fact_workout WHERE {where} ORDER BY start_ts DESC LIMIT 200
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, params)
+        rows = _serialize(cur.fetchall())
+    truncated = len(rows) >= 200
+    warnings = ["Limit 200 workouts. Narrow the window if needed."] if truncated else []
+    return _ok("get_workouts", rows, truncated=truncated, warnings=warnings)
+
+
+# ---- get_food_log -----------------------------------------------------------
+FOOD_LOG_LIMIT = 500
+
+
+def get_food_log(
+    start_date: date,
+    end_date: date,
+    meal_window: str | None = None,
+    search: str | None = None,
+) -> dict:
+    where = ["day BETWEEN %s AND %s"]
+    params: list = [start_date, end_date]
+    if meal_window:
+        where.append("meal_group ILIKE %s")
+        params.append(meal_window if "%" in meal_window else f"{meal_window}%")
+    if search:
+        where.append("food_name ILIKE %s")
+        params.append(f"%{search}%")
+
+    where_clause = " AND ".join(where)
+    q = f"""
+        SELECT id, eaten_at, day, meal_group, food_name, amount, unit,
+               energy_kcal, protein_g, carbs_g, fat_g, fiber_g, sugar_g,
+               sodium_mg, caffeine_mg, alcohol_g
+        FROM fact_food_log
+        WHERE {where_clause}
+        ORDER BY eaten_at DESC
+        LIMIT {FOOD_LOG_LIMIT + 1}
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, params)
+        rows = _serialize(cur.fetchall())
+
+    truncated = len(rows) > FOOD_LOG_LIMIT
+    warnings: list[str] = []
+    if truncated:
+        rows = rows[:FOOD_LOG_LIMIT]
+        warnings.append(
+            f"More than {FOOD_LOG_LIMIT} matches; truncated. "
+            "Try narrowing date range or use get_meal_summary for aggregates."
+        )
+    return _ok("get_food_log", rows, truncated=truncated, warnings=warnings)
+
+
+# ---- get_meal_summary -------------------------------------------------------
+def get_meal_summary(start_date: date, end_date: date, meal_window: str | None = None) -> dict:
+    where = ["day BETWEEN %s AND %s"]
+    params: list = [start_date, end_date]
+    if meal_window:
+        where.append("meal_window = %s")
+        params.append(meal_window)
+    q = f"""
+        SELECT day, meal_window, start_ts, end_ts, duration_min, item_count,
+               total_kcal, protein_g, carbs_g, fat_g, fiber_g, food_names
+        FROM mart_meal WHERE {" AND ".join(where)} ORDER BY start_ts
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, params)
+        return _ok("get_meal_summary", _serialize(cur.fetchall()))
+
+
+# ---- get_calendar_load ------------------------------------------------------
+def get_calendar_load(start_date: date, end_date: date) -> dict:
+    cols = [
+        "day", "meeting_count", "meeting_hours", "meeting_internal_hours",
+        "meeting_external_hours", "first_meeting_time", "last_meeting_time",
+        "longest_focus_block_min", "total_focus_block_min",
+    ]
+    select = sql.SQL(", ").join(map(sql.Identifier, cols))
+    q = sql.SQL(
+        "SELECT {cols} FROM mart_daily WHERE day BETWEEN %s AND %s ORDER BY day"
+    ).format(cols=select)
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, [start_date, end_date])
+        return _ok("get_calendar_load", _serialize(cur.fetchall()))
+
+
+# ---- get_calendar_events ----------------------------------------------------
+def get_calendar_events(
+    start_date: date,
+    end_date: date,
+    classification: str | None = None,
+    search: str | None = None,
+) -> dict:
+    where = ["day BETWEEN %s AND %s"]
+    params: list = [start_date, end_date]
+    if classification:
+        where.append("classification = %s")
+        params.append(classification)
+    if search:
+        where.append("title ILIKE %s")
+        params.append(f"%{search}%")
+    q = f"""
+        SELECT calendar_id, event_id, start_ts, end_ts, day, duration_min,
+               title, status, classification, attendee_count, attendee_internal_count,
+               attendee_external_count, response_status, has_video_link, location
+        FROM fact_calendar_event
+        WHERE {" AND ".join(where)}
+        ORDER BY start_ts DESC
+        LIMIT 500
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, params)
+        return _ok("get_calendar_events", _serialize(cur.fetchall()))
+
+
+# ---- get_spending -----------------------------------------------------------
+GROUP_BY_OPTIONS = {"day", "week", "month", "category", "merchant"}
+
+
+def get_spending(
+    start_date: date,
+    end_date: date,
+    category: str | None = None,
+    group_by: str = "day",
+) -> dict:
+    if group_by not in GROUP_BY_OPTIONS:
+        return _err("get_spending", ValueError(f"group_by must be one of {sorted(GROUP_BY_OPTIONS)}"))
+
+    where = ["t.date BETWEEN %s AND %s", "NOT t.is_excluded", "t.amount > 0"]
+    params: list = [start_date, end_date]
+    if category:
+        where.append("c.name ILIKE %s")
+        params.append(f"%{category}%")
+
+    where_clause = " AND ".join(where)
+    if group_by == "day":
+        bucket = "t.date"
+    elif group_by == "week":
+        bucket = "date_trunc('week', t.date)::date"
+    elif group_by == "month":
+        bucket = "date_trunc('month', t.date)::date"
+    elif group_by == "category":
+        bucket = "c.name"
+    else:  # merchant
+        bucket = "t.merchant"
+
+    q = f"""
+        SELECT {bucket} AS bucket,
+               SUM(t.amount) AS total,
+               COUNT(*)      AS txn_count
+        FROM fact_transaction t
+        LEFT JOIN dim_category c ON c.category_id = t.category_id
+        WHERE {where_clause}
+        GROUP BY bucket
+        ORDER BY {('total DESC' if group_by in ('category', 'merchant') else 'bucket')}
+        LIMIT 500
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, params)
+        return _ok("get_spending", _serialize(cur.fetchall()))
+
+
+# ---- get_transactions -------------------------------------------------------
+def get_transactions(
+    start_date: date,
+    end_date: date,
+    category: str | None = None,
+    merchant: str | None = None,
+    min_amount: float | None = None,
+) -> dict:
+    where = ["t.date BETWEEN %s AND %s"]
+    params: list = [start_date, end_date]
+    if category:
+        where.append("c.name ILIKE %s")
+        params.append(f"%{category}%")
+    if merchant:
+        where.append("t.merchant ILIKE %s")
+        params.append(f"%{merchant}%")
+    if min_amount is not None:
+        where.append("ABS(t.amount) >= %s")
+        params.append(min_amount)
+    q = f"""
+        SELECT t.transaction_id, t.date, t.amount, t.merchant, t.description,
+               c.name AS category, t.is_pending, t.is_recurring, t.is_excluded, t.notes,
+               a.name AS account
+        FROM fact_transaction t
+        LEFT JOIN dim_category c ON c.category_id = t.category_id
+        LEFT JOIN dim_account  a ON a.account_id  = t.account_id
+        WHERE {" AND ".join(where)}
+        ORDER BY t.date DESC, t.amount DESC
+        LIMIT 500
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, params)
+        return _ok("get_transactions", _serialize(cur.fetchall()))
+
+
+# ---- get_biometrics ---------------------------------------------------------
+def get_biometrics(
+    metric: str | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> dict:
+    if metric is None:
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                """
+                SELECT metric, COUNT(*) AS n,
+                       MIN(measured_at) AS first_seen,
+                       MAX(measured_at) AS last_seen
+                FROM fact_biometric GROUP BY metric ORDER BY n DESC
+                """
+            )
+            return _ok("get_biometrics", _serialize(cur.fetchall()))
+
+    where = ["metric = %s"]
+    params: list = [metric]
+    if start_date is not None:
+        where.append("day >= %s")
+        params.append(start_date)
+    if end_date is not None:
+        where.append("day <= %s")
+        params.append(end_date)
+    q = f"""
+        SELECT id, measured_at, day, metric, value, unit, note, source
+        FROM fact_biometric WHERE {" AND ".join(where)}
+        ORDER BY measured_at DESC LIMIT 1000
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, params)
+        return _ok("get_biometrics", _serialize(cur.fetchall()))
+
+
+# ---- correlate_metrics ------------------------------------------------------
+def correlate_metrics(
+    metric_a: str,
+    metric_b: str,
+    start_date: date,
+    end_date: date,
+    lag_days: int = 0,
+    method: str = "pearson",
+) -> dict:
+    if metric_a not in CORRELATE_ALLOWLIST or metric_b not in CORRELATE_ALLOWLIST:
+        bad = [m for m in (metric_a, metric_b) if m not in CORRELATE_ALLOWLIST]
+        return _err("correlate_metrics", ValueError(f"Not in allowlist: {bad}"))
+    if method not in ("pearson", "spearman"):
+        return _err("correlate_metrics", ValueError("method must be 'pearson' or 'spearman'"))
+
+    a = sql.Identifier(metric_a)
+    b = sql.Identifier(metric_b)
+    # Self-join with day offset for lag analysis. lag_days > 0 means
+    # "metric_a today vs metric_b N days later".
+    q = sql.SQL(
+        """
+        SELECT m1.day AS day,
+               m1.{a} AS a,
+               m2.{b} AS b
+        FROM mart_daily m1
+        JOIN mart_daily m2 ON m2.day = m1.day + %s::int
+        WHERE m1.day BETWEEN %s AND %s
+          AND m1.{a} IS NOT NULL
+          AND m2.{b} IS NOT NULL
+        ORDER BY m1.day
+        """
+    ).format(a=a, b=b)
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, [lag_days, start_date, end_date])
+        rows = cur.fetchall()
+
+    n = len(rows)
+    if n < 3:
+        return _ok(
+            "correlate_metrics",
+            _serialize(rows),
+            warnings=["Fewer than 3 paired observations; correlation undefined."],
+            extra={"n": n, "pearson_r": None, "p_value": None, "spearman_r": None,
+                   "lag_days": lag_days},
+        )
+
+    a_vals = [float(r["a"]) for r in rows]
+    b_vals = [float(r["b"]) for r in rows]
+
+    try:
+        from scipy import stats  # local import keeps test imports light
+
+        p_r, p_p = stats.pearsonr(a_vals, b_vals)
+        s_r, s_p = stats.spearmanr(a_vals, b_vals)
+        primary_p = float(p_p if method == "pearson" else s_p)
+    except Exception as e:  # noqa: BLE001
+        log.exception("correlate_metrics.scipy_failed")
+        return _err("correlate_metrics", e)
+
+    extra = {
+        "n": n,
+        "pearson_r": _safe(p_r),
+        "p_value": _safe(primary_p),
+        "spearman_r": _safe(s_r),
+        "lag_days": lag_days,
+        "metric_a": metric_a,
+        "metric_b": metric_b,
+        "method": method,
+    }
+    # Returning the underlying paired series (capped) lets Claude reason
+    # about shape, outliers, regime shifts, not just point estimates.
+    capped = _serialize(rows[:366])
+    return _ok("correlate_metrics", capped, truncated=len(rows) > 366, extra=extra)
+
+
+def _safe(x: float) -> float | None:
+    if x is None or (isinstance(x, float) and (math.isnan(x) or math.isinf(x))):
+        return None
+    return float(x)
+
+
+# ---- ask_sql ----------------------------------------------------------------
+def ask_sql(query: str, max_rows: int = 200) -> dict:
+    try:
+        validate(query)
+    except UnsafeQueryError as e:
+        return _err("ask_sql", e)
+
+    final = ensure_limit(query, max_rows)
+    t0 = time.perf_counter()
+    try:
+        with reader_conn() as c, c.cursor() as cur:
+            cur.execute(f"SET LOCAL statement_timeout = {ASK_SQL_TIMEOUT_MS}")
+            cur.execute(final)
+            try:
+                rows = _serialize(cur.fetchall())
+            except Exception:
+                rows = []
+            cols = [d.name for d in (cur.description or [])]
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+    except Exception as e:
+        log.warning("ask_sql.exec_failed", error=str(e))
+        return _err("ask_sql", e)
+
+    truncated = len(rows) >= max_rows
+    return _ok(
+        "ask_sql",
+        rows,
+        truncated=truncated,
+        warnings=[],
+        extra={"columns": cols, "execution_ms": elapsed_ms, "query_executed": final},
+    )
+
+
+# ---- registry ---------------------------------------------------------------
+# Tool name → callable + JSON schema (input). Used by server.py to wire MCP.
+TOOLS: dict[str, dict] = {
+    "get_schema_docs": {
+        "fn": get_schema_docs,
+        "description": "Return curated documentation about life-os tables, columns, conventions. CALL THIS FIRST for any analytical question.",
+        "input": {
+            "type": "object",
+            "properties": {
+                "table_name": {"type": "string", "description": "Optional table to scope the docs."},
+            },
+        },
+    },
+    "get_daily_summary": {
+        "fn": get_daily_summary,
+        "description": "Daily-grain summary from mart_daily. Default columns are recovery, hrv, sleep, strain, meeting hours, kcal, spend.",
+        "input": {
+            "type": "object",
+            "required": ["start_date", "end_date"],
+            "properties": {
+                "start_date": {"type": "string", "format": "date"},
+                "end_date": {"type": "string", "format": "date"},
+                "columns": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+    },
+    "get_recovery_trend": {
+        "fn": get_recovery_trend,
+        "description": "Daily recovery, HRV, RHR, sleep duration. Optional trailing-N-day rolling averages.",
+        "input": {
+            "type": "object",
+            "required": ["start_date", "end_date"],
+            "properties": {
+                "start_date": {"type": "string", "format": "date"},
+                "end_date": {"type": "string", "format": "date"},
+                "smoothing": {"type": "integer", "minimum": 2},
+            },
+        },
+    },
+    "get_sleep_summary": {
+        "fn": get_sleep_summary,
+        "description": "Per-day sleep metrics. Set include_naps=true to add nap counts/minutes.",
+        "input": {
+            "type": "object",
+            "required": ["start_date", "end_date"],
+            "properties": {
+                "start_date": {"type": "string", "format": "date"},
+                "end_date": {"type": "string", "format": "date"},
+                "include_naps": {"type": "boolean", "default": False},
+            },
+        },
+    },
+    "get_workouts": {
+        "fn": get_workouts,
+        "description": "Individual workouts from fact_workout. Optional sport_name ILIKE filter.",
+        "input": {
+            "type": "object",
+            "required": ["start_date", "end_date"],
+            "properties": {
+                "start_date": {"type": "string", "format": "date"},
+                "end_date": {"type": "string", "format": "date"},
+                "sport_name": {"type": "string"},
+            },
+        },
+    },
+    "get_food_log": {
+        "fn": get_food_log,
+        "description": "Per-item food log. Optional meal_window and food name search.",
+        "input": {
+            "type": "object",
+            "required": ["start_date", "end_date"],
+            "properties": {
+                "start_date": {"type": "string", "format": "date"},
+                "end_date": {"type": "string", "format": "date"},
+                "meal_window": {"type": "string"},
+                "search": {"type": "string"},
+            },
+        },
+    },
+    "get_meal_summary": {
+        "fn": get_meal_summary,
+        "description": "Per-meal rollup from mart_meal: kcal, macros, food names per meal_window.",
+        "input": {
+            "type": "object",
+            "required": ["start_date", "end_date"],
+            "properties": {
+                "start_date": {"type": "string", "format": "date"},
+                "end_date": {"type": "string", "format": "date"},
+                "meal_window": {"type": "string", "enum": ["breakfast", "lunch", "dinner", "snack"]},
+            },
+        },
+    },
+    "get_calendar_load": {
+        "fn": get_calendar_load,
+        "description": "Per-day meeting load and focus blocks from mart_daily.",
+        "input": {
+            "type": "object",
+            "required": ["start_date", "end_date"],
+            "properties": {
+                "start_date": {"type": "string", "format": "date"},
+                "end_date": {"type": "string", "format": "date"},
+            },
+        },
+    },
+    "get_calendar_events": {
+        "fn": get_calendar_events,
+        "description": "Individual calendar events. Optional classification + title search.",
+        "input": {
+            "type": "object",
+            "required": ["start_date", "end_date"],
+            "properties": {
+                "start_date": {"type": "string", "format": "date"},
+                "end_date": {"type": "string", "format": "date"},
+                "classification": {
+                    "type": "string",
+                    "enum": ["meeting", "focus", "all_day", "declined", "personal"],
+                },
+                "search": {"type": "string"},
+            },
+        },
+    },
+    "get_spending": {
+        "fn": get_spending,
+        "description": "Spending aggregated by day/week/month/category/merchant.",
+        "input": {
+            "type": "object",
+            "required": ["start_date", "end_date"],
+            "properties": {
+                "start_date": {"type": "string", "format": "date"},
+                "end_date": {"type": "string", "format": "date"},
+                "category": {"type": "string"},
+                "group_by": {"type": "string", "enum": list(GROUP_BY_OPTIONS), "default": "day"},
+            },
+        },
+    },
+    "get_transactions": {
+        "fn": get_transactions,
+        "description": "Individual transactions. Filterable by category, merchant, min absolute amount.",
+        "input": {
+            "type": "object",
+            "required": ["start_date", "end_date"],
+            "properties": {
+                "start_date": {"type": "string", "format": "date"},
+                "end_date": {"type": "string", "format": "date"},
+                "category": {"type": "string"},
+                "merchant": {"type": "string"},
+                "min_amount": {"type": "number"},
+            },
+        },
+    },
+    "get_biometrics": {
+        "fn": get_biometrics,
+        "description": "If metric is omitted, lists available metrics with counts and date ranges. Otherwise returns measurements.",
+        "input": {
+            "type": "object",
+            "properties": {
+                "metric": {"type": "string"},
+                "start_date": {"type": "string", "format": "date"},
+                "end_date": {"type": "string", "format": "date"},
+            },
+        },
+    },
+    "correlate_metrics": {
+        "fn": correlate_metrics,
+        "description": "Pearson + Spearman correlation between two mart_daily columns over a date range, with optional integer day lag. Returns the underlying paired series too.",
+        "input": {
+            "type": "object",
+            "required": ["metric_a", "metric_b", "start_date", "end_date"],
+            "properties": {
+                "metric_a": {"type": "string", "enum": sorted(CORRELATE_ALLOWLIST)},
+                "metric_b": {"type": "string", "enum": sorted(CORRELATE_ALLOWLIST)},
+                "start_date": {"type": "string", "format": "date"},
+                "end_date": {"type": "string", "format": "date"},
+                "lag_days": {"type": "integer", "default": 0},
+                "method": {"type": "string", "enum": ["pearson", "spearman"], "default": "pearson"},
+            },
+        },
+    },
+    "ask_sql": {
+        "fn": ask_sql,
+        "description": "Read-only SQL escape hatch against curated views. Forbidden keywords (INSERT/UPDATE/DELETE/...) rejected; query runs as the lifeos_mcp role with statement_timeout=5s.",
+        "input": {
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": {"type": "string"},
+                "max_rows": {"type": "integer", "default": ASK_SQL_DEFAULT_LIMIT, "minimum": 1, "maximum": 5000},
+            },
+        },
+    },
+}
+
+
+def call(name: str, args: dict) -> dict:
+    """Invoke a tool by name with a kwargs dict. Coerce date strings to date()."""
+    spec = TOOLS.get(name)
+    if spec is None:
+        return _err(name, ValueError(f"Unknown tool: {name}"))
+
+    coerced = _coerce_args(args, spec["input"])
+    try:
+        return spec["fn"](**coerced)
+    except TypeError as e:
+        return _err(name, e)
+
+
+def _coerce_args(args: dict, schema: dict) -> dict:
+    """Convert ISO date strings into date objects so tool fns get the types
+    they declared, regardless of what the MCP client passed."""
+    out = dict(args)
+    props = schema.get("properties", {})
+    for key, spec in props.items():
+        if key not in out or out[key] is None:
+            continue
+        if spec.get("format") == "date" and isinstance(out[key], str):
+            out[key] = date.fromisoformat(out[key])
+    return out

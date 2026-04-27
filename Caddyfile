@@ -1,0 +1,35 @@
+# Replace lifeos.example.com with the real hostname before deploy.
+# Caddy will automatically issue a TLS cert via Let's Encrypt on first request.
+
+lifeos.example.com {
+	encode gzip
+
+	# Health endpoint exposed by mcp service (Phase 8). Open to the world so
+	# uptime checks don't need the bearer token.
+	handle /health {
+		reverse_proxy mcp:8080
+	}
+
+	# Everything else is the MCP HTTP server. Auth is enforced inside the app
+	# via the Authorization: Bearer <MCP_API_KEY> header.
+	handle {
+		reverse_proxy mcp:8080
+	}
+
+	# 10 req/sec per remote IP. Cheap defense against accidents and casual
+	# scanning. Tune up if Claude.ai's connector ever bursts harder.
+	# (Requires the rate-limit plugin; comment out if running stock Caddy.)
+	# rate_limit {
+	#   zone mcp {
+	#     key {remote_host}
+	#     events 10
+	#     window 1s
+	#   }
+	# }
+
+	log {
+		output stdout
+		format console
+		level INFO
+	}
+}

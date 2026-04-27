@@ -1,0 +1,47 @@
+[
+  {
+    "id": "txn_aa11",
+    "date": "2025-04-01",
+    "postedAt": "2025-04-01T18:32:11Z",
+    "amount": 47.83,
+    "currency": "USD",
+    "merchant": "Whole Foods Market",
+    "description": null,
+    "note": "Weekly grocery run",
+    "category": {"id": "cat_groc", "name": "Groceries", "parent": {"id": "cat_food"}},
+    "account": {"id": "acct_chase", "name": "Chase Sapphire", "institution": "Chase", "type": "credit", "currency": "USD"},
+    "isPending": false,
+    "isRecurring": false,
+    "isExcluded": false
+  },
+  {
+    "id": "txn_aa12",
+    "date": "2025-04-01",
+    "postedAt": "2025-04-01T20:11:09Z",
+    "amount": 22.50,
+    "currency": "USD",
+    "merchant": "Joe's Pizza",
+    "description": null,
+    "note": null,
+    "category": {"id": "cat_rest", "name": "Restaurants", "parent": {"id": "cat_food"}},
+    "account": {"id": "acct_chase", "name": "Chase Sapphire", "institution": "Chase", "type": "credit", "currency": "USD"},
+    "isPending": true,
+    "isRecurring": false,
+    "isExcluded": false
+  },
+  {
+    "id": "txn_aa13",
+    "date": "2025-04-01",
+    "postedAt": null,
+    "amount": -2500.00,
+    "currency": "USD",
+    "merchant": "DoorLoop",
+    "description": null,
+    "note": "Salary",
+    "category": {"id": "cat_inc", "name": "Income", "parent": null},
+    "account": {"id": "acct_check", "name": "Chase Checking", "institution": "Chase", "type": "checking", "currency": "USD"},
+    "isPending": false,
+    "isRecurring": true,
+    "isExcluded": false
+  }
+]

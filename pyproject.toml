@@ -1,0 +1,66 @@
+[project]
+name = "life-os"
+version = "0.1.0"
+description = "Personal life-data warehouse and Claude MCP server"
+requires-python = ">=3.12"
+readme = "README.md"
+
+# All runtime dependencies for every service live here. Each service's
+# Dockerfile installs the same set; image bloat is acceptable for a personal
+# build, and a single lock file keeps versions in sync across services.
+dependencies = [
+    # DB
+    "psycopg[binary,pool]>=3.2",
+    # HTTP / web
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "httpx>=0.27",
+    "tenacity>=9.0",
+    # Models / settings
+    "pydantic>=2.9",
+    "pydantic-settings>=2.5",
+    # Scheduling
+    "apscheduler>=3.10",
+    # Logging
+    "structlog>=24.4",
+    # MCP
+    "mcp>=1.0",
+    # Stats
+    "scipy>=1.14",
+    "numpy>=2.1",
+    # Google
+    "google-api-python-client>=2.140",
+    "google-auth-oauthlib>=1.2",
+    "google-auth>=2.34",
+    # Optional observability (no-op if SENTRY_DSN blank)
+    "sentry-sdk>=2.14",
+    # CLI utility
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+# This project is a monorepo of services run via `python -m <service>` from the
+# repo root. We don't ship a wheel; uv just manages the shared venv.
+[tool.uv]
+package = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+ignore = ["E501"]  # line length handled by formatter
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning"]
+pythonpath = ["."]

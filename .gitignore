@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# uv
+.uv/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Environment
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# Local data / fixtures with secrets
+tests/fixtures/private/
+data/
+*.dump
+*.sql.gz
+
+# Docker
+.docker/

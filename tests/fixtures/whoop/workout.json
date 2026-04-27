@@ -1,0 +1,30 @@
+{
+  "id": "ab1c2d3e-4f5a-6b7c-8d9e-0123456789ab",
+  "user_id": 1001,
+  "created_at": "2025-04-01T17:00:00.000Z",
+  "updated_at": "2025-04-01T17:00:00.000Z",
+  "start": "2025-04-01T16:00:00.000Z",
+  "end": "2025-04-01T16:48:00.000Z",
+  "timezone_offset": "-04:00",
+  "sport_id": 1,
+  "sport_name": "Running",
+  "score_state": "SCORED",
+  "score": {
+    "strain": 13.8,
+    "average_heart_rate": 152,
+    "max_heart_rate": 178,
+    "kilojoule": 2050,
+    "percent_recorded": 100.0,
+    "distance_meter": 8500.0,
+    "altitude_gain_meter": 60.0,
+    "altitude_change_meter": 12.5,
+    "zone_duration": {
+      "zone_zero_milli": 0,
+      "zone_one_milli": 600000,
+      "zone_two_milli": 720000,
+      "zone_three_milli": 1200000,
+      "zone_four_milli": 240000,
+      "zone_five_milli": 120000
+    }
+  }
+}

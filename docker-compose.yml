@@ -1,0 +1,86 @@
+# life-os deployment stack
+#
+# Service images are built per-service from each Dockerfile (see SPEC.md §8).
+# In Phase 1 only `caddy` is meaningful; mcp/scheduler/ingest_* services come
+# online as their build phases land. They're listed here as commented-out
+# stubs so the compose file matches the eventual deployed shape.
+
+services:
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+  # ---- Phase 5: MCP HTTP server -------------------------------------------
+  mcp:
+    image: ghcr.io/santi/life-os-mcp:latest
+    build:
+      context: .
+      dockerfile: mcp_server/Dockerfile
+    env_file: .env
+    expose: ["8080"]
+    restart: unless-stopped
+
+  # ---- Phase 1+: APScheduler --------------------------------------------
+  scheduler:
+    image: ghcr.io/santi/life-os-scheduler:latest
+    build:
+      context: .
+      dockerfile: scheduler/Dockerfile
+    env_file: .env
+    restart: unless-stopped
+
+  # ---- Phase 2 ----
+  # ingest_whoop:
+  #   image: ghcr.io/santi/life-os-ingest-whoop:latest
+  #   build:
+  #     context: .
+  #     dockerfile: ingest_whoop/Dockerfile
+  #   env_file: .env
+  #   profiles: ["manual"]   # only run via `docker compose run --rm ingest_whoop`
+
+  # ---- Phase 3 ----
+  # ingest_calendar:
+  #   image: ghcr.io/santi/life-os-ingest-calendar:latest
+  #   build:
+  #     context: .
+  #     dockerfile: ingest_calendar/Dockerfile
+  #   env_file: .env
+  #   profiles: ["manual"]
+
+  # ---- Phase 6 ----
+  # ingest_cronometer:
+  #   image: ghcr.io/santi/life-os-ingest-cronometer:latest
+  #   build:
+  #     context: .
+  #     dockerfile: ingest_cronometer/Dockerfile
+  #   env_file: .env
+  #   profiles: ["manual"]
+
+  # ---- Phase 7 ----
+  # ingest_copilot:
+  #   image: ghcr.io/santi/life-os-ingest-copilot:latest
+  #   build:
+  #     context: .
+  #     dockerfile: ingest_copilot/Dockerfile
+  #   env_file: .env
+  #   profiles: ["manual"]
+
+  # ---- Phase 4 ----
+  # mart_refresh:
+  #   image: ghcr.io/santi/life-os-mart-refresh:latest
+  #   build:
+  #     context: .
+  #     dockerfile: mart_refresh/Dockerfile
+  #   env_file: .env
+  #   profiles: ["manual"]
+
+volumes:
+  caddy_data:
+  caddy_config:

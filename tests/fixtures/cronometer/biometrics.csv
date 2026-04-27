@@ -1,0 +1,6 @@
+Date,Time,Metric,Amount,Unit,Note
+2025-04-01,07:00,Weight,82.4,kg,
+2025-04-01,07:00,Body Fat %,16.8,%,
+2025-04-01,12:30,Blood Pressure (Systolic),118,mmHg,after lunch
+2025-04-01,12:30,Blood Pressure (Diastolic),76,mmHg,
+2025-04-01,07:00,Resting Heart Rate,55,bpm,
