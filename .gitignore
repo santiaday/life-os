@@ -45,3 +45,5 @@ data/
 
 # Docker
 .docker/
+copilot-money-cli/
+copilot-money-mcp/
