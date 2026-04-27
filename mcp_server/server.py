@@ -177,19 +177,30 @@ def ask_sql(query: str, max_rows: int = 200) -> dict:
 
 
 # ---- FastAPI shell ----------------------------------------------------------
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    configure_logging()
-    log.info("mcp.startup", host=settings.MCP_BIND_HOST, port=settings.MCP_BIND_PORT)
-    yield
-    close_pools()
-    log.info("mcp.shutdown")
+def _make_lifespan(mcp_asgi):
+    """Combined lifespan: ours (logging, DB pool teardown) + FastMCP's session
+    manager (which starts an anyio task group needed by streamable_http)."""
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        configure_logging()
+        log.info("mcp.startup", host=settings.MCP_BIND_HOST, port=settings.MCP_BIND_PORT)
+        # Enter the inner Starlette's lifespan so FastMCP's task group is
+        # initialized before any request hits the streamable-http handler.
+        inner_cm = mcp_asgi.router.lifespan_context(mcp_asgi)
+        async with inner_cm:
+            yield
+        close_pools()
+        log.info("mcp.shutdown")
+
+    return lifespan
 
 
 def build_app() -> FastAPI:
     """Outer FastAPI app. Mounts the MCP streamable-HTTP ASGI app at /mcp and
     exposes /health unauth'd alongside it."""
-    app = FastAPI(title="life-os MCP", lifespan=lifespan)
+    mcp_asgi = _mcp_asgi_app()
+    app = FastAPI(title="life-os MCP", lifespan=_make_lifespan(mcp_asgi))
 
     @app.get("/health", include_in_schema=False)
     def health(_: None = None) -> dict:
@@ -274,9 +285,9 @@ def build_app() -> FastAPI:
         from fastapi.responses import JSONResponse
         return JSONResponse(status_code=404, content={"error": "Not found"})
 
-    # Mount the MCP streamable HTTP ASGI app under /mcp. The exact accessor
-    # name has shifted across SDK versions — try both.
-    mcp_asgi = _mcp_asgi_app()
+    # Mount the MCP streamable HTTP ASGI app under /mcp. mcp_asgi was created
+    # at the top of build_app() so the lifespan can initialize FastMCP's task
+    # group on the same instance.
     app.mount("/mcp", mcp_asgi)
 
     # Phase 9: Whoop webhooks. Self-disables if WHOOP_WEBHOOK_SECRET unset.
