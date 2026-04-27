@@ -74,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     init = sub.add_parser("oauth-init", help="Print authorize URL.")
-    init.add_argument("--state", default="lifeos")
+    init.add_argument("--state", default="lifeos-bootstrap")
     init.set_defaults(func=_cmd_oauth_init)
 
     exch = sub.add_parser("oauth-exchange", help="Exchange code for refresh token.")

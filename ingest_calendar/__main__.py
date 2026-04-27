@@ -46,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     init = sub.add_parser("oauth-init")
-    init.add_argument("--state", default="lifeos")
+    init.add_argument("--state", default="lifeos-bootstrap")
     init.set_defaults(func=_cmd_oauth_init)
 
     exch = sub.add_parser("oauth-exchange")

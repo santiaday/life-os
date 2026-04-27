@@ -40,7 +40,7 @@ def _client_config() -> dict:
     }
 
 
-def authorize_url(state: str = "lifeos") -> str:
+def authorize_url(state: str = "lifeos-bootstrap") -> str:
     """URL to visit for one-time consent. `prompt=consent` ensures Google
     issues a refresh_token (it omits one on subsequent grants otherwise)."""
     flow = Flow.from_client_config(_client_config(), scopes=SCOPES)

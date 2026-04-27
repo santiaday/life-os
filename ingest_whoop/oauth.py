@@ -39,7 +39,7 @@ SCOPES = [
 ]
 
 
-def authorize_url(state: str = "lifeos") -> str:
+def authorize_url(state: str = "lifeos-bootstrap") -> str:
     """The URL Santi visits to approve. State is a CSRF token; for a personal
     one-shot flow it's just a string."""
     if not settings.WHOOP_CLIENT_ID or not settings.WHOOP_REDIRECT_URI:
