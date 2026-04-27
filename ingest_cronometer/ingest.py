@@ -191,6 +191,10 @@ def run_all(*, backfill_days: int | None = None) -> dict:
 def _with_updated(r: dict) -> dict:
     r = dict(r)
     r["updated_at"] = datetime.now(timezone.utc)
+    # Wrap any raw dict fields in Jsonb so psycopg knows to serialize them
+    # as JSONB. Currently only `micros` qualifies.
+    if isinstance(r.get("micros"), dict):
+        r["micros"] = Jsonb(r["micros"])
     return r
 
 
