@@ -57,8 +57,10 @@ def transform_transaction(api: dict) -> dict:
         "merchant": api.get("name"),
         # Copilot has no separate description; userNotes carries any free-text.
         "description": api.get("userNotes"),
-        "category_id": api.get("categoryId"),
-        "account_id": api.get("accountId"),
+        # Copilot returns "" for uncategorized; coerce to NULL so the FK
+        # doesn't trip. Same for accountId out of paranoia.
+        "category_id": _nonempty(api.get("categoryId")),
+        "account_id": _nonempty(api.get("accountId")),
         "is_pending": bool(api.get("isPending")),
         "is_recurring": api.get("recurringId") is not None,
         # Per-transaction "exclude from totals" doesn't appear in the new
@@ -67,6 +69,14 @@ def transform_transaction(api: dict) -> dict:
         "is_excluded": False,
         "notes": api.get("userNotes"),
     }
+
+
+def _nonempty(v: Any) -> Any:
+    """Convert empty string to None; pass through everything else. Used to
+    coerce Copilot's "" sentinel for uncategorized/unassigned FK columns."""
+    if v == "" or v is None:
+        return None
+    return v
 
 
 def _to_date(v: Any) -> date | None:
