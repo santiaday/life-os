@@ -22,7 +22,13 @@ from lifeos_core.db import close_pools, conn
 from lifeos_core.logging import configure_logging, get_logger
 from lifeos_core.settings import settings
 from mcp_server import tools as T
-from mcp_server.auth import PUBLIC_PATHS, require_bearer
+from mcp_server.auth import (
+    MCP_MOUNT,
+    PUBLIC_PATHS,
+    extract_and_validate_token,
+    is_public,
+    require_bearer,
+)
 
 log = get_logger(__name__)
 
@@ -203,23 +209,29 @@ def build_app() -> FastAPI:
         }
         return {"ok": True, "ingest_runs": out}
 
-    # All other paths require Bearer.
+    # Path-secret auth: any request to /mcp/<MCP_API_KEY>[/...] is rewritten to
+    # /mcp[/...] before the inner ASGI app sees it. /health and /webhooks/* are
+    # exempt and pass through untouched.
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
-        try:
-            require_bearer(request)
-        except Exception as e:  # noqa: BLE001
-            from fastapi.responses import JSONResponse
-            from fastapi import HTTPException
-
-            if isinstance(e, HTTPException):
+        path = request.url.path
+        if is_public(path):
+            return await call_next(request)
+        if path.startswith(MCP_MOUNT + "/") or path == MCP_MOUNT:
+            rewritten = extract_and_validate_token(path)
+            if rewritten is None:
+                from fastapi.responses import JSONResponse
                 return JSONResponse(
-                    status_code=e.status_code,
-                    content={"error": e.detail},
-                    headers=e.headers or {},
+                    status_code=401,
+                    content={"error": "Unauthorized — bad or missing path-secret."},
                 )
-            raise
-        return await call_next(request)
+            # Mutate the ASGI scope so the inner app sees the stripped path.
+            request.scope["path"] = rewritten
+            request.scope["raw_path"] = rewritten.encode()
+            return await call_next(request)
+        # Anything outside /mcp, /health, /webhooks: reject.
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=404, content={"error": "Not found"})
 
     # Mount the MCP streamable HTTP ASGI app under /mcp. The exact accessor
     # name has shifted across SDK versions — try both.
