@@ -42,8 +42,16 @@ def _client_config() -> dict:
 
 def authorize_url(state: str = "lifeos-bootstrap") -> str:
     """URL to visit for one-time consent. `prompt=consent` ensures Google
-    issues a refresh_token (it omits one on subsequent grants otherwise)."""
-    flow = Flow.from_client_config(_client_config(), scopes=SCOPES)
+    issues a refresh_token (it omits one on subsequent grants otherwise).
+
+    PKCE is explicitly disabled. We're a confidential client (the server holds
+    GOOGLE_CLIENT_SECRET); PKCE is for public clients that can't keep a secret.
+    Recent google-auth-oauthlib versions auto-enable PKCE which breaks our
+    two-process bootstrap (the verifier from `oauth-init` is gone by the time
+    `oauth-exchange` runs)."""
+    flow = Flow.from_client_config(
+        _client_config(), scopes=SCOPES, autogenerate_code_verifier=False,
+    )
     flow.redirect_uri = settings.GOOGLE_REDIRECT_URI
     url, _ = flow.authorization_url(
         access_type="offline",
@@ -55,7 +63,9 @@ def authorize_url(state: str = "lifeos-bootstrap") -> str:
 
 
 def exchange_code(code: str) -> dict:
-    flow = Flow.from_client_config(_client_config(), scopes=SCOPES)
+    flow = Flow.from_client_config(
+        _client_config(), scopes=SCOPES, autogenerate_code_verifier=False,
+    )
     flow.redirect_uri = settings.GOOGLE_REDIRECT_URI
     flow.fetch_token(code=code)
     creds: Credentials = flow.credentials
