@@ -41,6 +41,11 @@ mcp = FastMCP(
         "question. Prefer mart_daily for daily-grain queries. Use ask_sql "
         "only when no semantic tool fits."
     ),
+    # The streamable-HTTP route lives at the *root* of the inner ASGI app so
+    # FastAPI can mount it at /mcp without requiring the awkward
+    # /mcp/mcp double-prefix.
+    streamable_http_path="/",
+    stateless_http=True,
 )
 
 
@@ -255,10 +260,11 @@ def build_app() -> FastAPI:
                     status_code=401,
                     content={"error": "Unauthorized — bad or missing path-secret."},
                 )
-            # FastMCP mounts at /mcp/ with a trailing slash; bare /mcp without
-            # the slash triggers a 307 → /mcp/ that breaks streaming clients.
-            # Only the bare-mount case needs the slash; sub-paths are correct
-            # as-is.
+            # FastMCP's streamable-http route is at the inner root '/'. After
+            # FastAPI's mount at /mcp strips the prefix, the inner app receives
+            # whatever's after /mcp. So `/mcp` (bare) lands on the inner '/' —
+            # which Starlette treats as "" and sometimes mishandles. Always
+            # ensure the rewritten path ends with a trailing slash.
             if rewritten == MCP_MOUNT:
                 rewritten = MCP_MOUNT + "/"
             request.scope["path"] = rewritten
