@@ -71,16 +71,17 @@ def _migrations() -> list[Path]:
 
 
 def _substitute(sql_text: str, filename: str) -> str:
-    """Replace ${VAR} with os.environ[VAR]. Raise if a referenced var is unset."""
+    """Replace ${VAR} with the value from os.environ or settings (whichever
+    has it). Raise if a referenced var is unset in both."""
     missing: list[str] = []
 
     def repl(m: re.Match) -> str:
         name = m.group(1)
-        val = os.environ.get(name)
+        val = os.environ.get(name) or getattr(settings, name, None)
         if val is None:
             missing.append(name)
             return m.group(0)
-        return val
+        return str(val)
 
     out = PLACEHOLDER.sub(repl, sql_text)
     if missing:
