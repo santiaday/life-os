@@ -209,13 +209,43 @@ def build_app() -> FastAPI:
         }
         return {"ok": True, "ingest_runs": out}
 
-    # Path-secret auth: any request to /mcp/<MCP_API_KEY>[/...] is rewritten to
-    # /mcp[/...] before the inner ASGI app sees it. /health and /webhooks/* are
-    # exempt and pass through untouched.
+    # claude.ai's MCP client probes well-known OAuth metadata before it'll
+    # talk to the server. Return shapes that say "no auth required". Combined
+    # with the path-secret URL, this is enough to satisfy the discovery dance
+    # for a personal connector.
+    @app.get("/.well-known/oauth-protected-resource", include_in_schema=False)
+    @app.get("/.well-known/oauth-protected-resource/{rest:path}", include_in_schema=False)
+    def oauth_protected_resource(rest: str = "") -> dict:
+        from lifeos_core.settings import settings as _s
+        return {
+            "resource": _s.MCP_PUBLIC_BASE_URL or "",
+            "authorization_servers": [],
+            "bearer_methods_supported": [],
+        }
+
+    @app.get("/.well-known/oauth-authorization-server", include_in_schema=False)
+    def oauth_authorization_server() -> dict:
+        from lifeos_core.settings import settings as _s
+        # Minimal RFC 8414 metadata; no real endpoints because there is no real
+        # OAuth server. claude.ai falls back to anonymous when registration 404s.
+        return {
+            "issuer": _s.MCP_PUBLIC_BASE_URL or "",
+            "authorization_endpoint": (_s.MCP_PUBLIC_BASE_URL or "") + "/oauth/authorize",
+            "token_endpoint": (_s.MCP_PUBLIC_BASE_URL or "") + "/oauth/token",
+            "registration_endpoint": (_s.MCP_PUBLIC_BASE_URL or "") + "/register",
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code"],
+            "code_challenge_methods_supported": ["S256"],
+        }
+
+    # Path-secret auth: requests to /mcp/<MCP_API_KEY>[/...] are rewritten to
+    # /mcp/[...] (preserving the trailing slash that FastMCP's mount expects)
+    # before the inner ASGI app sees them. /health, /webhooks/*, and
+    # /.well-known/* are exempt.
     @app.middleware("http")
     async def auth_middleware(request: Request, call_next):
         path = request.url.path
-        if is_public(path):
+        if is_public(path) or path.startswith("/.well-known/"):
             return await call_next(request)
         if path.startswith(MCP_MOUNT + "/") or path == MCP_MOUNT:
             rewritten = extract_and_validate_token(path)
@@ -225,11 +255,16 @@ def build_app() -> FastAPI:
                     status_code=401,
                     content={"error": "Unauthorized — bad or missing path-secret."},
                 )
-            # Mutate the ASGI scope so the inner app sees the stripped path.
+            # FastMCP mounts at /mcp/ with a trailing slash; bare /mcp without
+            # the slash triggers a 307 → /mcp/ that breaks streaming clients.
+            # Only the bare-mount case needs the slash; sub-paths are correct
+            # as-is.
+            if rewritten == MCP_MOUNT:
+                rewritten = MCP_MOUNT + "/"
             request.scope["path"] = rewritten
             request.scope["raw_path"] = rewritten.encode()
             return await call_next(request)
-        # Anything outside /mcp, /health, /webhooks: reject.
+        # Anything outside /mcp, /health, /webhooks, /.well-known: reject.
         from fastapi.responses import JSONResponse
         return JSONResponse(status_code=404, content={"error": "Not found"})
 
@@ -269,6 +304,10 @@ def main() -> int:
         host=settings.MCP_BIND_HOST,
         port=settings.MCP_BIND_PORT,
         log_config=None,  # let structlog handle it
+        # Trust X-Forwarded-Proto/For from Caddy so redirects come back as
+        # https://, not http://.
+        proxy_headers=True,
+        forwarded_allow_ips="*",
     )
     return 0
 
