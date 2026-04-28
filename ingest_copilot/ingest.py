@@ -160,14 +160,10 @@ def run_all(*, backfill_days: int | None = None) -> dict:
     return out
 
 
-def refresh_one_transaction(transaction_id: str) -> dict | None:
-    """Re-fetch a single transaction from Copilot and upsert into the local
-    fact table. Used after a mutation so Claude sees fresh state in the same
-    chat session without waiting for the next 4-hourly cron."""
-    with GraphQLClient() as client:
-        api = client.transaction(transaction_id)
-    if api is None:
-        return None
+def upsert_transaction_from_api(api: dict) -> dict:
+    """Take a Copilot transaction API payload and upsert it into raw + fact.
+    Used after mutations: editTransaction returns the post-mutation shape,
+    so we can update locally without a separate fetch."""
     raw_row = {"transaction_id": api["id"], "payload": Jsonb(api)}
     with tx() as c:
         upsert_rows(
@@ -183,6 +179,19 @@ def refresh_one_transaction(transaction_id: str) -> dict | None:
         fact_row["updated_at"] = datetime.now(timezone.utc)
         upsert_rows("fact_transaction", [fact_row], conflict_cols=["transaction_id"], connection=c)
     return fact_row
+
+
+def refresh_one_transaction(transaction_id: str) -> dict | None:
+    """Backwards-compat shim. Most callers should pass the API payload they
+    already have to `upsert_transaction_from_api()` instead — it avoids a
+    Copilot round-trip whose schema for single-txn-by-id we don't fully
+    know. Returns None — local fact won't refresh without an API source."""
+    log.warning(
+        "copilot.refresh_one_deprecated",
+        transaction_id=transaction_id,
+        hint="Pass the editTransaction response to upsert_transaction_from_api instead.",
+    )
+    return None
 
 
 def _id_map(connection, table: str, key_col: str, keys: list) -> dict:

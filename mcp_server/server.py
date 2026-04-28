@@ -257,24 +257,44 @@ def update_transaction_notes(transaction_id: str, notes: str) -> dict:
 
 
 @mcp.tool(description=(
-    "Apply the same edit to every transaction matching `filter`. Use for "
-    "bulk-categorize / bulk-tag. `filter` is a Copilot TransactionFilter "
-    "dict — common keys: categoryId (use '' for uncategorized), merchantName, "
-    "accountIds, tagIds, startDate, endDate, hidden, isReviewed. Editable: "
-    "category_id, user_notes, is_reviewed, tag_ids, hidden. Local fact rows "
-    "are NOT auto-refreshed; call refresh_data('copilot') after if you need "
-    "fresh local state."
+    "Apply the same edit to many transactions in one call. Filter args "
+    "(combine freely; AND): start_date, end_date, merchant (ILIKE), "
+    "category_id_match (use '' for uncategorized), account_id, has_tag, "
+    "untagged_for_couples, min_amount, max_amount, transaction_ids "
+    "(explicit list — skips other filters). Edit args (apply to every "
+    "match): set_category_id, set_user_notes, set_is_reviewed, "
+    "set_tag_ids, set_hidden. ALWAYS pass dry_run=True FIRST to verify "
+    "the filter caught the right rows before mutating. max_count caps "
+    "matches at 200 by default."
 ))
 def bulk_update_transactions(
-    filter: dict,
-    category_id: str | None = None,
-    user_notes: str | None = None,
-    is_reviewed: bool | None = None,
-    tag_ids: list[str] | None = None,
-    hidden: bool | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    merchant: str | None = None,
+    category_id_match: str | None = None,
+    account_id: str | None = None,
+    has_tag: str | None = None,
+    untagged_for_couples: bool = False,
+    min_amount: float | None = None,
+    max_amount: float | None = None,
+    transaction_ids: list[str] | None = None,
+    set_category_id: str | None = None,
+    set_user_notes: str | None = None,
+    set_is_reviewed: bool | None = None,
+    set_tag_ids: list[str] | None = None,
+    set_hidden: bool | None = None,
+    dry_run: bool = False,
+    max_count: int = 200,
 ) -> dict:
     return W.bulk_update_transactions(
-        filter, category_id, user_notes, is_reviewed, tag_ids, hidden,
+        start_date=start_date, end_date=end_date, merchant=merchant,
+        category_id_match=category_id_match, account_id=account_id,
+        has_tag=has_tag, untagged_for_couples=untagged_for_couples,
+        min_amount=min_amount, max_amount=max_amount,
+        transaction_ids=transaction_ids,
+        set_category_id=set_category_id, set_user_notes=set_user_notes,
+        set_is_reviewed=set_is_reviewed, set_tag_ids=set_tag_ids,
+        set_hidden=set_hidden, dry_run=dry_run, max_count=max_count,
     )
 
 
