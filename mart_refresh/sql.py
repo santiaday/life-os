@@ -46,6 +46,15 @@ INSERT INTO mart_daily (
   breakfast_kcal, lunch_kcal, dinner_kcal, snack_kcal,
   total_spend, food_spend, restaurant_spend, groceries_spend, transportation_spend,
   weight_kg, body_fat_pct,
+  -- Whoop journal habit pivots
+  had_alcohol, alcohol_drinks,
+  had_caffeine, caffeine_servings, caffeine_last_serving_time,
+  late_meal, read_in_bed,
+  device_in_bed, device_in_bed_minutes,
+  morning_sunlight, sexual_activity, stretching, rest_day,
+  took_magnesium, took_vitamin_d, took_creatine, took_l_theanine,
+  joint_pain, headache,
+  journal_notes,
   refreshed_at
 )
 WITH bounds AS (
@@ -155,6 +164,43 @@ workout_agg AS (
     SUM(kilojoules) AS workout_total_kj,
     MAX(strain) AS workout_max_strain
   FROM fact_workout GROUP BY day
+),
+journal_notes_agg AS (
+  -- Whoop's daily notes lives in raw_whoop_journal.payload.journal.notes;
+  -- pull straight from JSONB so we don't have to materialize a column.
+  SELECT day, payload->'journal'->>'notes' AS journal_notes
+  FROM raw_whoop_journal
+),
+habit_pivot AS (
+  -- Pivot the highest-frequency habits to typed columns. Anything not
+  -- pivoted stays in fact_habit_log for ad-hoc queries.
+  --
+  -- The internal_name strings come from Whoop's behavior catalog. Keep this
+  -- list in sync with the column list above and with the README/schema_docs.
+  SELECT
+    day,
+    BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'alcohol')         AS had_alcohol,
+    MAX(magnitude_value)  FILTER (WHERE habit_key = 'alcohol')         AS alcohol_drinks,
+    BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'caffeine')        AS had_caffeine,
+    MAX(magnitude_value)  FILTER (WHERE habit_key = 'caffeine')        AS caffeine_servings,
+    MAX((time_input_value AT TIME ZONE %(tz)s)::time)
+      FILTER (WHERE habit_key = 'caffeine')                            AS caffeine_last_serving_time,
+    BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'late-meal')       AS late_meal,
+    BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'read-in-bed')     AS read_in_bed,
+    BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'device-in-bed')   AS device_in_bed,
+    MAX(magnitude_value)  FILTER (WHERE habit_key = 'device-in-bed')   AS device_in_bed_minutes,
+    BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'morning-sunlight') AS morning_sunlight,
+    BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'sexual-activity') AS sexual_activity,
+    BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'stretching')      AS stretching,
+    BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'rest-day')        AS rest_day,
+    BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'magnesium')       AS took_magnesium,
+    BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'vitamin-d')       AS took_vitamin_d,
+    BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'creatine')        AS took_creatine,
+    BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'l-theanine')      AS took_l_theanine,
+    BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'joint-pain')      AS joint_pain,
+    BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'headache')        AS headache
+  FROM fact_habit_log
+  GROUP BY day
 )
 SELECT
   d.day,
@@ -179,6 +225,14 @@ SELECT
   fa.breakfast_kcal, fa.lunch_kcal, fa.dinner_kcal, fa.snack_kcal,
   sa.total_spend, sa.food_spend, sa.restaurant_spend, sa.groceries_spend, sa.transportation_spend,
   bw.value, bf.value,
+  hp.had_alcohol, hp.alcohol_drinks,
+  hp.had_caffeine, hp.caffeine_servings, hp.caffeine_last_serving_time,
+  hp.late_meal, hp.read_in_bed,
+  hp.device_in_bed, hp.device_in_bed_minutes,
+  hp.morning_sunlight, hp.sexual_activity, hp.stretching, hp.rest_day,
+  hp.took_magnesium, hp.took_vitamin_d, hp.took_creatine, hp.took_l_theanine,
+  hp.joint_pain, hp.headache,
+  jn.journal_notes,
   now()
 FROM days d
 LEFT JOIN recovery_primary r  ON r.day  = d.day
@@ -187,6 +241,8 @@ LEFT JOIN naps             n  ON n.day  = d.day
 LEFT JOIN cycle_primary    c  ON c.day  = d.day
 LEFT JOIN workout_agg     w  ON w.day  = d.day
 LEFT JOIN calendar_agg    ca ON ca.day = d.day
+LEFT JOIN habit_pivot     hp ON hp.day = d.day
+LEFT JOIN journal_notes_agg jn ON jn.day = d.day
 LEFT JOIN fact_food_daily fd ON fd.day = d.day
 LEFT JOIN food_agg        fa ON fa.day = d.day
 LEFT JOIN spend_agg       sa ON sa.day = d.day

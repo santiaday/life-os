@@ -69,6 +69,29 @@ def build() -> BlockingScheduler:
         coalesce=True,
     )
 
+    # ---- Whoop journal (Phase 5.5) -----------------------------------------
+    # Daily 3-day rebackfill catches late edits (Whoop journal entries are
+    # editable for several days after the fact).
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(hour=5, minute=0),
+        args=["ingest_whoop_journal", "ingest"],
+        id="whoop_journal_daily",
+        name="Whoop journal 3-day rebackfill",
+        max_instances=1,
+        coalesce=True,
+    )
+    # Weekly catalog refresh — Whoop occasionally adds new behaviors.
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(day_of_week="sun", hour=5, minute=15),
+        args=["ingest_whoop_journal", "ingest", "--data-type", "catalog"],
+        id="whoop_journal_catalog_weekly",
+        name="Whoop behavior catalog weekly refresh",
+        max_instances=1,
+        coalesce=True,
+    )
+
     # ---- Calendar (Phase 3) ------------------------------------------------
     sched.add_job(
         run_subprocess,

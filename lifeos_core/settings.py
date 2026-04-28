@@ -46,6 +46,14 @@ class Settings(BaseSettings):
     WHOOP_REDIRECT_URI: str | None = None
     WHOOP_WEBHOOK_SECRET: str | None = None
 
+    # ---- Whoop private journal API (Cognito password flow) ------------------
+    WHOOP_PRIVATE_EMAIL: str | None = None
+    WHOOP_PRIVATE_PASSWORD: str | None = None
+    WHOOP_COGNITO_REGION: str = "us-west-2"
+    WHOOP_COGNITO_USER_POOL: str = "us-west-2_rYv1jhSC3"
+    WHOOP_COGNITO_CLIENT_ID: str = "37365lrcda1js3fapqfe2n40eh"
+    WHOOP_IOS_VERSION: str = "5.49.2"
+
     # ---- Google Calendar ---------------------------------------------------
     GOOGLE_CLIENT_ID: str | None = None
     GOOGLE_CLIENT_SECRET: str | None = None

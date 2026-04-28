@@ -35,7 +35,8 @@ RUN pip install --upgrade pip \
       'sentry-sdk>=2.14' \
       'google-api-python-client>=2.140' \
       'google-auth-oauthlib>=1.2' \
-      'google-auth>=2.34'
+      'google-auth>=2.34' \
+      'boto3>=1.35'
 
 # Copy every service package — scheduler invokes them as subprocesses.
 COPY lifeos_core ./lifeos_core
@@ -43,6 +44,7 @@ COPY ingest_whoop ./ingest_whoop
 COPY ingest_calendar ./ingest_calendar
 COPY ingest_cronometer ./ingest_cronometer
 COPY ingest_copilot ./ingest_copilot
+COPY ingest_whoop_journal ./ingest_whoop_journal
 COPY mart_refresh ./mart_refresh
 COPY scheduler ./scheduler
 

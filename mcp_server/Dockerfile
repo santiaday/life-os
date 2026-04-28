@@ -26,7 +26,8 @@ RUN pip install --upgrade pip \
       'apscheduler>=3.10' \
       'google-api-python-client>=2.140' \
       'google-auth-oauthlib>=1.2' \
-      'google-auth>=2.34'
+      'google-auth>=2.34' \
+      'boto3>=1.35'
 
 # MCP server now exposes write/refresh tools that call into every ingester
 # and the mart refresher, so all packages must be present in the image.
@@ -36,6 +37,7 @@ COPY ingest_whoop ./ingest_whoop
 COPY ingest_calendar ./ingest_calendar
 COPY ingest_cronometer ./ingest_cronometer
 COPY ingest_copilot ./ingest_copilot
+COPY ingest_whoop_journal ./ingest_whoop_journal
 COPY mart_refresh ./mart_refresh
 
 EXPOSE 8080

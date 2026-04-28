@@ -19,3 +19,4 @@ google-auth-oauthlib>=1.2
 google-auth>=2.34
 sentry-sdk>=2.14
 click>=8.1
+boto3>=1.35

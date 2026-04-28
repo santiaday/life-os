@@ -59,6 +59,13 @@ SCHEMA_DOCS: dict = {
                 "food_spend, restaurant_spend, groceries_spend, transportation_spend": "Subsets of total_spend by category name match.",
                 "weight_kg": "Most recent weight measurement on this day, from fact_biometric.",
                 "body_fat_pct": "Most recent body-fat % on this day.",
+                "had_alcohol, alcohol_drinks": "From Whoop journal. had_alcohol is the yes/no answer; alcohol_drinks is the magnitude (drinks).",
+                "had_caffeine, caffeine_servings, caffeine_last_serving_time": "From Whoop journal. Last serving time in local tz.",
+                "late_meal, read_in_bed, device_in_bed, device_in_bed_minutes": "Sleep-affecting behaviors from Whoop journal.",
+                "morning_sunlight, sexual_activity, stretching, rest_day": "Wellness behaviors from Whoop journal.",
+                "took_magnesium, took_vitamin_d, took_creatine, took_l_theanine": "Supplement compliance from Whoop journal.",
+                "joint_pain, headache": "Discomfort flags from Whoop journal.",
+                "journal_notes": "Free-text notes from Whoop journal for the day.",
             },
             "common_queries": [
                 "Average recovery for the last 30 days: SELECT AVG(recovery_score) FROM mart_daily WHERE day >= CURRENT_DATE - 30",
@@ -115,6 +122,30 @@ SCHEMA_DOCS: dict = {
                 "strain": "Whoop strain for just this workout.",
                 "zone_zero_min..zone_five_min": "Minutes spent in each Whoop HR zone.",
             },
+        },
+        "fact_habit_log": {
+            "purpose": "One row per (day, Whoop behavior). Sourced from Whoop's mobile journal. Behaviors not pivoted onto mart_daily live here for ad-hoc queries.",
+            "grain": "1 row per (day, whoop_behavior_id).",
+            "columns": {
+                "habit_key": "dim_whoop_behavior.internal_name. Use this string in get_habit_history.",
+                "answered_yes": "Yes/No to the journal prompt. NULL if unanswered.",
+                "magnitude_value, magnitude_unit": "Numeric input for behaviors that ask one (e.g. drinks, mg).",
+                "time_input_value": "UTC timestamp for behaviors that ask 'when?' (e.g. last caffeine).",
+                "user_reviewed": "True if Santi has finalized the entry, False/NULL if still draft.",
+            },
+        },
+        "dim_whoop_behavior": {
+            "purpose": "Whoop's behavior catalog (200+ trackable behaviors). Reference table for what habit_key values mean.",
+            "grain": "1 row per behavior.",
+            "columns": {
+                "internal_name": "Stable string id (e.g. 'alcohol', 'caffeine'). Use as habit_key.",
+                "category": "DAYTIME / NIGHTTIME / YOUR WEEKLY PLAN / ...",
+                "behavior_type": "POSITIVE / NEGATIVE / NORMAL / NOT_ACTIONABLE — Whoop's directionality hint.",
+            },
+        },
+        "fact_food_daily_apple_health": {
+            "purpose": "Daily macros from Apple Health, pulled via Whoop's integrations.tracker_inputs. Use for cross-validation with Cronometer's fact_food_daily, or as a fallback when Cronometer is broken.",
+            "grain": "1 row per day.",
         },
         "fact_food_log": {
             "purpose": "Every individual food item logged in Cronometer with timestamp.",

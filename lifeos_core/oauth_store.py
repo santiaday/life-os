@@ -11,7 +11,7 @@ from typing import Literal
 
 from lifeos_core.db import tx
 
-Service = Literal["whoop", "google", "copilot"]
+Service = Literal["whoop", "google", "copilot", "whoop_private"]
 
 
 def load(service: Service) -> dict | None:

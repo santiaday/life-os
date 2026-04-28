@@ -539,6 +539,115 @@ def _safe(x: float) -> float | None:
     return float(x)
 
 
+# ---- Whoop journal reads ---------------------------------------------------
+def list_behaviors(category: str | None = None, search: str | None = None) -> dict:
+    """List Whoop's behavior catalog. Filter by category (DAYTIME, NIGHTTIME,
+    YOUR WEEKLY PLAN, ...) or substring search on title/internal_name."""
+    where: list[str] = []
+    params: list = []
+    if category:
+        where.append("category ILIKE %s")
+        params.append(category)
+    if search:
+        where.append("(title ILIKE %s OR internal_name ILIKE %s)")
+        params.append(f"%{search}%")
+        params.append(f"%{search}%")
+    where_clause = (" WHERE " + " AND ".join(where)) if where else ""
+    q = f"""
+        SELECT behavior_id, internal_name, title, question_text, category,
+               behavior_type, question_type, magnitude_type, magnitude_unit,
+               magnitude_min, magnitude_max, status
+        FROM dim_whoop_behavior {where_clause}
+        ORDER BY category NULLS LAST, title
+        LIMIT 500
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, params)
+        return _ok("list_behaviors", _serialize(cur.fetchall()))
+
+
+def get_journal_entries(start_date: date, end_date: date, day: date | None = None) -> dict:
+    """Daily journal entries from raw_whoop_journal. If `day` given, returns
+    just that day's full payload. Otherwise returns one row per day in the
+    window with the parsed habit log + free-text notes."""
+    if day is not None:
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                "SELECT day, fetched_at, payload FROM raw_whoop_journal WHERE day = %s",
+                [day],
+            )
+            row = cur.fetchone()
+        if row is None:
+            return _ok("get_journal_entries", [])
+        # Return the parsed habit_log alongside.
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                """
+                SELECT habit_key, answered_yes, magnitude_value, magnitude_unit,
+                       time_input_value, user_reviewed
+                FROM fact_habit_log
+                WHERE day = %s
+                ORDER BY habit_key
+                """,
+                [day],
+            )
+            habits = _serialize(cur.fetchall())
+        out = _serialize([{**dict(row), "habits": habits}])
+        return _ok("get_journal_entries", out)
+
+    # Window summary: per-day habit count + notes.
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+              j.day,
+              j.fetched_at,
+              j.payload->'journal'->>'notes' AS notes,
+              (SELECT COUNT(*) FROM fact_habit_log h WHERE h.day = j.day) AS habit_count,
+              (SELECT COUNT(*) FROM fact_habit_log h WHERE h.day = j.day AND h.answered_yes IS TRUE) AS yes_count
+            FROM raw_whoop_journal j
+            WHERE j.day BETWEEN %s AND %s
+            ORDER BY j.day DESC
+            """,
+            [start_date, end_date],
+        )
+        return _ok("get_journal_entries", _serialize(cur.fetchall()))
+
+
+def get_habit_history(
+    habit_key: str,
+    start_date: date,
+    end_date: date,
+) -> dict:
+    """Time series for a single habit. `habit_key` is dim_whoop_behavior.
+    internal_name (e.g. 'alcohol', 'caffeine', 'late-meal'). Use list_behaviors
+    to discover available keys."""
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT day, answered_yes, magnitude_value, magnitude_unit,
+                   time_input_value, user_reviewed
+            FROM fact_habit_log
+            WHERE habit_key = %s AND day BETWEEN %s AND %s
+            ORDER BY day
+            """,
+            [habit_key, start_date, end_date],
+        )
+        rows = _serialize(cur.fetchall())
+
+    yes_count = sum(1 for r in rows if r.get("answered_yes") is True)
+    return _ok(
+        "get_habit_history",
+        rows,
+        extra={
+            "habit_key": habit_key,
+            "n_days": len(rows),
+            "yes_count": yes_count,
+            "yes_rate": round(yes_count / len(rows), 3) if rows else None,
+        },
+    )
+
+
 # ---- ask_sql ----------------------------------------------------------------
 def ask_sql(query: str, max_rows: int = 200) -> dict:
     try:

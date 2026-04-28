@@ -39,12 +39,15 @@ def refresh_data(source: str = "all") -> dict:
     `source` ∈ {all, whoop, calendar, cronometer, copilot, mart}. Default 'all'
     re-runs every ingester and the mart. Use this at session start to ensure
     you're not analyzing stale data."""
-    valid = {"all", "whoop", "calendar", "cronometer", "copilot", "mart"}
+    valid = {"all", "whoop", "whoop_journal", "calendar", "cronometer", "copilot", "mart"}
     if source not in valid:
         return _err("refresh_data", ValueError(f"source must be one of {sorted(valid)}"))
 
     out: dict[str, Any] = {}
-    targets = ("whoop", "calendar", "cronometer", "copilot") if source == "all" else (source,)
+    targets = (
+        ("whoop", "whoop_journal", "calendar", "cronometer", "copilot")
+        if source == "all" else (source,)
+    )
 
     if source != "mart":
         for name in targets:
@@ -52,6 +55,9 @@ def refresh_data(source: str = "all") -> dict:
                 if name == "whoop":
                     from ingest_whoop import ingest as whoop_ingest
                     out[name] = whoop_ingest.run_all()
+                elif name == "whoop_journal":
+                    from ingest_whoop_journal import ingest as journal_ingest
+                    out[name] = journal_ingest.run_all()
                 elif name == "calendar":
                     from ingest_calendar import ingest as calendar_ingest
                     out[name] = calendar_ingest.run_all()

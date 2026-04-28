@@ -196,6 +196,39 @@ def correlate_metrics(
     return T.correlate_metrics(metric_a, metric_b, start_date, end_date, lag_days, method)
 
 
+@mcp.tool(description=(
+    "List Whoop's behavior catalog (200+ trackable behaviors). Filter by "
+    "category (DAYTIME / NIGHTTIME / YOUR WEEKLY PLAN / ...) or substring "
+    "search across title and internal_name. Use this to discover habit_key "
+    "values for get_habit_history."
+))
+def list_behaviors(category: str | None = None, search: str | None = None) -> dict:
+    return T.list_behaviors(category, search)
+
+
+@mcp.tool(description=(
+    "Daily journal entries from Whoop. Pass `day` for a single day with "
+    "full payload + parsed habit log + notes. Otherwise returns a window "
+    "summary: one row per day with notes + habit counts."
+))
+def get_journal_entries(
+    start_date: date,
+    end_date: date,
+    day: date | None = None,
+) -> dict:
+    return T.get_journal_entries(start_date, end_date, day)
+
+
+@mcp.tool(description=(
+    "Time series of a single Whoop journal habit (e.g. alcohol, caffeine, "
+    "late-meal, magnesium). habit_key is dim_whoop_behavior.internal_name; "
+    "discover values via list_behaviors. Returns rows + summary stats "
+    "(n_days, yes_count, yes_rate)."
+))
+def get_habit_history(habit_key: str, start_date: date, end_date: date) -> dict:
+    return T.get_habit_history(habit_key, start_date, end_date)
+
+
 @mcp.tool(description=T.TOOLS["ask_sql"]["description"])
 def ask_sql(query: str, max_rows: int = 200) -> dict:
     return T.ask_sql(query, max_rows)
