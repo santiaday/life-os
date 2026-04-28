@@ -174,7 +174,8 @@ def list_pending_couple_review(
     limit: int = 50,
 ) -> dict:
     """Transactions in the window that have NONE of the couple tags
-    (me/partner/joint). These are the ones a human still needs to classify.
+    (me/partner/joint). Reads tags from the local fact table — no Copilot
+    round-trip needed (sync runs in background via cron + refresh_data).
 
     If dates are omitted, defaults to last 30 days."""
     from datetime import date as _date, timedelta
@@ -184,50 +185,43 @@ def list_pending_couple_review(
     if end_date is None:
         end_date = _date.today()
 
-    couple_names = {
+    couple_names = [
         settings.COUPLE_TAG_ME.lower(),
         settings.COUPLE_TAG_PARTNER.lower(),
         settings.COUPLE_TAG_JOINT.lower(),
-    }
+    ]
 
-    # We don't store tags locally (they're per-transaction in Copilot only).
-    # Pull untagged-suggesting transactions from local fact, then filter in
-    # Python by hitting Copilot for tags. Cheaper than re-querying the whole
-    # transaction list from Copilot.
     with conn() as c, c.cursor() as cur:
         cur.execute(
             """
             SELECT t.transaction_id, t.date, t.amount, t.merchant, t.notes,
-                   c.name AS category, a.name AS account, t.account_id
+                   c.name AS category, a.name AS account, t.account_id,
+                   t.tags AS current_tags, t.is_pending
             FROM fact_transaction t
             LEFT JOIN dim_category c ON c.category_id = t.category_id
             LEFT JOIN dim_account  a ON a.account_id  = t.account_id
             WHERE t.date BETWEEN %s AND %s
               AND NOT t.is_excluded
+              AND t.amount > 0
+              AND NOT EXISTS (
+                SELECT 1 FROM unnest(t.tags) x WHERE LOWER(x) = ANY(%s)
+              )
             ORDER BY t.date DESC, ABS(t.amount) DESC
             LIMIT %s
             """,
-            [start_date, end_date, max(limit * 4, 200)],
+            [start_date, end_date, couple_names, limit],
         )
-        candidates = cur.fetchall()
+        rows = _serialize(cur.fetchall())
 
-    pending: list[dict] = []
-    with GraphQLClient() as client:
-        for row in candidates:
-            txn = client.transaction(row["transaction_id"])
-            if not txn:
-                continue
-            tag_names = {(t.get("name") or "").lower() for t in (txn.get("tags") or [])}
-            if not (tag_names & couple_names):
-                pending.append({
-                    **_coerce_row(dict(row)),
-                    "current_tags": [t.get("name") for t in (txn.get("tags") or [])],
-                })
-                if len(pending) >= limit:
-                    break
-
-    return _ok("list_pending_couple_review", pending,
-               extra={"start_date": str(start_date), "end_date": str(end_date)})
+    return _ok(
+        "list_pending_couple_review",
+        rows,
+        extra={
+            "start_date": str(start_date),
+            "end_date": str(end_date),
+            "couple_tags_checked": couple_names,
+        },
+    )
 
 
 def set_couple_tag(transaction_id: str, owner: str) -> dict:
@@ -240,14 +234,31 @@ def set_couple_tag(transaction_id: str, owner: str) -> dict:
                     ValueError("owner must be 'me', 'partner', or 'joint'"))
     try:
         couple_ids = _ensure_couple_tag_ids()
-        with GraphQLClient() as client:
-            txn = client.transaction(transaction_id)
+        couple_id_set = set(couple_ids.values())
+
+        # Read current tag_ids from the local fact row first (fast, no API
+        # round-trip). If the row isn't local yet, fall back to fetching
+        # from Copilot.
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                "SELECT tag_ids FROM fact_transaction WHERE transaction_id = %s",
+                [transaction_id],
+            )
+            row = cur.fetchone()
+        if row is not None:
+            current_ids = list(row["tag_ids"] or [])
+        else:
+            with GraphQLClient() as client:
+                txn = client.transaction(transaction_id)
             if txn is None:
                 return _err("set_couple_tag", ValueError("transaction not found"))
             current_ids = [t["id"] for t in (txn.get("tags") or [])]
-            # Drop any existing couple tags, keep the rest, add the new one.
-            other_ids = [i for i in current_ids if i not in set(couple_ids.values())]
-            new_ids = other_ids + [couple_ids[owner]]
+
+        # Drop any existing couple tags, keep the rest, add the new one.
+        other_ids = [i for i in current_ids if i not in couple_id_set]
+        new_ids = other_ids + [couple_ids[owner]]
+
+        with GraphQLClient() as client:
             updated = client.tag_transaction(transaction_id, new_ids)
         local = copilot_ingest.refresh_one_transaction(transaction_id)
     except Exception as e:  # noqa: BLE001
@@ -319,11 +330,12 @@ def compute_couple_balances(
                     ValueError(f"COUPLE_SPLIT_ME ({split_me}) + COUPLE_SPLIT_PARTNER "
                                f"({split_partner}) must sum to 1.0"))
 
-    # Pull transactions in window.
+    # Tags now live in fact_transaction.tags (TEXT[]) so this is a single SQL
+    # roundtrip — no per-row Copilot fetches needed.
     with conn() as c, c.cursor() as cur:
         cur.execute(
             """
-            SELECT transaction_id, date, amount, merchant, account_id
+            SELECT transaction_id, date, amount, merchant, account_id, tags
             FROM fact_transaction
             WHERE date BETWEEN %s AND %s
               AND NOT is_excluded
@@ -334,66 +346,61 @@ def compute_couple_balances(
         )
         txns = cur.fetchall()
 
-    # Need tags per transaction. Pull from Copilot.
     me_owes_partner = 0.0  # positive means me owes partner
     by_account: dict[str, dict] = {}
     unmapped_count = 0
     skipped_no_tag = 0
     breakdown: list[dict] = []
 
-    with GraphQLClient() as client:
-        for t in txns:
-            txn = client.transaction(t["transaction_id"])
-            if not txn:
-                continue
-            tag_names = [(x.get("name") or "").lower() for x in (txn.get("tags") or [])]
-            role = next((couple_names[n] for n in tag_names if n in couple_names), None)
-            if role is None:
-                skipped_no_tag += 1
-                continue
+    for t in txns:
+        tag_names = [(x or "").lower() for x in (t.get("tags") or [])]
+        role = next((couple_names[n] for n in tag_names if n in couple_names), None)
+        if role is None:
+            skipped_no_tag += 1
+            continue
 
-            payer = ownership.get(t["account_id"])
-            if payer is None:
-                unmapped_count += 1
-                continue
+        payer = ownership.get(t["account_id"])
+        if payer is None:
+            unmapped_count += 1
+            continue
 
-            amount = float(t["amount"])
-            if role == "joint":
-                # Half (or per-config share) owed by the non-payer.
-                if payer == "me":
-                    delta = amount * split_partner    # partner owes me
-                    me_owes_partner -= delta
-                elif payer == "partner":
-                    delta = amount * split_me        # me owes partner
-                    me_owes_partner += delta
-                else:  # joint account paid for joint expense — already shared
-                    delta = 0.0
-                breakdown.append({
-                    "transaction_id": t["transaction_id"],
-                    "date": str(t["date"]),
-                    "merchant": t["merchant"],
-                    "amount": amount,
-                    "tag": "joint",
-                    "payer": payer,
-                    "delta_me_owes_partner": round(delta if payer == "partner" else -delta, 2),
-                })
-            elif role == "me" and payer == "partner":
-                me_owes_partner += amount
-                breakdown.append({**_brkdown(t, role, payer), "delta_me_owes_partner": amount})
-            elif role == "partner" and payer == "me":
-                me_owes_partner -= amount
-                breakdown.append({**_brkdown(t, role, payer), "delta_me_owes_partner": -amount})
-            elif include_personal:
-                breakdown.append({**_brkdown(t, role, payer), "delta_me_owes_partner": 0.0})
+        amount = float(t["amount"])
+        if role == "joint":
+            # Configured share owed by the non-payer.
+            if payer == "me":
+                delta = amount * split_partner   # partner owes me
+                me_owes_partner -= delta
+            elif payer == "partner":
+                delta = amount * split_me        # me owes partner
+                me_owes_partner += delta
+            else:  # joint account paid for joint expense — already shared
+                delta = 0.0
+            breakdown.append({
+                "transaction_id": t["transaction_id"],
+                "date": str(t["date"]),
+                "merchant": t["merchant"],
+                "amount": amount,
+                "tag": "joint",
+                "payer": payer,
+                "delta_me_owes_partner": round(delta if payer == "partner" else -delta, 2),
+            })
+        elif role == "me" and payer == "partner":
+            me_owes_partner += amount
+            breakdown.append({**_brkdown(t, role, payer), "delta_me_owes_partner": amount})
+        elif role == "partner" and payer == "me":
+            me_owes_partner -= amount
+            breakdown.append({**_brkdown(t, role, payer), "delta_me_owes_partner": -amount})
+        elif include_personal:
+            breakdown.append({**_brkdown(t, role, payer), "delta_me_owes_partner": 0.0})
 
-            acc_key = t["account_id"]
-            by_account.setdefault(acc_key, {"account_id": acc_key, "joint_total": 0.0,
-                                            "personal_total": 0.0, "txn_count": 0})
-            by_account[acc_key]["txn_count"] += 1
-            if role == "joint":
-                by_account[acc_key]["joint_total"] += amount
-            else:
-                by_account[acc_key]["personal_total"] += amount
+        acc_key = t["account_id"]
+        by_account.setdefault(acc_key, {"account_id": acc_key, "joint_total": 0.0,
+                                        "personal_total": 0.0, "txn_count": 0})
+        by_account[acc_key]["txn_count"] += 1
+        if role == "joint":
+            by_account[acc_key]["joint_total"] += amount
+        else:
+            by_account[acc_key]["personal_total"] += amount
 
     # Pretty bottom line.
     if me_owes_partner > 0.005:

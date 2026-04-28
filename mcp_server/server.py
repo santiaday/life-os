@@ -164,8 +164,15 @@ def get_transactions(
     category: str | None = None,
     merchant: str | None = None,
     min_amount: float | None = None,
+    tag: str | None = None,
+    has_no_tags: bool = False,
+    untagged_for_couples: bool = False,
 ) -> dict:
-    return T.get_transactions(start_date, end_date, category, merchant, min_amount)
+    return T.get_transactions(
+        start_date, end_date, category, merchant, min_amount,
+        tag=tag, has_no_tags=has_no_tags,
+        untagged_for_couples=untagged_for_couples,
+    )
 
 
 @mcp.tool(description=T.TOOLS["get_biometrics"]["description"])

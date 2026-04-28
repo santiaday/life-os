@@ -46,28 +46,30 @@ def transform_category(api: dict) -> dict:
 
 def transform_transaction(api: dict) -> dict:
     """Map Copilot Transaction → fact_transaction row."""
+    tags = api.get("tags") or []
     return {
         "transaction_id": api["id"],
         "date": _to_date(api.get("date")),
         "posted_ts": _to_dt(api.get("createdAt")),
         "amount": float(api["amount"]),
         "currency": (api.get("isoCurrencyCode") or "USD").upper(),
-        # `name` is the merchant string in Copilot's schema (the field is
-        # called name, not merchant — they renamed at some point).
         "merchant": api.get("name"),
-        # Copilot has no separate description; userNotes carries any free-text.
         "description": api.get("userNotes"),
-        # Copilot returns "" for uncategorized; coerce to NULL so the FK
-        # doesn't trip. Same for accountId out of paranoia.
         "category_id": _nonempty(api.get("categoryId")),
         "account_id": _nonempty(api.get("accountId")),
         "is_pending": bool(api.get("isPending")),
         "is_recurring": api.get("recurringId") is not None,
-        # Per-transaction "exclude from totals" doesn't appear in the new
-        # schema (categories carry isExcluded instead). Mart layer joins
-        # through dim_category.is_hidden if you want category-level exclude.
+        # Per-transaction "exclude from totals" isn't in the new Copilot
+        # schema; categories carry isExcluded instead.
         "is_excluded": False,
         "notes": api.get("userNotes"),
+        # 0007 metadata (Copilot per-transaction extras).
+        "tags": [t.get("name") for t in tags if t.get("name")],
+        "tag_ids": [t.get("id") for t in tags if t.get("id")],
+        "is_reviewed": bool(api.get("isReviewed")),
+        "tip_amount": float(api["tipAmount"]) if api.get("tipAmount") is not None else None,
+        "parent_id": _nonempty(api.get("parentId")),
+        "copilot_type": api.get("type"),
     }
 
 

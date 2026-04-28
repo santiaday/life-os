@@ -367,7 +367,15 @@ def get_transactions(
     category: str | None = None,
     merchant: str | None = None,
     min_amount: float | None = None,
+    tag: str | None = None,
+    has_no_tags: bool = False,
+    untagged_for_couples: bool = False,
 ) -> dict:
+    """`tag`: ILIKE-match against any element of fact_transaction.tags.
+    `has_no_tags`: only return transactions with empty tag list.
+    `untagged_for_couples`: only return transactions that lack any of the
+        configured couple tags (me/partner/joint). Cheaper than calling
+        list_pending_couple_review when you just want a flat list."""
     where = ["t.date BETWEEN %s AND %s"]
     params: list = [start_date, end_date]
     if category:
@@ -379,10 +387,29 @@ def get_transactions(
     if min_amount is not None:
         where.append("ABS(t.amount) >= %s")
         params.append(min_amount)
+    if tag:
+        # ILIKE-against-array: unnest, match, exists. Cheaper to just lower-cmp.
+        where.append("EXISTS (SELECT 1 FROM unnest(t.tags) x WHERE x ILIKE %s)")
+        params.append(f"%{tag}%")
+    if has_no_tags:
+        where.append("(t.tags IS NULL OR cardinality(t.tags) = 0)")
+    if untagged_for_couples:
+        from lifeos_core.settings import settings as _s
+        couple_names = [
+            _s.COUPLE_TAG_ME.lower(),
+            _s.COUPLE_TAG_PARTNER.lower(),
+            _s.COUPLE_TAG_JOINT.lower(),
+        ]
+        where.append(
+            "NOT EXISTS (SELECT 1 FROM unnest(t.tags) x WHERE LOWER(x) = ANY(%s))"
+        )
+        params.append(couple_names)
     q = f"""
         SELECT t.transaction_id, t.date, t.amount, t.merchant, t.description,
-               c.name AS category, t.is_pending, t.is_recurring, t.is_excluded, t.notes,
-               a.name AS account
+               c.name AS category, c.category_id, t.is_pending, t.is_recurring,
+               t.is_excluded, t.is_reviewed, t.notes, t.tip_amount, t.parent_id,
+               t.copilot_type, t.tags, t.tag_ids,
+               a.name AS account, t.account_id
         FROM fact_transaction t
         LEFT JOIN dim_category c ON c.category_id = t.category_id
         LEFT JOIN dim_account  a ON a.account_id  = t.account_id
@@ -682,7 +709,7 @@ TOOLS: dict[str, dict] = {
     },
     "get_transactions": {
         "fn": get_transactions,
-        "description": "Individual transactions. Filterable by category, merchant, min absolute amount.",
+        "description": "Individual transactions. Filterable by category, merchant, min absolute amount, tag (ILIKE), or untagged-for-couples flag. Returns full Copilot metadata: tags, tag_ids, is_reviewed, tip_amount, parent_id, copilot_type.",
         "input": {
             "type": "object",
             "required": ["start_date", "end_date"],
@@ -692,6 +719,9 @@ TOOLS: dict[str, dict] = {
                 "category": {"type": "string"},
                 "merchant": {"type": "string"},
                 "min_amount": {"type": "number"},
+                "tag": {"type": "string"},
+                "has_no_tags": {"type": "boolean", "default": False},
+                "untagged_for_couples": {"type": "boolean", "default": False},
             },
         },
     },

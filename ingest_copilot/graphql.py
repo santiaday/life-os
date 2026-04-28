@@ -67,6 +67,7 @@ query Transactions($first: Int, $after: String, $filter: TransactionFilter, $sor
         userNotes
         itemId
         createdAt
+        tags { id name colorName __typename }
         __typename
       }
       __typename
