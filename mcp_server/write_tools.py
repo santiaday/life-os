@@ -78,30 +78,178 @@ def refresh_data(source: str = "all") -> dict:
 
 
 # ---- generic Copilot writes -------------------------------------------------
-def update_transaction_category(transaction_id: str, category_id: str) -> dict:
-    """Reassign a transaction's category. Pass empty string to uncategorize."""
+def _lookup_transaction_locator(transaction_id: str) -> tuple[str | None, str | None]:
+    """Fetch (item_id, account_id) for a transaction from the local fact
+    table. Returns (None, None) if not found locally."""
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT item_id, account_id FROM fact_transaction WHERE transaction_id = %s",
+            [transaction_id],
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None, None
+    return row.get("item_id"), row.get("account_id")
+
+
+def update_transaction(
+    transaction_id: str,
+    category_id: str | None = None,
+    user_notes: str | None = None,
+    name: str | None = None,
+    amount: float | None = None,
+    date: str | None = None,
+    tip_amount: float | None = None,
+    is_reviewed: bool | None = None,
+    copilot_type: str | None = None,
+    hidden: bool | None = None,
+    tag_ids: list[str] | None = None,
+) -> dict:
+    """Universal Copilot transaction edit. Pass any combination of the
+    optional fields; None means "leave unchanged". To clear a string field
+    pass empty string. After mutation, the local fact row is re-fetched so
+    subsequent reads see fresh state.
+
+    For tag mutations: `tag_ids` REPLACES the tag set. To add or remove
+    individual tags, fetch current tag_ids via get_transactions and merge.
+    For couples-tag workflow use set_couple_tag instead — it handles the
+    me/partner/joint tag preservation logic.
+
+    For recurring stream linking use add_to_recurring / exclude_from_recurring.
+    """
+    item_id, account_id = _lookup_transaction_locator(transaction_id)
+    if not item_id or not account_id:
+        # Fall back to fetching from Copilot if the transaction isn't local
+        # yet (e.g. a brand-new one not in our last sync).
+        try:
+            with GraphQLClient() as client:
+                txn = client.transaction(transaction_id)
+            if txn is None:
+                return _err("update_transaction", ValueError(
+                    f"Transaction {transaction_id} not found in Copilot or local DB"))
+            item_id = item_id or txn.get("itemId")
+            account_id = account_id or txn.get("accountId")
+        except Exception as e:  # noqa: BLE001
+            return _err("update_transaction", e)
+    if not item_id or not account_id:
+        return _err("update_transaction", ValueError(
+            f"Missing itemId/accountId for {transaction_id}; cannot edit"))
+
     try:
         with GraphQLClient() as client:
-            updated = client.update_transaction(transaction_id, category_id=category_id)
+            updated = client.edit_transaction(
+                transaction_id=transaction_id,
+                item_id=item_id,
+                account_id=account_id,
+                category_id=category_id,
+                user_notes=user_notes,
+                name=name,
+                amount=amount,
+                date=date,
+                tip_amount=tip_amount,
+                is_reviewed=is_reviewed,
+                type=copilot_type,
+                hidden=hidden,
+                tag_ids=tag_ids,
+            )
         local = copilot_ingest.refresh_one_transaction(transaction_id)
     except Exception as e:  # noqa: BLE001
-        return _err("update_transaction_category", e)
+        return _err("update_transaction", e)
     return _ok(
-        "update_transaction_category",
+        "update_transaction",
         [{"copilot_response": updated, "local_after_refresh": _coerce_row(local)}],
     )
 
 
+def update_transaction_category(transaction_id: str, category_id: str) -> dict:
+    """Convenience wrapper around update_transaction. Reassign a transaction's
+    category. Pass empty string to uncategorize."""
+    return update_transaction(transaction_id, category_id=category_id)
+
+
 def update_transaction_notes(transaction_id: str, notes: str) -> dict:
-    """Set the userNotes on a transaction. Pass '' to clear."""
+    """Convenience wrapper around update_transaction. Set userNotes; pass ''
+    to clear."""
+    return update_transaction(transaction_id, user_notes=notes)
+
+
+def bulk_update_transactions(
+    filter: dict,
+    category_id: str | None = None,
+    user_notes: str | None = None,
+    is_reviewed: bool | None = None,
+    tag_ids: list[str] | None = None,
+    hidden: bool | None = None,
+) -> dict:
+    """Apply the same edit to every transaction matching `filter`. Use this
+    for bulk-categorize / bulk-tag operations.
+
+    `filter` is a Copilot TransactionFilter dict. Common fields (best-effort
+    based on schema introspection):
+      - categoryId: str (e.g. "" to match uncategorized)
+      - merchantName: str
+      - accountIds: [str]
+      - tagIds: [str]
+      - startDate, endDate: str
+      - hidden: bool
+      - isReviewed: bool
+
+    Returns {updated: [...], failed: [{...}]} from Copilot. Local fact rows
+    are NOT auto-refreshed (could be 100s of rows); call refresh_data after
+    or wait for the next 4-hourly cron."""
+    input_obj: dict = {}
+    if category_id is not None: input_obj["categoryId"] = category_id
+    if user_notes is not None: input_obj["userNotes"] = user_notes
+    if is_reviewed is not None: input_obj["isReviewed"] = is_reviewed
+    if tag_ids is not None: input_obj["tagIds"] = tag_ids
+    if hidden is not None: input_obj["hidden"] = hidden
+    if not input_obj:
+        return _err("bulk_update_transactions",
+                    ValueError("at least one field to change is required"))
     try:
         with GraphQLClient() as client:
-            updated = client.update_transaction(transaction_id, user_notes=notes)
+            result = client.bulk_edit_transactions(filter=filter, input=input_obj)
+    except Exception as e:  # noqa: BLE001
+        return _err("bulk_update_transactions", e)
+    return _ok(
+        "bulk_update_transactions",
+        result.get("updated") or [],
+        extra={
+            "updated_count": len(result.get("updated") or []),
+            "failed": result.get("failed") or [],
+            "failed_count": len(result.get("failed") or []),
+            "note": "Local fact rows not auto-refreshed. Call refresh_data('copilot') if you need fresh local state.",
+        },
+    )
+
+
+def add_transaction_to_recurring(transaction_id: str, recurring_id: str) -> dict:
+    """Link a transaction to an existing recurring stream by its id. To find
+    recurring stream ids, query Copilot directly via ask_sql against
+    fact_transaction.recurring_id (column shows what stream a txn already
+    belongs to) — we don't currently expose a Recurring CRUD tool."""
+    try:
+        with GraphQLClient() as client:
+            updated = client.add_transaction_to_recurring(transaction_id, recurring_id)
         local = copilot_ingest.refresh_one_transaction(transaction_id)
     except Exception as e:  # noqa: BLE001
-        return _err("update_transaction_notes", e)
+        return _err("add_transaction_to_recurring", e)
     return _ok(
-        "update_transaction_notes",
+        "add_transaction_to_recurring",
+        [{"copilot_response": updated, "local_after_refresh": _coerce_row(local)}],
+    )
+
+
+def exclude_transaction_from_recurring(transaction_id: str) -> dict:
+    """Detach a transaction from its recurring stream."""
+    try:
+        with GraphQLClient() as client:
+            updated = client.exclude_transaction_from_recurring(transaction_id)
+        local = copilot_ingest.refresh_one_transaction(transaction_id)
+    except Exception as e:  # noqa: BLE001
+        return _err("exclude_transaction_from_recurring", e)
+    return _ok(
+        "exclude_transaction_from_recurring",
         [{"copilot_response": updated, "local_after_refresh": _coerce_row(local)}],
     )
 
@@ -130,18 +278,9 @@ def create_tag(name: str, color_name: str | None = None) -> dict:
 
 def tag_transaction(transaction_id: str, tag_ids: list[str]) -> dict:
     """REPLACE the transaction's tag set with the given IDs. To add or remove
-    a single tag, fetch current tags first via get_transactions/get_transaction
-    and merge client-side."""
-    try:
-        with GraphQLClient() as client:
-            updated = client.tag_transaction(transaction_id, tag_ids)
-        local = copilot_ingest.refresh_one_transaction(transaction_id)
-    except Exception as e:  # noqa: BLE001
-        return _err("tag_transaction", e)
-    return _ok(
-        "tag_transaction",
-        [{"copilot_response": updated, "local_after_refresh": _coerce_row(local)}],
-    )
+    a single tag, fetch current tags first via get_transactions and merge.
+    Routes through the universal editTransaction mutation."""
+    return update_transaction(transaction_id, tag_ids=tag_ids)
 
 
 # ---- couples-split workflow -------------------------------------------------
@@ -257,16 +396,22 @@ def set_couple_tag(transaction_id: str, owner: str) -> dict:
         # Drop any existing couple tags, keep the rest, add the new one.
         other_ids = [i for i in current_ids if i not in couple_id_set]
         new_ids = other_ids + [couple_ids[owner]]
-
-        with GraphQLClient() as client:
-            updated = client.tag_transaction(transaction_id, new_ids)
-        local = copilot_ingest.refresh_one_transaction(transaction_id)
     except Exception as e:  # noqa: BLE001
         return _err("set_couple_tag", e)
-    return _ok("set_couple_tag",
-               [{"owner": owner, "tag_ids": new_ids,
-                 "copilot_response": updated,
-                 "local_after_refresh": _coerce_row(local)}])
+
+    # Route through the universal edit so we hit the verified mutation path.
+    result = update_transaction(transaction_id, tag_ids=new_ids)
+    if not result.get("ok"):
+        return result
+    rows = result.get("rows") or []
+    return _ok(
+        "set_couple_tag",
+        [{
+            "owner": owner,
+            "tag_ids": new_ids,
+            **(rows[0] if rows else {}),
+        }],
+    )
 
 
 def list_account_owners() -> dict:

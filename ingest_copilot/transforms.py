@@ -70,6 +70,9 @@ def transform_transaction(api: dict) -> dict:
         "tip_amount": float(api["tipAmount"]) if api.get("tipAmount") is not None else None,
         "parent_id": _nonempty(api.get("parentId")),
         "copilot_type": api.get("type"),
+        # 0008: itemId is required by the editTransaction mutation alongside
+        # accountId + id. Persist it so writes don't need a fetch first.
+        "item_id": _nonempty(api.get("itemId")),
     }
 
 

@@ -169,8 +169,27 @@ SCHEMA_DOCS: dict = {
             "1) `get_transactions(start_date, end_date)` filtered to where "
             "category is NULL or 'Uncategorized'. "
             "2) Propose a category for each based on merchant. "
-            "3) For each: `update_transaction_category(transaction_id, category_id)`. "
-            "Get category_id via the `dim_category` table (use `ask_sql` to list)."
+            "3) For each: `update_transaction_category(transaction_id, category_id)` "
+            "OR for many at once with same category: `bulk_update_transactions("
+            "filter={merchantName: 'Netflix'}, category_id='cat_xyz')`. "
+            "Get category_id via the `dim_category` table (use `ask_sql` or "
+            "the get_transactions output which includes category_id)."
+        ),
+        "edit_anything": (
+            "Any single-field or multi-field edit to a transaction: "
+            "`update_transaction(transaction_id, ...)`. Available fields: "
+            "category_id, user_notes, name (merchant rename), amount, date "
+            "(YYYY-MM-DD), tip_amount, is_reviewed, copilot_type, hidden, "
+            "tag_ids. Pass only what you want to change. Local DB is "
+            "re-fetched after."
+        ),
+        "fix_recurring": (
+            "Copilot mis-categorized a one-off as recurring (or vice versa). "
+            "1) `get_transactions(...)` to find the txn and its recurring_id. "
+            "2) `exclude_transaction_from_recurring(transaction_id)` to detach. "
+            "3) Or `add_transaction_to_recurring(transaction_id, recurring_id)` "
+            "to attach to a known stream. To find recurring stream ids of "
+            "existing streams, look at recurring_id values in get_transactions output."
         ),
         "tag_a_trip": (
             "User asks to tag trip expenses: "

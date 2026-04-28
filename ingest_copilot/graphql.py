@@ -139,10 +139,44 @@ query TransactionById($id: ID!) {
 """.strip()
 
 # ---- mutations -------------------------------------------------------------
-M_UPDATE_TRANSACTION = """
-mutation UpdateTransaction($id: ID!, $input: UpdateTransactionInput!) {
-  updateTransaction(id: $id, input: $input) {
-    transaction { id categoryId userNotes name __typename }
+# Copilot's edit endpoint takes the (itemId, accountId, id) locator triple.
+# All editable fields go in the EditTransactionInput object. Field set
+# confirmed against the OSS clients: categoryId, userNotes, tagIds,
+# isReviewed, plus likely accepted-but-less-tested: amount, date, name,
+# type, hidden, splits, tipAmount.
+M_EDIT_TRANSACTION = """
+mutation EditTransaction(
+  $itemId: ID!, $accountId: ID!, $id: ID!, $input: EditTransactionInput
+) {
+  editTransaction(itemId: $itemId, accountId: $accountId, id: $id, input: $input) {
+    transaction {
+      id amount date name type accountId categoryId recurringId parentId
+      isPending isReviewed isoCurrencyCode tipAmount userNotes itemId createdAt
+      tags { id name colorName __typename }
+      __typename
+    }
+  }
+}
+""".strip()
+
+# Bulk variant — accepts a TransactionFilter and an input dict applied to
+# every match. Useful for "categorize every uncategorized Netflix charge as
+# Subscriptions" style operations.
+M_BULK_EDIT_TRANSACTIONS = """
+mutation BulkEditTransactions($input: BulkEditTransactionInput!, $filter: TransactionFilter) {
+  bulkEditTransactions(filter: $filter, input: $input) {
+    updated {
+      id amount date name categoryId userNotes isReviewed tipAmount
+      tags { id name __typename }
+      __typename
+    }
+    failed {
+      transaction { id name __typename }
+      error
+      errorCode
+      __typename
+    }
+    __typename
   }
 }
 """.strip()
@@ -159,6 +193,27 @@ M_CREATE_TAG = """
 mutation CreateTag($name: String!, $colorName: String) {
   createTag(name: $name, colorName: $colorName) {
     tag { id name colorName __typename }
+  }
+}
+""".strip()
+
+# Recurring stream linking. AddTransactionToRecurring attaches the txn to a
+# specific recurring stream (by its id); ExcludeTransactionFromRecurring
+# detaches it. To create a brand-new recurring stream we'd need a separate
+# CreateRecurring mutation — out of scope for now; user can do that in
+# Copilot's UI.
+M_ADD_TO_RECURRING = """
+mutation AddTransactionToRecurring($transactionId: ID!, $recurringId: ID!) {
+  addTransactionToRecurring(transactionId: $transactionId, recurringId: $recurringId) {
+    transaction { id recurringId __typename }
+  }
+}
+""".strip()
+
+M_EXCLUDE_FROM_RECURRING = """
+mutation ExcludeTransactionFromRecurring($transactionId: ID!) {
+  excludeTransactionFromRecurring(transactionId: $transactionId) {
+    transaction { id recurringId __typename }
   }
 }
 """.strip()
@@ -309,30 +364,61 @@ class GraphQLClient:
         return data.get("transaction")
 
     # ---- mutations -----------------------------------------------------
-    def update_transaction(
+    def edit_transaction(
         self,
-        transaction_id: str,
         *,
+        transaction_id: str,
+        item_id: str,
+        account_id: str,
         category_id: str | None = None,
         user_notes: str | None = None,
         name: str | None = None,
+        amount: float | None = None,
+        date: str | None = None,
+        tip_amount: float | None = None,
+        is_reviewed: bool | None = None,
+        type: str | None = None,
+        hidden: bool | None = None,
+        tag_ids: list[str] | None = None,
     ) -> dict:
-        """Apply any combination of {categoryId, userNotes, name} updates.
-        Pass None to leave a field unchanged. To clear userNotes, pass "" ."""
+        """Universal edit. Pass only the fields you want to change; None means
+        leave alone. To clear a string, pass "" .
+
+        itemId + accountId are required by Copilot's mutation locator triple.
+        write_tools.update_transaction looks them up from the local fact
+        table so MCP callers don't need to know about them."""
         input_obj: dict = {}
-        if category_id is not None:
-            input_obj["categoryId"] = category_id
-        if user_notes is not None:
-            input_obj["userNotes"] = user_notes
-        if name is not None:
-            input_obj["name"] = name
+        for k, v in (
+            ("categoryId", category_id),
+            ("userNotes", user_notes),
+            ("name", name),
+            ("amount", amount),
+            ("date", date),
+            ("tipAmount", tip_amount),
+            ("isReviewed", is_reviewed),
+            ("type", type),
+            ("hidden", hidden),
+            ("tagIds", tag_ids),
+        ):
+            if v is not None:
+                input_obj[k] = v
         if not input_obj:
-            raise ValueError("update_transaction needs at least one field to change")
-        data = self._post(M_UPDATE_TRANSACTION, {"id": transaction_id, "input": input_obj})
-        return (data.get("updateTransaction") or {}).get("transaction") or {}
+            raise ValueError("edit_transaction needs at least one field to change")
+        data = self._post(
+            M_EDIT_TRANSACTION,
+            {"itemId": item_id, "accountId": account_id, "id": transaction_id, "input": input_obj},
+        )
+        return (data.get("editTransaction") or {}).get("transaction") or {}
+
+    def bulk_edit_transactions(self, *, filter: dict, input: dict) -> dict:
+        """Apply `input` to every transaction matching `filter`. Returns
+        {updated: [...], failed: [{transaction, error, errorCode}]}."""
+        data = self._post(M_BULK_EDIT_TRANSACTIONS, {"filter": filter, "input": input})
+        return data.get("bulkEditTransactions") or {}
 
     def tag_transaction(self, transaction_id: str, tag_ids: list[str]) -> dict:
-        """Replace the transaction's tags with the given set."""
+        """Replace the transaction's tags with the given set. (For batch
+        edits use edit_transaction with tagIds.)"""
         data = self._post(M_TAG_TRANSACTION,
                           {"transactionId": transaction_id, "tagIds": tag_ids})
         return (data.get("tagTransaction") or {}).get("transaction") or {}
@@ -340,6 +426,17 @@ class GraphQLClient:
     def create_tag(self, name: str, color_name: str | None = None) -> dict:
         data = self._post(M_CREATE_TAG, {"name": name, "colorName": color_name})
         return (data.get("createTag") or {}).get("tag") or {}
+
+    def add_transaction_to_recurring(self, transaction_id: str, recurring_id: str) -> dict:
+        data = self._post(
+            M_ADD_TO_RECURRING,
+            {"transactionId": transaction_id, "recurringId": recurring_id},
+        )
+        return (data.get("addTransactionToRecurring") or {}).get("transaction") or {}
+
+    def exclude_transaction_from_recurring(self, transaction_id: str) -> dict:
+        data = self._post(M_EXCLUDE_FROM_RECURRING, {"transactionId": transaction_id})
+        return (data.get("excludeTransactionFromRecurring") or {}).get("transaction") or {}
 
 
 def schema_version() -> str:

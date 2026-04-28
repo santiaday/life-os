@@ -214,19 +214,85 @@ def refresh_data(source: str = "all") -> dict:
 
 
 @mcp.tool(description=(
-    "Reassign a Copilot transaction's category. Pass empty string for "
-    "category_id to uncategorize. After mutation, the local fact table is "
-    "re-fetched so subsequent reads in this session see the new value."
+    "Universal Copilot transaction edit. Pass any combination of fields; "
+    "None means leave unchanged, '' clears a string field. Available fields: "
+    "category_id, user_notes, name, amount, date (YYYY-MM-DD), tip_amount, "
+    "is_reviewed, copilot_type, hidden, tag_ids (REPLACES tag set). "
+    "For couples-tag flow use set_couple_tag instead. For recurring stream "
+    "linking use add_to_recurring / exclude_from_recurring. Local fact row "
+    "is re-fetched after mutation so reads see fresh state."
+))
+def update_transaction(
+    transaction_id: str,
+    category_id: str | None = None,
+    user_notes: str | None = None,
+    name: str | None = None,
+    amount: float | None = None,
+    date: str | None = None,
+    tip_amount: float | None = None,
+    is_reviewed: bool | None = None,
+    copilot_type: str | None = None,
+    hidden: bool | None = None,
+    tag_ids: list[str] | None = None,
+) -> dict:
+    return W.update_transaction(
+        transaction_id, category_id, user_notes, name, amount, date,
+        tip_amount, is_reviewed, copilot_type, hidden, tag_ids,
+    )
+
+
+@mcp.tool(description=(
+    "Convenience wrapper around update_transaction. Reassign category. Pass "
+    "empty string to uncategorize."
 ))
 def update_transaction_category(transaction_id: str, category_id: str) -> dict:
     return W.update_transaction_category(transaction_id, category_id)
 
 
 @mcp.tool(description=(
-    "Set userNotes on a Copilot transaction. Pass empty string to clear."
+    "Convenience wrapper around update_transaction. Set userNotes; '' clears."
 ))
 def update_transaction_notes(transaction_id: str, notes: str) -> dict:
     return W.update_transaction_notes(transaction_id, notes)
+
+
+@mcp.tool(description=(
+    "Apply the same edit to every transaction matching `filter`. Use for "
+    "bulk-categorize / bulk-tag. `filter` is a Copilot TransactionFilter "
+    "dict — common keys: categoryId (use '' for uncategorized), merchantName, "
+    "accountIds, tagIds, startDate, endDate, hidden, isReviewed. Editable: "
+    "category_id, user_notes, is_reviewed, tag_ids, hidden. Local fact rows "
+    "are NOT auto-refreshed; call refresh_data('copilot') after if you need "
+    "fresh local state."
+))
+def bulk_update_transactions(
+    filter: dict,
+    category_id: str | None = None,
+    user_notes: str | None = None,
+    is_reviewed: bool | None = None,
+    tag_ids: list[str] | None = None,
+    hidden: bool | None = None,
+) -> dict:
+    return W.bulk_update_transactions(
+        filter, category_id, user_notes, is_reviewed, tag_ids, hidden,
+    )
+
+
+@mcp.tool(description=(
+    "Link a transaction to an existing recurring stream. Find recurring_id "
+    "via get_transactions (each txn carries its recurring_id) or ask_sql "
+    "against fact_transaction.recurring_id."
+))
+def add_transaction_to_recurring(transaction_id: str, recurring_id: str) -> dict:
+    return W.add_transaction_to_recurring(transaction_id, recurring_id)
+
+
+@mcp.tool(description=(
+    "Detach a transaction from its recurring stream (e.g. one-off charge "
+    "that Copilot incorrectly bucketed into your Netflix recurring)."
+))
+def exclude_transaction_from_recurring(transaction_id: str) -> dict:
+    return W.exclude_transaction_from_recurring(transaction_id)
 
 
 @mcp.tool(description=(
