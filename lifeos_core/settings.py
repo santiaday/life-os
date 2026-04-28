@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     WHOOP_COGNITO_REGION: str = "us-west-2"
     WHOOP_COGNITO_USER_POOL: str = "us-west-2_rYv1jhSC3"
     WHOOP_COGNITO_CLIENT_ID: str = "37365lrcda1js3fapqfe2n40eh"
+    # Optional. If Cognito demands SECRET_HASH on refresh-token flow you'll
+    # need to extract this from the Whoop iOS app binary. Most users won't
+    # need it — REFRESH_TOKEN_AUTH typically works without.
+    WHOOP_COGNITO_CLIENT_SECRET: str | None = None
     WHOOP_IOS_VERSION: str = "5.49.2"
 
     # ---- Google Calendar ---------------------------------------------------
