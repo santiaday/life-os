@@ -120,6 +120,48 @@ query Accounts {
 }
 """.strip()
 
+Q_TAGS = """
+query Tags {
+  tags { id name colorName __typename }
+}
+""".strip()
+
+Q_TRANSACTION_BY_ID = """
+query TransactionById($id: ID!) {
+  transaction(id: $id) {
+    id amount date name type accountId categoryId recurringId parentId
+    isPending isReviewed isoCurrencyCode tipAmount userNotes itemId createdAt
+    tags { id name colorName __typename }
+    __typename
+  }
+}
+""".strip()
+
+# ---- mutations -------------------------------------------------------------
+M_UPDATE_TRANSACTION = """
+mutation UpdateTransaction($id: ID!, $input: UpdateTransactionInput!) {
+  updateTransaction(id: $id, input: $input) {
+    transaction { id categoryId userNotes name __typename }
+  }
+}
+""".strip()
+
+M_TAG_TRANSACTION = """
+mutation TagTransaction($transactionId: ID!, $tagIds: [ID!]!) {
+  tagTransaction(transactionId: $transactionId, tagIds: $tagIds) {
+    transaction { id tags { id name __typename } __typename }
+  }
+}
+""".strip()
+
+M_CREATE_TAG = """
+mutation CreateTag($name: String!, $colorName: String) {
+  createTag(name: $name, colorName: $colorName) {
+    tag { id name colorName __typename }
+  }
+}
+""".strip()
+
 
 class GraphQLClient:
     def __init__(self) -> None:
@@ -253,6 +295,50 @@ class GraphQLClient:
         if rows is None:
             raise SchemaDriftError("accounts field missing from response")
         return rows
+
+    def tags(self) -> list[dict]:
+        data = self._post(Q_TAGS)
+        rows = data.get("tags")
+        if rows is None:
+            raise SchemaDriftError("tags field missing from response")
+        return rows
+
+    def transaction(self, transaction_id: str) -> dict | None:
+        data = self._post(Q_TRANSACTION_BY_ID, {"id": transaction_id})
+        return data.get("transaction")
+
+    # ---- mutations -----------------------------------------------------
+    def update_transaction(
+        self,
+        transaction_id: str,
+        *,
+        category_id: str | None = None,
+        user_notes: str | None = None,
+        name: str | None = None,
+    ) -> dict:
+        """Apply any combination of {categoryId, userNotes, name} updates.
+        Pass None to leave a field unchanged. To clear userNotes, pass "" ."""
+        input_obj: dict = {}
+        if category_id is not None:
+            input_obj["categoryId"] = category_id
+        if user_notes is not None:
+            input_obj["userNotes"] = user_notes
+        if name is not None:
+            input_obj["name"] = name
+        if not input_obj:
+            raise ValueError("update_transaction needs at least one field to change")
+        data = self._post(M_UPDATE_TRANSACTION, {"id": transaction_id, "input": input_obj})
+        return (data.get("updateTransaction") or {}).get("transaction") or {}
+
+    def tag_transaction(self, transaction_id: str, tag_ids: list[str]) -> dict:
+        """Replace the transaction's tags with the given set."""
+        data = self._post(M_TAG_TRANSACTION,
+                          {"transactionId": transaction_id, "tagIds": tag_ids})
+        return (data.get("tagTransaction") or {}).get("transaction") or {}
+
+    def create_tag(self, name: str, color_name: str | None = None) -> dict:
+        data = self._post(M_CREATE_TAG, {"name": name, "colorName": color_name})
+        return (data.get("createTag") or {}).get("tag") or {}
 
 
 def schema_version() -> str:

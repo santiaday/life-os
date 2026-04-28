@@ -149,6 +149,46 @@ SCHEMA_DOCS: dict = {
         "null_means_missing": "NULL values mean the source had no data, not zero. Never treat NULL as 0 unless the question explicitly calls for that imputation.",
         "preferred_table_for_daily_grain": "Always start with mart_daily for any daily-grain question. fact_* tables are for per-event detail.",
     },
+    "session_prelude": (
+        "If the user asks about RECENT data (today, this week, latest, "
+        "current balance, etc.) call `refresh_data(source='all')` BEFORE "
+        "anything else. The cron only runs every few hours, so without a "
+        "refresh you may be analyzing stale data. For purely historical "
+        "questions (e.g. 'how was my recovery in March?') you can skip the "
+        "refresh — historical data doesn't change."
+    ),
+    "write_workflows": {
+        "auto_categorize": (
+            "User asks to categorize uncategorized transactions: "
+            "1) `get_transactions(start_date, end_date)` filtered to where "
+            "category is NULL or 'Uncategorized'. "
+            "2) Propose a category for each based on merchant. "
+            "3) For each: `update_transaction_category(transaction_id, category_id)`. "
+            "Get category_id via the `dim_category` table (use `ask_sql` to list)."
+        ),
+        "tag_a_trip": (
+            "User asks to tag trip expenses: "
+            "1) `list_tags()` to find or `create_tag(name)` if missing. "
+            "2) `get_transactions` for the date range. "
+            "3) For each matching transaction: `tag_transaction(transaction_id, "
+            "[trip_tag_id, ...other_tag_ids])` — REPLACES the tag set, so "
+            "include any tags you want to keep."
+        ),
+        "couples_split": (
+            "User shares finances with partner. Three tags carry meaning: "
+            "'me' / 'paulina' / 'joint' (configurable). Workflow: "
+            "1) `refresh_data('copilot')` to ensure fresh transactions. "
+            "2) `list_pending_couple_review(start, end)` — transactions in "
+            "window with no couple tag. "
+            "3) For each: ask the user 'me / paulina / joint?' then call "
+            "`set_couple_tag(transaction_id, owner)`. "
+            "4) When done (or anytime): `compute_couple_balances(start, end)` "
+            "returns 'X owes Y $N' plus per-transaction breakdown. "
+            "If `list_account_owners()` shows accounts as 'unassigned', tell "
+            "the user to set COUPLE_ACCOUNTS_ME / _PARTNER / _JOINT in .env "
+            "(comma-separated account_ids) so the balance math knows who paid."
+        ),
+    },
 }
 
 

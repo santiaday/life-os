@@ -160,6 +160,31 @@ def run_all(*, backfill_days: int | None = None) -> dict:
     return out
 
 
+def refresh_one_transaction(transaction_id: str) -> dict | None:
+    """Re-fetch a single transaction from Copilot and upsert into the local
+    fact table. Used after a mutation so Claude sees fresh state in the same
+    chat session without waiting for the next 4-hourly cron."""
+    with GraphQLClient() as client:
+        api = client.transaction(transaction_id)
+    if api is None:
+        return None
+    raw_row = {"transaction_id": api["id"], "payload": Jsonb(api)}
+    with tx() as c:
+        upsert_rows(
+            "raw_copilot_transaction",
+            [raw_row],
+            conflict_cols=["transaction_id"],
+            update_cols=["payload", "fetched_at"],
+            connection=c,
+        )
+        id_map = _id_map(c, "raw_copilot_transaction", "transaction_id", [api["id"]])
+        fact_row = transforms.transform_transaction(api)
+        fact_row["raw_id"] = id_map.get(api["id"])
+        fact_row["updated_at"] = datetime.now(timezone.utc)
+        upsert_rows("fact_transaction", [fact_row], conflict_cols=["transaction_id"], connection=c)
+    return fact_row
+
+
 def _id_map(connection, table: str, key_col: str, keys: list) -> dict:
     if not keys:
         return {}

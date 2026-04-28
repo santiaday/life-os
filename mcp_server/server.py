@@ -23,6 +23,7 @@ from lifeos_core.db import close_pools, conn
 from lifeos_core.logging import configure_logging, get_logger
 from lifeos_core.settings import settings
 from mcp_server import tools as T
+from mcp_server import write_tools as W
 from mcp_server.auth import (
     MCP_MOUNT,
     PUBLIC_PATHS,
@@ -191,6 +192,107 @@ def correlate_metrics(
 @mcp.tool(description=T.TOOLS["ask_sql"]["description"])
 def ask_sql(query: str, max_rows: int = 200) -> dict:
     return T.ask_sql(query, max_rows)
+
+
+# ---- write / refresh tools ------------------------------------------------
+@mcp.tool(description=(
+    "Pull fresh data from one or all sources, then rebuild the mart. Call "
+    "this at the START of a chat session if the user is asking about recent "
+    "data so analysis isn't on stale numbers. Default source='all' refreshes "
+    "Whoop, Calendar, Cronometer, Copilot, then mart. Pass a single source "
+    "name (whoop|calendar|cronometer|copilot|mart) to scope it."
+))
+def refresh_data(source: str = "all") -> dict:
+    return W.refresh_data(source)
+
+
+@mcp.tool(description=(
+    "Reassign a Copilot transaction's category. Pass empty string for "
+    "category_id to uncategorize. After mutation, the local fact table is "
+    "re-fetched so subsequent reads in this session see the new value."
+))
+def update_transaction_category(transaction_id: str, category_id: str) -> dict:
+    return W.update_transaction_category(transaction_id, category_id)
+
+
+@mcp.tool(description=(
+    "Set userNotes on a Copilot transaction. Pass empty string to clear."
+))
+def update_transaction_notes(transaction_id: str, notes: str) -> dict:
+    return W.update_transaction_notes(transaction_id, notes)
+
+
+@mcp.tool(description=(
+    "All tags currently defined in Copilot. Call before create_tag to avoid "
+    "duplicates and before tag_transaction so you know the IDs."
+))
+def list_tags() -> dict:
+    return W.list_tags()
+
+
+@mcp.tool(description=(
+    "Create a new Copilot tag. color_name accepts: red, orange, yellow, "
+    "green, blue, purple, pink, gray (Copilot validates server-side)."
+))
+def create_tag(name: str, color_name: str | None = None) -> dict:
+    return W.create_tag(name, color_name)
+
+
+@mcp.tool(description=(
+    "REPLACE a transaction's tag set with the given IDs. To add or remove a "
+    "single tag, fetch its current tags first (via get_transactions) and "
+    "merge client-side. For couples-split tagging use set_couple_tag instead."
+))
+def tag_transaction(transaction_id: str, tag_ids: list[str]) -> dict:
+    return W.tag_transaction(transaction_id, tag_ids)
+
+
+# ---- couples-split workflow ----------------------------------------------
+@mcp.tool(description=(
+    "Transactions in [start_date, end_date] that have NONE of the couple "
+    "tags (me/partner/joint). Defaults to last 30 days if dates omitted. "
+    "Use this to build the queue for the categorization conversation."
+))
+def list_pending_couple_review(
+    start_date: date | None = None,
+    end_date: date | None = None,
+    limit: int = 50,
+) -> dict:
+    return W.list_pending_couple_review(start_date, end_date, limit)
+
+
+@mcp.tool(description=(
+    "Tag a transaction as 'me' | 'partner' | 'joint'. Replaces any existing "
+    "couple tag but preserves other tags (trip tags, etc.). Auto-creates the "
+    "couple tags in Copilot on first use."
+))
+def set_couple_tag(transaction_id: str, owner: str) -> dict:
+    return W.set_couple_tag(transaction_id, owner)
+
+
+@mcp.tool(description=(
+    "Show every Copilot account with its configured couple-owner mapping "
+    "(me|partner|joint|unassigned). Edit COUPLE_ACCOUNTS_* in .env to assign "
+    "ownership; without it, compute_couple_balances skips those transactions."
+))
+def list_account_owners() -> dict:
+    return W.list_account_owners()
+
+
+@mcp.tool(description=(
+    "Compute who owes whom for the period using couple tags + account "
+    "ownership. For each tagged transaction: identifies the payer from the "
+    "account, applies the configured split (default 50/50) for joint expenses "
+    "or full amount for cross-paid personal expenses. Returns net 'me owes "
+    "partner' figure plus per-transaction breakdown. Skips transactions whose "
+    "account isn't in the COUPLE_ACCOUNTS_* mapping (count surfaced)."
+))
+def compute_couple_balances(
+    start_date: date,
+    end_date: date,
+    include_personal: bool = False,
+) -> dict:
+    return W.compute_couple_balances(start_date, end_date, include_personal)
 
 
 # ---- FastAPI shell ----------------------------------------------------------

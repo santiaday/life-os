@@ -71,6 +71,21 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     SENTRY_DSN: str | None = None
 
+    # ---- Couples-split workflow ---------------------------------------------
+    # Tag names used to mark who owns a transaction. Case-insensitive on read.
+    COUPLE_TAG_ME: str = "me"
+    COUPLE_TAG_PARTNER: str = "paulina"
+    COUPLE_TAG_JOINT: str = "joint"
+    # Joint expense split. Should sum to 1.0.
+    COUPLE_SPLIT_ME: float = 0.5
+    COUPLE_SPLIT_PARTNER: float = 0.5
+    # Comma-separated lists of dim_account.account_id values mapping each
+    # account to its primary owner. Used to derive who paid for what.
+    # Account ids not listed here are treated as "unknown owner".
+    COUPLE_ACCOUNTS_ME: str = ""
+    COUPLE_ACCOUNTS_PARTNER: str = ""
+    COUPLE_ACCOUNTS_JOINT: str = ""
+
     # ---- Convenience -------------------------------------------------------
     @property
     def calendar_ids(self) -> list[str]:
@@ -81,6 +96,21 @@ class Settings(BaseSettings):
         return [
             d.strip().lower() for d in self.INTERNAL_EMAIL_DOMAINS.split(",") if d.strip()
         ]
+
+    def couple_account_ownership(self) -> dict[str, str]:
+        """Return {account_id: 'me'|'partner'|'joint'} from the COUPLE_ACCOUNTS_*
+        env vars. Used to derive who paid for what."""
+        out: dict[str, str] = {}
+        for owner, raw in (
+            ("me", self.COUPLE_ACCOUNTS_ME),
+            ("partner", self.COUPLE_ACCOUNTS_PARTNER),
+            ("joint", self.COUPLE_ACCOUNTS_JOINT),
+        ):
+            for aid in raw.split(","):
+                aid = aid.strip()
+                if aid:
+                    out[aid] = owner
+        return out
 
 
 @lru_cache(maxsize=1)
