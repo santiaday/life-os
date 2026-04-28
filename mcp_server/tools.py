@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import math
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from typing import Any
 
 from psycopg import sql
@@ -27,7 +27,10 @@ from mcp_server.sql_safety import UnsafeQueryError, ensure_limit, validate
 log = get_logger(__name__)
 
 ASK_SQL_DEFAULT_LIMIT = 200
-ASK_SQL_TIMEOUT_MS = 5_000
+ASK_SQL_TIMEOUT_MS = 15_000  # raised from 5s — analytical queries on full
+                             # mart_daily history regularly need ~6-10s, and
+                             # the 5s ceiling is what tripped the pool in the
+                             # transcripts.
 
 # Allowlist of mart_daily columns that may be passed to correlate_metrics.
 # Updated alongside any schema change.
@@ -45,6 +48,8 @@ CORRELATE_ALLOWLIST = {
     "meal_count", "eating_window_hours",
     "breakfast_kcal", "lunch_kcal", "dinner_kcal", "snack_kcal",
     "total_spend", "food_spend", "restaurant_spend", "groceries_spend", "transportation_spend",
+    "alcohol_spend", "bars_spend", "entertainment_spend", "shopping_spend", "travel_spend",
+    "dining_out_txn_count", "dining_out_txn_max",
     "weight_kg", "body_fat_pct",
 }
 
@@ -314,7 +319,15 @@ def get_calendar_events(
 
 
 # ---- get_spending -----------------------------------------------------------
-GROUP_BY_OPTIONS = {"day", "week", "month", "category", "merchant"}
+GROUP_BY_OPTIONS = {"day", "week", "month", "category", "merchant", "account"}
+
+
+def _escape_like(s: str) -> str:
+    """Escape ILIKE special chars (%, _, \\) so a substring match treats them
+    literally. Used everywhere we accept user-supplied substrings — without
+    this, a category named 'Bars & Nightlife' or anything containing _ silently
+    matched the wrong thing."""
+    return s.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
 
 
 def get_spending(
@@ -322,37 +335,67 @@ def get_spending(
     end_date: date,
     category: str | None = None,
     group_by: str = "day",
+    account_id: str | None = None,
+    account: str | None = None,
+    exact_category: bool = False,
+    merchant: str | None = None,
 ) -> dict:
+    """Aggregated spending with rich filtering.
+
+    `category`     ILIKE substring (escapes %, _) unless `exact_category=True`.
+    `account_id`   Exact dim_account.account_id.
+    `account`      ILIKE substring against dim_account.name (e.g. 'Amazon Card').
+    `merchant`     ILIKE substring against fact_transaction.merchant.
+    `group_by`     day | week | month | category | merchant | account.
+    """
     if group_by not in GROUP_BY_OPTIONS:
         return _err("get_spending", ValueError(f"group_by must be one of {sorted(GROUP_BY_OPTIONS)}"))
 
     where = ["t.date BETWEEN %s AND %s", "NOT t.is_excluded", "t.amount > 0"]
     params: list = [start_date, end_date]
     if category:
-        where.append("c.name ILIKE %s")
-        params.append(f"%{category}%")
+        if exact_category:
+            where.append("c.name = %s")
+            params.append(category)
+        else:
+            where.append(r"c.name ILIKE %s ESCAPE '\'")
+            params.append(f"%{_escape_like(category)}%")
+    if account_id:
+        where.append("t.account_id = %s")
+        params.append(account_id)
+    if account:
+        where.append(r"a.name ILIKE %s ESCAPE '\'")
+        params.append(f"%{_escape_like(account)}%")
+    if merchant:
+        where.append(r"t.merchant ILIKE %s ESCAPE '\'")
+        params.append(f"%{_escape_like(merchant)}%")
 
     where_clause = " AND ".join(where)
     if group_by == "day":
-        bucket = "t.date"
+        bucket_select, bucket_alias = "t.date", "bucket"
     elif group_by == "week":
-        bucket = "date_trunc('week', t.date)::date"
+        bucket_select, bucket_alias = "date_trunc('week', t.date)::date", "bucket"
     elif group_by == "month":
-        bucket = "date_trunc('month', t.date)::date"
+        bucket_select, bucket_alias = "date_trunc('month', t.date)::date", "bucket"
     elif group_by == "category":
-        bucket = "c.name"
-    else:  # merchant
-        bucket = "t.merchant"
+        bucket_select, bucket_alias = "COALESCE(c.name, 'Uncategorized')", "bucket"
+    elif group_by == "merchant":
+        bucket_select, bucket_alias = "t.merchant", "bucket"
+    else:  # account
+        bucket_select, bucket_alias = "COALESCE(a.name, t.account_id, 'unknown')", "bucket"
+
+    order_by = "total DESC" if group_by in ("category", "merchant", "account") else "bucket"
 
     q = f"""
-        SELECT {bucket} AS bucket,
+        SELECT {bucket_select} AS {bucket_alias},
                SUM(t.amount) AS total,
                COUNT(*)      AS txn_count
         FROM fact_transaction t
         LEFT JOIN dim_category c ON c.category_id = t.category_id
+        LEFT JOIN dim_account  a ON a.account_id  = t.account_id
         WHERE {where_clause}
-        GROUP BY bucket
-        ORDER BY {('total DESC' if group_by in ('category', 'merchant') else 'bucket')}
+        GROUP BY {bucket_alias}
+        ORDER BY {order_by}
         LIMIT 500
     """
     with conn() as c, c.cursor() as cur:
@@ -367,30 +410,72 @@ def get_transactions(
     category: str | None = None,
     merchant: str | None = None,
     min_amount: float | None = None,
+    max_amount: float | None = None,
     tag: str | None = None,
     has_no_tags: bool = False,
     untagged_for_couples: bool = False,
+    account_id: str | None = None,
+    account: str | None = None,
+    account_ids: list[str] | None = None,
+    exclude_excluded: bool = True,
+    only_charges: bool = False,
+    exact_category: bool = False,
+    limit: int = 500,
 ) -> dict:
-    """`tag`: ILIKE-match against any element of fact_transaction.tags.
-    `has_no_tags`: only return transactions with empty tag list.
-    `untagged_for_couples`: only return transactions that lack any of the
-        configured couple tags (me/partner/joint). Cheaper than calling
-        list_pending_couple_review when you just want a flat list."""
+    """Individual transactions with rich filters.
+
+    Filters (combine freely; AND semantics):
+        category               ILIKE substring (auto-escapes %, _) unless
+                               exact_category=True.
+        merchant               ILIKE substring (auto-escapes %, _).
+        min_amount/max_amount  Compared against ABS(amount).
+        tag                    ILIKE against any element of tags[].
+        has_no_tags            Only rows with empty tag list.
+        untagged_for_couples   Only rows missing me/partner/joint tags.
+        account_id             Exact match.
+        account                ILIKE against dim_account.name.
+        account_ids            List of account_ids (any match).
+        exclude_excluded       Drop rows with is_excluded=true (default true).
+        only_charges           Drop refunds/income; keep amount > 0.
+        limit                  1..1000.
+    """
+    if limit < 1 or limit > 1000:
+        return _err("get_transactions", ValueError("limit must be between 1 and 1000"))
+
     where = ["t.date BETWEEN %s AND %s"]
     params: list = [start_date, end_date]
+    if exclude_excluded:
+        where.append("NOT t.is_excluded")
+    if only_charges:
+        where.append("t.amount > 0")
     if category:
-        where.append("c.name ILIKE %s")
-        params.append(f"%{category}%")
+        if exact_category:
+            where.append("c.name = %s")
+            params.append(category)
+        else:
+            where.append(r"c.name ILIKE %s ESCAPE '\'")
+            params.append(f"%{_escape_like(category)}%")
     if merchant:
-        where.append("t.merchant ILIKE %s")
-        params.append(f"%{merchant}%")
+        where.append(r"t.merchant ILIKE %s ESCAPE '\'")
+        params.append(f"%{_escape_like(merchant)}%")
     if min_amount is not None:
         where.append("ABS(t.amount) >= %s")
         params.append(min_amount)
+    if max_amount is not None:
+        where.append("ABS(t.amount) <= %s")
+        params.append(max_amount)
+    if account_id:
+        where.append("t.account_id = %s")
+        params.append(account_id)
+    if account_ids:
+        where.append("t.account_id = ANY(%s)")
+        params.append(list(account_ids))
+    if account:
+        where.append(r"a.name ILIKE %s ESCAPE '\'")
+        params.append(f"%{_escape_like(account)}%")
     if tag:
-        # ILIKE-against-array: unnest, match, exists. Cheaper to just lower-cmp.
-        where.append("EXISTS (SELECT 1 FROM unnest(t.tags) x WHERE x ILIKE %s)")
-        params.append(f"%{tag}%")
+        where.append(r"EXISTS (SELECT 1 FROM unnest(t.tags) x WHERE x ILIKE %s ESCAPE '\')")
+        params.append(f"%{_escape_like(tag)}%")
     if has_no_tags:
         where.append("(t.tags IS NULL OR cardinality(t.tags) = 0)")
     if untagged_for_couples:
@@ -415,11 +500,20 @@ def get_transactions(
         LEFT JOIN dim_account  a ON a.account_id  = t.account_id
         WHERE {" AND ".join(where)}
         ORDER BY t.date DESC, t.amount DESC
-        LIMIT 500
+        LIMIT %s
     """
+    params.append(limit + 1)
     with conn() as c, c.cursor() as cur:
         cur.execute(q, params)
-        return _ok("get_transactions", _serialize(cur.fetchall()))
+        rows = _serialize(cur.fetchall())
+    truncated = len(rows) > limit
+    if truncated:
+        rows = rows[:limit]
+    warnings = (
+        [f"More than {limit} matches; truncated. Narrow the filter or raise limit."]
+        if truncated else []
+    )
+    return _ok("get_transactions", rows, truncated=truncated, warnings=warnings)
 
 
 # ---- get_biometrics ---------------------------------------------------------
@@ -466,7 +560,20 @@ def correlate_metrics(
     end_date: date,
     lag_days: int = 0,
     method: str = "pearson",
+    lag_range: list[int] | None = None,
+    return_series: bool = True,
 ) -> dict:
+    """Correlate two mart_daily metrics over a range.
+
+    `lag_range`     Optional [min, max] inclusive. If passed, runs the
+                    correlation at each integer lag in that range (capped
+                    at 21 lags to stay under typical token budgets) and
+                    returns them in `lags`. Useful for finding the
+                    strongest predictive lag in one call.
+    `return_series` Set to false to skip the row-level paired data — handy
+                    for sweep mode where the agent only needs aggregate
+                    stats per lag.
+    """
     if metric_a not in CORRELATE_ALLOWLIST or metric_b not in CORRELATE_ALLOWLIST:
         bad = [m for m in (metric_a, metric_b) if m not in CORRELATE_ALLOWLIST]
         return _err("correlate_metrics", ValueError(f"Not in allowlist: {bad}"))
@@ -475,62 +582,102 @@ def correlate_metrics(
 
     a = sql.Identifier(metric_a)
     b = sql.Identifier(metric_b)
-    # Self-join with day offset for lag analysis. lag_days > 0 means
-    # "metric_a today vs metric_b N days later".
-    q = sql.SQL(
-        """
-        SELECT m1.day AS day,
-               m1.{a} AS a,
-               m2.{b} AS b
-        FROM mart_daily m1
-        JOIN mart_daily m2 ON m2.day = m1.day + %s::int
-        WHERE m1.day BETWEEN %s AND %s
-          AND m1.{a} IS NOT NULL
-          AND m2.{b} IS NOT NULL
-        ORDER BY m1.day
-        """
-    ).format(a=a, b=b)
-    with conn() as c, c.cursor() as cur:
-        cur.execute(q, [lag_days, start_date, end_date])
-        rows = cur.fetchall()
-
-    n = len(rows)
-    if n < 3:
-        return _ok(
-            "correlate_metrics",
-            _serialize(rows),
-            warnings=["Fewer than 3 paired observations; correlation undefined."],
-            extra={"n": n, "pearson_r": None, "p_value": None, "spearman_r": None,
-                   "lag_days": lag_days},
-        )
-
-    a_vals = [float(r["a"]) for r in rows]
-    b_vals = [float(r["b"]) for r in rows]
 
     try:
         from scipy import stats  # local import keeps test imports light
-
-        p_r, p_p = stats.pearsonr(a_vals, b_vals)
-        s_r, s_p = stats.spearmanr(a_vals, b_vals)
-        primary_p = float(p_p if method == "pearson" else s_p)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.exception("correlate_metrics.scipy_failed")
         return _err("correlate_metrics", e)
 
-    extra = {
-        "n": n,
-        "pearson_r": _safe(p_r),
-        "p_value": _safe(primary_p),
-        "spearman_r": _safe(s_r),
-        "lag_days": lag_days,
-        "metric_a": metric_a,
-        "metric_b": metric_b,
-        "method": method,
-    }
-    # Returning the underlying paired series (capped) lets Claude reason
-    # about shape, outliers, regime shifts, not just point estimates.
-    capped = _serialize(rows[:366])
-    return _ok("correlate_metrics", capped, truncated=len(rows) > 366, extra=extra)
+    def _run(lag: int) -> tuple[list[dict], dict]:
+        q = sql.SQL(
+            """
+            SELECT m1.day AS day,
+                   m1.{a} AS a,
+                   m2.{b} AS b
+            FROM mart_daily m1
+            JOIN mart_daily m2 ON m2.day = m1.day + %s::int
+            WHERE m1.day BETWEEN %s AND %s
+              AND m1.{a} IS NOT NULL
+              AND m2.{b} IS NOT NULL
+            ORDER BY m1.day
+            """
+        ).format(a=a, b=b)
+        with conn() as c, c.cursor() as cur:
+            cur.execute(q, [lag, start_date, end_date])
+            rows = cur.fetchall()
+        n = len(rows)
+        if n < 3:
+            return rows, {"n": n, "pearson_r": None, "p_value": None,
+                          "spearman_r": None, "lag_days": lag}
+        a_vals = [float(r["a"]) for r in rows]
+        b_vals = [float(r["b"]) for r in rows]
+        p_r, p_p = stats.pearsonr(a_vals, b_vals)
+        s_r, s_p = stats.spearmanr(a_vals, b_vals)
+        primary_p = float(p_p if method == "pearson" else s_p)
+        return rows, {
+            "n": n,
+            "pearson_r": _safe(p_r),
+            "p_value": _safe(primary_p),
+            "spearman_r": _safe(s_r),
+            "lag_days": lag,
+        }
+
+    # ---- sweep mode ----
+    if lag_range is not None:
+        if (
+            len(lag_range) != 2 or not all(isinstance(x, int) for x in lag_range)
+            or lag_range[0] > lag_range[1]
+        ):
+            return _err(
+                "correlate_metrics",
+                ValueError("lag_range must be [min, max] integers with min <= max"),
+            )
+        lo, hi = lag_range
+        lag_count = hi - lo + 1
+        if lag_count > 21:
+            return _err(
+                "correlate_metrics",
+                ValueError(f"lag_range covers {lag_count} lags; max is 21."),
+            )
+        results = []
+        for lag in range(lo, hi + 1):
+            _, stats_dict = _run(lag)
+            results.append(stats_dict)
+        # Highest-magnitude lag is what the user usually wants surfaced.
+        non_null = [r for r in results if r.get("pearson_r") is not None]
+        best = max(non_null, key=lambda r: abs(r["pearson_r"]), default=None)
+        return _ok(
+            "correlate_metrics",
+            [],
+            extra={
+                "metric_a": metric_a,
+                "metric_b": metric_b,
+                "method": method,
+                "lag_range": [lo, hi],
+                "lags": results,
+                "best_lag": best,
+            },
+        )
+
+    # ---- single-lag mode (default) ----
+    rows, stats_dict = _run(lag_days)
+    if stats_dict["n"] < 3:
+        return _ok(
+            "correlate_metrics",
+            _serialize(rows) if return_series else [],
+            warnings=["Fewer than 3 paired observations; correlation undefined."],
+            extra={**stats_dict, "metric_a": metric_a, "metric_b": metric_b,
+                   "method": method},
+        )
+    capped = _serialize(rows[:366]) if return_series else []
+    return _ok(
+        "correlate_metrics",
+        capped,
+        truncated=len(rows) > 366 if return_series else False,
+        extra={**stats_dict, "metric_a": metric_a, "metric_b": metric_b,
+               "method": method},
+    )
 
 
 def _safe(x: float) -> float | None:
@@ -649,36 +796,70 @@ def get_habit_history(
 
 
 # ---- ask_sql ----------------------------------------------------------------
-def ask_sql(query: str, max_rows: int = 200) -> dict:
+def ask_sql(
+    query: str,
+    max_rows: int = 200,
+    timeout_ms: int | None = None,
+    explain: bool = False,
+) -> dict:
+    """Read-only SQL escape hatch.
+
+    `timeout_ms` overrides the default per-statement timeout (default 15s,
+    bounded at 60s). `explain=True` returns the EXPLAIN plan instead of
+    executing — handy for diagnosing why a query is slow without burning the
+    full timeout."""
     try:
         validate(query)
     except UnsafeQueryError as e:
         return _err("ask_sql", e)
 
     final = ensure_limit(query, max_rows)
-    t0 = time.perf_counter()
-    try:
-        with reader_conn() as c, c.cursor() as cur:
-            cur.execute(f"SET LOCAL statement_timeout = {ASK_SQL_TIMEOUT_MS}")
-            cur.execute(final)
-            try:
-                rows = _serialize(cur.fetchall())
-            except Exception:
-                rows = []
-            cols = [d.name for d in (cur.description or [])]
-        elapsed_ms = int((time.perf_counter() - t0) * 1000)
-    except Exception as e:
-        log.warning("ask_sql.exec_failed", error=str(e))
-        return _err("ask_sql", e)
+    if explain:
+        final = "EXPLAIN (ANALYZE FALSE, BUFFERS FALSE, VERBOSE FALSE) " + final
 
-    truncated = len(rows) >= max_rows
-    return _ok(
-        "ask_sql",
-        rows,
-        truncated=truncated,
-        warnings=[],
-        extra={"columns": cols, "execution_ms": elapsed_ms, "query_executed": final},
-    )
+    timeout = timeout_ms if timeout_ms is not None else ASK_SQL_TIMEOUT_MS
+    timeout = max(500, min(timeout, 60_000))
+
+    # Retry once if the pool is contended — transient on personal-scale data,
+    # but the user shouldn't see "PoolTimeout" mid-conversation.
+    last_err: Exception | None = None
+    for attempt in range(2):
+        t0 = time.perf_counter()
+        try:
+            with reader_conn() as c, c.cursor() as cur:
+                cur.execute(f"SET LOCAL statement_timeout = {timeout}")
+                cur.execute(final)
+                try:
+                    rows = _serialize(cur.fetchall())
+                except Exception:
+                    rows = []
+                cols = [d.name for d in (cur.description or [])]
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            truncated = len(rows) >= max_rows
+            return _ok(
+                "ask_sql",
+                rows,
+                truncated=truncated,
+                warnings=[],
+                extra={
+                    "columns": cols,
+                    "execution_ms": elapsed_ms,
+                    "query_executed": final,
+                    "attempts": attempt + 1,
+                },
+            )
+        except Exception as e:
+            last_err = e
+            msg = str(e).lower()
+            # Only retry pool-timeout / transient connection errors.
+            if attempt == 0 and ("pool" in msg or "timeout" in msg or "ssl" in msg):
+                log.warning("ask_sql.retry", error=str(e))
+                time.sleep(0.25)
+                continue
+            log.warning("ask_sql.exec_failed", error=str(e))
+            return _err("ask_sql", e)
+
+    return _err("ask_sql", last_err or RuntimeError("ask_sql: unknown failure"))
 
 
 # ---- registry ---------------------------------------------------------------
@@ -804,7 +985,12 @@ TOOLS: dict[str, dict] = {
     },
     "get_spending": {
         "fn": get_spending,
-        "description": "Spending aggregated by day/week/month/category/merchant.",
+        "description": (
+            "Aggregated spending. group_by: day|week|month|category|merchant|account. "
+            "Filters: category (ILIKE — pass exact_category=true for strict match; "
+            "auto-escapes %, _, & so 'Bars & Nightlife' works), account_id (exact), "
+            "account (ILIKE on account name), merchant (ILIKE)."
+        ),
         "input": {
             "type": "object",
             "required": ["start_date", "end_date"],
@@ -813,12 +999,24 @@ TOOLS: dict[str, dict] = {
                 "end_date": {"type": "string", "format": "date"},
                 "category": {"type": "string"},
                 "group_by": {"type": "string", "enum": list(GROUP_BY_OPTIONS), "default": "day"},
+                "account_id": {"type": "string"},
+                "account": {"type": "string"},
+                "exact_category": {"type": "boolean", "default": False},
+                "merchant": {"type": "string"},
             },
         },
     },
     "get_transactions": {
         "fn": get_transactions,
-        "description": "Individual transactions. Filterable by category, merchant, min absolute amount, tag (ILIKE), or untagged-for-couples flag. Returns full Copilot metadata: tags, tag_ids, is_reviewed, tip_amount, parent_id, copilot_type.",
+        "description": (
+            "Individual transactions with rich filters. "
+            "category/merchant/account/tag are ILIKE substrings (auto-escape %, _, &); "
+            "pass exact_category=true for strict category match. "
+            "account_id / account_ids are exact. "
+            "min_amount / max_amount compare against ABS(amount). "
+            "only_charges=true drops income/refunds. "
+            "Returns full Copilot metadata: tags, tag_ids, is_reviewed, tip_amount, parent_id, copilot_type."
+        ),
         "input": {
             "type": "object",
             "required": ["start_date", "end_date"],
@@ -826,11 +1024,19 @@ TOOLS: dict[str, dict] = {
                 "start_date": {"type": "string", "format": "date"},
                 "end_date": {"type": "string", "format": "date"},
                 "category": {"type": "string"},
+                "exact_category": {"type": "boolean", "default": False},
                 "merchant": {"type": "string"},
                 "min_amount": {"type": "number"},
+                "max_amount": {"type": "number"},
                 "tag": {"type": "string"},
                 "has_no_tags": {"type": "boolean", "default": False},
                 "untagged_for_couples": {"type": "boolean", "default": False},
+                "account_id": {"type": "string"},
+                "account": {"type": "string"},
+                "account_ids": {"type": "array", "items": {"type": "string"}},
+                "exclude_excluded": {"type": "boolean", "default": True},
+                "only_charges": {"type": "boolean", "default": False},
+                "limit": {"type": "integer", "default": 500, "minimum": 1, "maximum": 1000},
             },
         },
     },
@@ -848,7 +1054,16 @@ TOOLS: dict[str, dict] = {
     },
     "correlate_metrics": {
         "fn": correlate_metrics,
-        "description": "Pearson + Spearman correlation between two mart_daily columns over a date range, with optional integer day lag. Returns the underlying paired series too.",
+        "description": (
+            "Pearson + Spearman correlation between two mart_daily columns over "
+            "a date range. Single-lag mode (default) returns the paired series + "
+            "stats. Sweep mode (pass lag_range=[min,max], up to 21 lags) returns "
+            "stats per lag plus the best-magnitude lag — use this to find when "
+            "an effect is strongest without 21 separate calls. "
+            "Available metrics include all spend categories: total_spend, "
+            "alcohol_spend, bars_spend, entertainment_spend, restaurant_spend, "
+            "dining_out_txn_count, etc."
+        ),
         "input": {
             "type": "object",
             "required": ["metric_a", "metric_b", "start_date", "end_date"],
@@ -858,19 +1073,33 @@ TOOLS: dict[str, dict] = {
                 "start_date": {"type": "string", "format": "date"},
                 "end_date": {"type": "string", "format": "date"},
                 "lag_days": {"type": "integer", "default": 0},
+                "lag_range": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "minItems": 2, "maxItems": 2,
+                },
                 "method": {"type": "string", "enum": ["pearson", "spearman"], "default": "pearson"},
+                "return_series": {"type": "boolean", "default": True},
             },
         },
     },
     "ask_sql": {
         "fn": ask_sql,
-        "description": "Read-only SQL escape hatch against curated views. Forbidden keywords (INSERT/UPDATE/DELETE/...) rejected; query runs as the lifeos_mcp role with statement_timeout=5s.",
+        "description": (
+            "Read-only SQL escape hatch against curated tables/views. Forbidden "
+            "keywords (INSERT/UPDATE/DELETE/...) rejected; runs as the lifeos_mcp "
+            "role. Default statement_timeout=15s (override via timeout_ms, max 60s). "
+            "On pool exhaustion, retried once automatically. Pass explain=true to "
+            "get the EXPLAIN plan without executing."
+        ),
         "input": {
             "type": "object",
             "required": ["query"],
             "properties": {
                 "query": {"type": "string"},
                 "max_rows": {"type": "integer", "default": ASK_SQL_DEFAULT_LIMIT, "minimum": 1, "maximum": 5000},
+                "timeout_ms": {"type": "integer", "minimum": 500, "maximum": 60000},
+                "explain": {"type": "boolean", "default": False},
             },
         },
     },

@@ -10,8 +10,9 @@ require credentials (handy for tests that monkey-patch).
 
 from __future__ import annotations
 
+import os
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator
 
 import psycopg
 from psycopg.rows import dict_row
@@ -21,6 +22,16 @@ from lifeos_core.settings import settings
 
 _pool: ConnectionPool | None = None
 _reader_pool: ConnectionPool | None = None
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
 
 
 def pool() -> ConnectionPool:
@@ -39,8 +50,10 @@ def pool() -> ConnectionPool:
             )
         _pool = ConnectionPool(
             conninfo=settings.SUPABASE_DB_URL,
-            min_size=1,
-            max_size=8,
+            min_size=_env_int("LIFEOS_POOL_MIN", 2),
+            max_size=_env_int("LIFEOS_POOL_MAX", 12),
+            timeout=_env_int("LIFEOS_POOL_TIMEOUT", 15),  # seconds to wait for a free conn
+            max_idle=_env_int("LIFEOS_POOL_MAX_IDLE", 300),
             kwargs={"row_factory": dict_row, "autocommit": False, "prepare_threshold": None},
             open=True,
         )
@@ -49,7 +62,12 @@ def pool() -> ConnectionPool:
 
 def reader_pool() -> ConnectionPool:
     """Read-only pool for ask_sql. Falls back to admin pool if reader URL not
-    configured (tests). In production, always set LIFEOS_READER_DB_URL."""
+    configured (tests). In production, always set LIFEOS_READER_DB_URL.
+
+    Pool size defaults bumped from (1,4) to (1,8) and timeout from psycopg's
+    30s default to a configurable LIFEOS_READER_POOL_TIMEOUT — the original
+    cap was the source of mid-conversation pool-exhausted errors when Claude
+    fired several ask_sql calls in parallel."""
     global _reader_pool
     if _reader_pool is None:
         url = settings.LIFEOS_READER_DB_URL or settings.SUPABASE_DB_URL
@@ -59,8 +77,10 @@ def reader_pool() -> ConnectionPool:
             )
         _reader_pool = ConnectionPool(
             conninfo=url,
-            min_size=1,
-            max_size=4,
+            min_size=_env_int("LIFEOS_READER_POOL_MIN", 1),
+            max_size=_env_int("LIFEOS_READER_POOL_MAX", 8),
+            timeout=_env_int("LIFEOS_READER_POOL_TIMEOUT", 10),
+            max_idle=_env_int("LIFEOS_READER_POOL_MAX_IDLE", 300),
             kwargs={"row_factory": dict_row, "autocommit": True, "prepare_threshold": None},
             open=True,
         )

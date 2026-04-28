@@ -139,3 +139,100 @@ def test_get_spending_rejects_bad_group_by():
     out = tools.get_spending(start_date=None, end_date=None, group_by="quarter")  # type: ignore[arg-type]
     assert out["ok"] is False
     assert "group_by" in out["error"]
+
+
+def test_get_transactions_rejects_bad_limit():
+    out = tools.get_transactions(start_date=None, end_date=None, limit=99999)  # type: ignore[arg-type]
+    assert out["ok"] is False
+    assert "limit" in out["error"]
+
+
+def test_escape_like_handles_special_chars():
+    """The 'Bars & Nightlife' bug: pre-fix, % and _ in user-supplied substrings
+    matched anything. Post-fix, they're treated literally."""
+    assert tools._escape_like("100% sure") == r"100\% sure"
+    assert tools._escape_like("foo_bar") == r"foo\_bar"
+    assert tools._escape_like(r"a\b") == r"a\\b"
+    # & is not an ILIKE meta-char, so it's untouched — the original transcript
+    # bug was the surrounding pattern logic, not the ampersand itself.
+    assert tools._escape_like("Bars & Nightlife") == "Bars & Nightlife"
+
+
+# ---- correlate_metrics lag_range -------------------------------------------
+def test_correlate_metrics_rejects_bad_lag_range():
+    out = tools.correlate_metrics(
+        metric_a="recovery_score",
+        metric_b="strain",
+        start_date=None,  # type: ignore[arg-type]
+        end_date=None,    # type: ignore[arg-type]
+        lag_range=[5, 1],
+    )
+    assert out["ok"] is False
+    assert "lag_range" in out["error"]
+
+
+def test_correlate_metrics_rejects_oversized_sweep():
+    out = tools.correlate_metrics(
+        metric_a="recovery_score",
+        metric_b="strain",
+        start_date=None,  # type: ignore[arg-type]
+        end_date=None,    # type: ignore[arg-type]
+        lag_range=[-30, 30],
+    )
+    assert out["ok"] is False
+    assert "21" in out["error"]
+
+
+# ---- telemetry --------------------------------------------------------------
+def test_telemetry_summarize_truncates_long_strings():
+    from mcp_server.telemetry import _summarize_value
+
+    long_sql = "SELECT " + "x," * 200
+    summary = _summarize_value(long_sql)
+    assert isinstance(summary, dict)
+    assert summary["_truncated"] is True
+    assert summary["len"] == len(long_sql)
+
+
+def test_telemetry_summarize_preserves_short_args():
+    from mcp_server.telemetry import _summarize_args
+    from datetime import date
+
+    out = _summarize_args(
+        (), {"start_date": date(2026, 4, 1), "category": "Bars & Nightlife", "limit": 50},
+    )
+    assert out["start_date"] == "2026-04-01"
+    assert out["category"] == "Bars & Nightlife"
+    assert out["limit"] == 50
+
+
+def test_telemetry_summarize_caps_long_lists():
+    from mcp_server.telemetry import _summarize_value
+
+    out = _summarize_value(list(range(50)))
+    assert isinstance(out, dict)
+    assert out["_list_len"] == 50
+    assert len(out["head"]) == 5
+
+
+# ---- compute_couple_owed validation ----------------------------------------
+def test_compute_couple_owed_requires_account_filter():
+    from mcp_server import write_tools
+
+    out = write_tools.compute_couple_owed(
+        start_date=None, end_date=None,  # type: ignore[arg-type]
+    )
+    assert out["ok"] is False
+    assert "account" in out["error"]
+
+
+def test_compute_couple_owed_validates_split_sums_to_one():
+    from mcp_server import write_tools
+
+    out = write_tools.compute_couple_owed(
+        start_date=None, end_date=None,  # type: ignore[arg-type]
+        account_names=["Chase"],
+        split_me=0.7, split_partner=0.7,
+    )
+    assert out["ok"] is False
+    assert "1.0" in out["error"]

@@ -682,6 +682,190 @@ def compute_couple_balances(
     )
 
 
+def compute_couple_owed(
+    start_date: date,
+    end_date: date,
+    account_ids: list[str] | None = None,
+    account_names: list[str] | None = None,
+    split_me: float | None = None,
+    split_partner: float | None = None,
+    joint_only: bool = False,
+    flag_duplicate_pending: bool = True,
+) -> dict:
+    """One-shot couples calc for a specific set of cards.
+
+    Built for the common conversation: "calculate what me and my wife owe on
+    our joint Chase card and Amazon card this month, split joint-tagged
+    transactions 65/35." Avoids the previous round-trip-per-tool, raw-fetch,
+    Python-dedupe path.
+
+    Filters:
+        account_ids        Exact dim_account.account_id values to include.
+        account_names      ILIKE substrings against dim_account.name. Either
+                           account filter is required (refusing to bill the
+                           whole portfolio).
+        split_me           Override settings.COUPLE_SPLIT_ME for this call.
+        split_partner      Override settings.COUPLE_SPLIT_PARTNER for this call.
+        joint_only         If true, only joint-tagged transactions count;
+                           untagged rows are surfaced separately for review.
+        flag_duplicate_pending
+                           If true, transactions where a pending row matches
+                           a posted row on (date, amount, merchant) are
+                           flagged so they aren't double-counted.
+
+    Returns per-person owed totals on each account, the bottom-line net, the
+    list of transactions used in the math, and a `needs_review` list of
+    untagged charges Claude can ask the user about.
+    """
+    if not account_ids and not account_names:
+        return _err(
+            "compute_couple_owed",
+            ValueError(
+                "Pass at least one of account_ids or account_names so we know "
+                "which cards to consider."
+            ),
+        )
+
+    sm = float(split_me if split_me is not None else settings.COUPLE_SPLIT_ME)
+    sp = float(split_partner if split_partner is not None else settings.COUPLE_SPLIT_PARTNER)
+    if abs(sm + sp - 1.0) > 0.001:
+        return _err(
+            "compute_couple_owed",
+            ValueError(f"split_me ({sm}) + split_partner ({sp}) must sum to 1.0"),
+        )
+
+    couple_names = {
+        settings.COUPLE_TAG_ME.lower(): "me",
+        settings.COUPLE_TAG_PARTNER.lower(): "partner",
+        settings.COUPLE_TAG_JOINT.lower(): "joint",
+    }
+
+    where = ["t.date BETWEEN %s AND %s", "NOT t.is_excluded", "t.amount > 0"]
+    params: list = [start_date, end_date]
+    acct_where: list[str] = []
+    if account_ids:
+        acct_where.append("t.account_id = ANY(%s)")
+        params.append(list(account_ids))
+    if account_names:
+        clauses = []
+        for n in account_names:
+            clauses.append("a.name ILIKE %s")
+            params.append(f"%{n}%")
+        acct_where.append("(" + " OR ".join(clauses) + ")")
+    where.append("(" + " OR ".join(acct_where) + ")")
+
+    q = f"""
+        SELECT t.transaction_id, t.date, t.amount, t.merchant, t.is_pending,
+               t.tags, t.account_id, a.name AS account
+        FROM fact_transaction t
+        LEFT JOIN dim_account a ON a.account_id = t.account_id
+        WHERE {" AND ".join(where)}
+        ORDER BY t.date, t.amount DESC
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, params)
+        rows = cur.fetchall()
+
+    # Dedup: a pending charge that matches a posted row on (date, amount,
+    # merchant) is the same transaction. Drop the pending one.
+    seen_posted: set[tuple] = set()
+    if flag_duplicate_pending:
+        for r in rows:
+            if not r["is_pending"]:
+                seen_posted.add((str(r["date"]), float(r["amount"]), (r["merchant"] or "")))
+
+    per_account: dict[str, dict] = {}
+    needs_review: list[dict] = []
+    used: list[dict] = []
+    me_total = 0.0
+    partner_total = 0.0
+    duplicate_skipped: list[dict] = []
+
+    for r in rows:
+        key = (str(r["date"]), float(r["amount"]), (r["merchant"] or ""))
+        if flag_duplicate_pending and r["is_pending"] and key in seen_posted:
+            duplicate_skipped.append({
+                "transaction_id": r["transaction_id"],
+                "date": str(r["date"]),
+                "merchant": r["merchant"],
+                "amount": float(r["amount"]),
+                "reason": "pending duplicate of posted",
+            })
+            continue
+
+        tag_names = [(x or "").lower() for x in (r.get("tags") or [])]
+        role = next((couple_names[n] for n in tag_names if n in couple_names), None)
+
+        amount = float(r["amount"])
+        acct = r["account"] or r["account_id"] or "unknown"
+        bucket = per_account.setdefault(
+            acct,
+            {"account": acct, "account_id": r["account_id"],
+             "me_owes": 0.0, "partner_owes": 0.0, "joint_owes": 0.0,
+             "untagged": 0.0, "txn_count": 0},
+        )
+        bucket["txn_count"] += 1
+
+        if role == "me":
+            me_total += amount
+            bucket["me_owes"] += amount
+            used.append({**_brkdown(r, "me", "n/a"), "me_share": amount, "partner_share": 0.0})
+        elif role == "partner":
+            partner_total += amount
+            bucket["partner_owes"] += amount
+            used.append({**_brkdown(r, "partner", "n/a"),
+                         "me_share": 0.0, "partner_share": amount})
+        elif role == "joint":
+            ms = round(amount * sm, 2)
+            ps = round(amount * sp, 2)
+            me_total += ms
+            partner_total += ps
+            bucket["joint_owes"] += amount
+            used.append({**_brkdown(r, "joint", "n/a"),
+                         "me_share": ms, "partner_share": ps})
+        else:
+            # Untagged charge. Surface it; if joint_only we ignore it from
+            # the totals, otherwise we apply the configured split.
+            bucket["untagged"] += amount
+            entry = {
+                "transaction_id": r["transaction_id"],
+                "date": str(r["date"]),
+                "merchant": r["merchant"],
+                "amount": amount,
+                "account": acct,
+            }
+            needs_review.append(entry)
+            if not joint_only:
+                ms = round(amount * sm, 2)
+                ps = round(amount * sp, 2)
+                me_total += ms
+                partner_total += ps
+                used.append({**entry, "tag": "untagged_assumed_joint",
+                             "me_share": ms, "partner_share": ps})
+
+    summary = (
+        f"You owe ${round(me_total, 2)}; partner owes ${round(partner_total, 2)} "
+        f"(joint split {int(sm*100)}/{int(sp*100)})."
+    )
+
+    return _ok(
+        "compute_couple_owed",
+        used,
+        extra={
+            "summary": summary,
+            "me_owes_total": round(me_total, 2),
+            "partner_owes_total": round(partner_total, 2),
+            "by_account": list(per_account.values()),
+            "needs_review_count": len(needs_review),
+            "needs_review": needs_review[:50],
+            "duplicate_pending_skipped": duplicate_skipped,
+            "split": {"me": sm, "partner": sp},
+            "window": {"start": str(start_date), "end": str(end_date)},
+            "joint_only": joint_only,
+        },
+    )
+
+
 # ---- helpers ---------------------------------------------------------------
 def _coerce_row(row: dict | None) -> dict | None:
     if row is None:

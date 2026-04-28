@@ -27,7 +27,9 @@ RUN pip install --upgrade pip \
       'google-api-python-client>=2.140' \
       'google-auth-oauthlib>=1.2' \
       'google-auth>=2.34' \
-      'boto3>=1.35'
+      'boto3>=1.35' \
+      'opentelemetry-sdk>=1.27' \
+      'opentelemetry-exporter-otlp-proto-http>=1.27'
 
 # MCP server now exposes write/refresh tools that call into every ingester
 # and the mart refresher, so all packages must be present in the image.

@@ -20,3 +20,7 @@ google-auth>=2.34
 sentry-sdk>=2.14
 click>=8.1
 boto3>=1.35
+# Optional OTLP tracing (Langfuse Cloud / Grafana Cloud free tiers). Imported
+# lazily by mcp_server.telemetry; no-op if LIFEOS_OTLP_ENDPOINT is unset.
+opentelemetry-sdk>=1.27
+opentelemetry-exporter-otlp-proto-http>=1.27

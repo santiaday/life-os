@@ -15,7 +15,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from datetime import date
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import FastAPI, Request
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
@@ -26,11 +26,10 @@ from mcp_server import tools as T
 from mcp_server import write_tools as W
 from mcp_server.auth import (
     MCP_MOUNT,
-    PUBLIC_PATHS,
     extract_and_validate_token,
     is_public,
-    require_bearer,
 )
+from mcp_server.telemetry import recent_tool_perf, trace_tool
 
 log = get_logger(__name__)
 
@@ -67,17 +66,27 @@ mcp = FastMCP(
 )
 
 
+def _tool(description: str):
+    """Combined decorator: telemetry-wrap, then register with FastMCP. Applies
+    `trace_tool()` so every call is timed, logged, and (if LIFEOS_OTLP_ENDPOINT
+    is set) traced via OpenTelemetry — with no per-tool boilerplate."""
+    def deco(fn):
+        wrapped = trace_tool(name=fn.__name__)(fn)
+        return mcp.tool(description=description)(wrapped)
+    return deco
+
+
 # ---- tool registrations ----------------------------------------------------
 # Each wrapper has explicit type hints so FastMCP can derive a clean JSON
 # schema and Claude can pick correct argument types. Bodies just delegate to
 # the implementations in tools.py.
 
-@mcp.tool(description=T.TOOLS["get_schema_docs"]["description"])
+@_tool(description=T.TOOLS["get_schema_docs"]["description"])
 def get_schema_docs(table_name: str | None = None) -> dict:
     return T.get_schema_docs(table_name)
 
 
-@mcp.tool(description=T.TOOLS["get_daily_summary"]["description"])
+@_tool(description=T.TOOLS["get_daily_summary"]["description"])
 def get_daily_summary(
     start_date: date,
     end_date: date,
@@ -86,7 +95,7 @@ def get_daily_summary(
     return T.get_daily_summary(start_date, end_date, columns)
 
 
-@mcp.tool(description=T.TOOLS["get_recovery_trend"]["description"])
+@_tool(description=T.TOOLS["get_recovery_trend"]["description"])
 def get_recovery_trend(
     start_date: date,
     end_date: date,
@@ -95,7 +104,7 @@ def get_recovery_trend(
     return T.get_recovery_trend(start_date, end_date, smoothing)
 
 
-@mcp.tool(description=T.TOOLS["get_sleep_summary"]["description"])
+@_tool(description=T.TOOLS["get_sleep_summary"]["description"])
 def get_sleep_summary(
     start_date: date,
     end_date: date,
@@ -104,7 +113,7 @@ def get_sleep_summary(
     return T.get_sleep_summary(start_date, end_date, include_naps)
 
 
-@mcp.tool(description=T.TOOLS["get_workouts"]["description"])
+@_tool(description=T.TOOLS["get_workouts"]["description"])
 def get_workouts(
     start_date: date,
     end_date: date,
@@ -113,7 +122,7 @@ def get_workouts(
     return T.get_workouts(start_date, end_date, sport_name)
 
 
-@mcp.tool(description=T.TOOLS["get_food_log"]["description"])
+@_tool(description=T.TOOLS["get_food_log"]["description"])
 def get_food_log(
     start_date: date,
     end_date: date,
@@ -123,7 +132,7 @@ def get_food_log(
     return T.get_food_log(start_date, end_date, meal_window, search)
 
 
-@mcp.tool(description=T.TOOLS["get_meal_summary"]["description"])
+@_tool(description=T.TOOLS["get_meal_summary"]["description"])
 def get_meal_summary(
     start_date: date,
     end_date: date,
@@ -132,12 +141,12 @@ def get_meal_summary(
     return T.get_meal_summary(start_date, end_date, meal_window)
 
 
-@mcp.tool(description=T.TOOLS["get_calendar_load"]["description"])
+@_tool(description=T.TOOLS["get_calendar_load"]["description"])
 def get_calendar_load(start_date: date, end_date: date) -> dict:
     return T.get_calendar_load(start_date, end_date)
 
 
-@mcp.tool(description=T.TOOLS["get_calendar_events"]["description"])
+@_tool(description=T.TOOLS["get_calendar_events"]["description"])
 def get_calendar_events(
     start_date: date,
     end_date: date,
@@ -147,35 +156,55 @@ def get_calendar_events(
     return T.get_calendar_events(start_date, end_date, classification, search)
 
 
-@mcp.tool(description=T.TOOLS["get_spending"]["description"])
+@_tool(description=T.TOOLS["get_spending"]["description"])
 def get_spending(
     start_date: date,
     end_date: date,
     category: str | None = None,
     group_by: str = "day",
+    account_id: str | None = None,
+    account: str | None = None,
+    exact_category: bool = False,
+    merchant: str | None = None,
 ) -> dict:
-    return T.get_spending(start_date, end_date, category, group_by)
+    return T.get_spending(
+        start_date, end_date, category, group_by,
+        account_id=account_id, account=account,
+        exact_category=exact_category, merchant=merchant,
+    )
 
 
-@mcp.tool(description=T.TOOLS["get_transactions"]["description"])
+@_tool(description=T.TOOLS["get_transactions"]["description"])
 def get_transactions(
     start_date: date,
     end_date: date,
     category: str | None = None,
     merchant: str | None = None,
     min_amount: float | None = None,
+    max_amount: float | None = None,
     tag: str | None = None,
     has_no_tags: bool = False,
     untagged_for_couples: bool = False,
+    account_id: str | None = None,
+    account: str | None = None,
+    account_ids: list[str] | None = None,
+    exclude_excluded: bool = True,
+    only_charges: bool = False,
+    exact_category: bool = False,
+    limit: int = 500,
 ) -> dict:
     return T.get_transactions(
         start_date, end_date, category, merchant, min_amount,
+        max_amount=max_amount,
         tag=tag, has_no_tags=has_no_tags,
         untagged_for_couples=untagged_for_couples,
+        account_id=account_id, account=account, account_ids=account_ids,
+        exclude_excluded=exclude_excluded, only_charges=only_charges,
+        exact_category=exact_category, limit=limit,
     )
 
 
-@mcp.tool(description=T.TOOLS["get_biometrics"]["description"])
+@_tool(description=T.TOOLS["get_biometrics"]["description"])
 def get_biometrics(
     metric: str | None = None,
     start_date: date | None = None,
@@ -184,7 +213,7 @@ def get_biometrics(
     return T.get_biometrics(metric, start_date, end_date)
 
 
-@mcp.tool(description=T.TOOLS["correlate_metrics"]["description"])
+@_tool(description=T.TOOLS["correlate_metrics"]["description"])
 def correlate_metrics(
     metric_a: str,
     metric_b: str,
@@ -192,11 +221,16 @@ def correlate_metrics(
     end_date: date,
     lag_days: int = 0,
     method: str = "pearson",
+    lag_range: list[int] | None = None,
+    return_series: bool = True,
 ) -> dict:
-    return T.correlate_metrics(metric_a, metric_b, start_date, end_date, lag_days, method)
+    return T.correlate_metrics(
+        metric_a, metric_b, start_date, end_date, lag_days, method,
+        lag_range=lag_range, return_series=return_series,
+    )
 
 
-@mcp.tool(description=(
+@_tool(description=(
     "List Whoop's behavior catalog (200+ trackable behaviors). Filter by "
     "category (DAYTIME / NIGHTTIME / YOUR WEEKLY PLAN / ...) or substring "
     "search across title and internal_name. Use this to discover habit_key "
@@ -206,7 +240,7 @@ def list_behaviors(category: str | None = None, search: str | None = None) -> di
     return T.list_behaviors(category, search)
 
 
-@mcp.tool(description=(
+@_tool(description=(
     "Daily journal entries from Whoop. Pass `day` for a single day with "
     "full payload + parsed habit log + notes. Otherwise returns a window "
     "summary: one row per day with notes + habit counts."
@@ -219,7 +253,7 @@ def get_journal_entries(
     return T.get_journal_entries(start_date, end_date, day)
 
 
-@mcp.tool(description=(
+@_tool(description=(
     "Time series of a single Whoop journal habit (e.g. alcohol, caffeine, "
     "late-meal, magnesium). habit_key is dim_whoop_behavior.internal_name; "
     "discover values via list_behaviors. Returns rows + summary stats "
@@ -229,13 +263,18 @@ def get_habit_history(habit_key: str, start_date: date, end_date: date) -> dict:
     return T.get_habit_history(habit_key, start_date, end_date)
 
 
-@mcp.tool(description=T.TOOLS["ask_sql"]["description"])
-def ask_sql(query: str, max_rows: int = 200) -> dict:
-    return T.ask_sql(query, max_rows)
+@_tool(description=T.TOOLS["ask_sql"]["description"])
+def ask_sql(
+    query: str,
+    max_rows: int = 200,
+    timeout_ms: int | None = None,
+    explain: bool = False,
+) -> dict:
+    return T.ask_sql(query, max_rows, timeout_ms=timeout_ms, explain=explain)
 
 
 # ---- write / refresh tools ------------------------------------------------
-@mcp.tool(description=(
+@_tool(description=(
     "Pull fresh data from one or all sources, then rebuild the mart. Call "
     "this at the START of a chat session if the user is asking about recent "
     "data so analysis isn't on stale numbers. Default source='all' refreshes "
@@ -246,7 +285,7 @@ def refresh_data(source: str = "all") -> dict:
     return W.refresh_data(source)
 
 
-@mcp.tool(description=(
+@_tool(description=(
     "Universal Copilot transaction edit. Pass any combination of fields; "
     "None means leave unchanged, '' clears a string field. Available fields: "
     "category_id, user_notes, name, amount, date (YYYY-MM-DD), tip_amount, "
@@ -274,7 +313,7 @@ def update_transaction(
     )
 
 
-@mcp.tool(description=(
+@_tool(description=(
     "Convenience wrapper around update_transaction. Reassign category. Pass "
     "empty string to uncategorize."
 ))
@@ -282,14 +321,14 @@ def update_transaction_category(transaction_id: str, category_id: str) -> dict:
     return W.update_transaction_category(transaction_id, category_id)
 
 
-@mcp.tool(description=(
+@_tool(description=(
     "Convenience wrapper around update_transaction. Set userNotes; '' clears."
 ))
 def update_transaction_notes(transaction_id: str, notes: str) -> dict:
     return W.update_transaction_notes(transaction_id, notes)
 
 
-@mcp.tool(description=(
+@_tool(description=(
     "Apply the same edit to many transactions in one call. Filter args "
     "(combine freely; AND): start_date, end_date, merchant (ILIKE), "
     "category_id_match (use '' for uncategorized), account_id, has_tag, "
@@ -331,7 +370,7 @@ def bulk_update_transactions(
     )
 
 
-@mcp.tool(description=(
+@_tool(description=(
     "Link a transaction to an existing recurring stream. Find recurring_id "
     "via get_transactions (each txn carries its recurring_id) or ask_sql "
     "against fact_transaction.recurring_id."
@@ -340,7 +379,7 @@ def add_transaction_to_recurring(transaction_id: str, recurring_id: str) -> dict
     return W.add_transaction_to_recurring(transaction_id, recurring_id)
 
 
-@mcp.tool(description=(
+@_tool(description=(
     "Detach a transaction from its recurring stream (e.g. one-off charge "
     "that Copilot incorrectly bucketed into your Netflix recurring)."
 ))
@@ -348,7 +387,7 @@ def exclude_transaction_from_recurring(transaction_id: str) -> dict:
     return W.exclude_transaction_from_recurring(transaction_id)
 
 
-@mcp.tool(description=(
+@_tool(description=(
     "All tags currently defined in Copilot. Call before create_tag to avoid "
     "duplicates and before tag_transaction so you know the IDs."
 ))
@@ -356,7 +395,7 @@ def list_tags() -> dict:
     return W.list_tags()
 
 
-@mcp.tool(description=(
+@_tool(description=(
     "Create a new Copilot tag. color_name accepts: red, orange, yellow, "
     "green, blue, purple, pink, gray (Copilot validates server-side)."
 ))
@@ -364,7 +403,7 @@ def create_tag(name: str, color_name: str | None = None) -> dict:
     return W.create_tag(name, color_name)
 
 
-@mcp.tool(description=(
+@_tool(description=(
     "REPLACE a transaction's tag set with the given IDs. To add or remove a "
     "single tag, fetch its current tags first (via get_transactions) and "
     "merge client-side. For couples-split tagging use set_couple_tag instead."
@@ -374,7 +413,7 @@ def tag_transaction(transaction_id: str, tag_ids: list[str]) -> dict:
 
 
 # ---- couples-split workflow ----------------------------------------------
-@mcp.tool(description=(
+@_tool(description=(
     "Transactions in [start_date, end_date] that have NONE of the couple "
     "tags (me/partner/joint). Defaults to last 30 days if dates omitted. "
     "Use this to build the queue for the categorization conversation."
@@ -387,7 +426,7 @@ def list_pending_couple_review(
     return W.list_pending_couple_review(start_date, end_date, limit)
 
 
-@mcp.tool(description=(
+@_tool(description=(
     "Tag a transaction as 'me' | 'partner' | 'joint'. Replaces any existing "
     "couple tag but preserves other tags (trip tags, etc.). Auto-creates the "
     "couple tags in Copilot on first use."
@@ -396,7 +435,7 @@ def set_couple_tag(transaction_id: str, owner: str) -> dict:
     return W.set_couple_tag(transaction_id, owner)
 
 
-@mcp.tool(description=(
+@_tool(description=(
     "Show every Copilot account with its configured couple-owner mapping "
     "(me|partner|joint|unassigned). Edit COUPLE_ACCOUNTS_* in .env to assign "
     "ownership; without it, compute_couple_balances skips those transactions."
@@ -405,7 +444,7 @@ def list_account_owners() -> dict:
     return W.list_account_owners()
 
 
-@mcp.tool(description=(
+@_tool(description=(
     "Compute who owes whom for the period using couple tags + account "
     "ownership. For each tagged transaction: identifies the payer from the "
     "account, applies the configured split (default 50/50) for joint expenses "
@@ -419,6 +458,49 @@ def compute_couple_balances(
     include_personal: bool = False,
 ) -> dict:
     return W.compute_couple_balances(start_date, end_date, include_personal)
+
+
+@_tool(description=(
+    "One-shot couples owed-on-card calc. Pass account_ids OR account_names "
+    "(ILIKE) to scope to specific cards (joint Chase, Amazon, etc.). Override "
+    "split_me/split_partner per call (e.g. 0.65/0.35). Joint-tagged txns are "
+    "split per configured ratio; me/partner-tagged go fully to that person; "
+    "untagged are flagged in needs_review and (unless joint_only=true) treated "
+    "as joint. Pending+posted duplicates auto-flagged and skipped. Returns "
+    "per-account breakdown, totals owed by each person, and the line-item math."
+))
+def compute_couple_owed(
+    start_date: date,
+    end_date: date,
+    account_ids: list[str] | None = None,
+    account_names: list[str] | None = None,
+    split_me: float | None = None,
+    split_partner: float | None = None,
+    joint_only: bool = False,
+    flag_duplicate_pending: bool = True,
+) -> dict:
+    return W.compute_couple_owed(
+        start_date, end_date,
+        account_ids=account_ids, account_names=account_names,
+        split_me=split_me, split_partner=split_partner,
+        joint_only=joint_only,
+        flag_duplicate_pending=flag_duplicate_pending,
+    )
+
+
+@_tool(description=(
+    "Self-observability: latency, error rate, and call count per MCP tool over "
+    "the last `window_minutes` (default 24h). Reads from mcp_tool_log which is "
+    "populated automatically on every call. Use this to spot slow tools, "
+    "redundant calls in a conversation, or repeated failures."
+))
+def get_tool_stats(window_minutes: int = 1440) -> dict:
+    rows = recent_tool_perf(window_minutes=window_minutes)
+    return {
+        "ok": True, "tool": "get_tool_stats", "rows": rows,
+        "row_count": len(rows), "truncated": False, "warnings": [],
+        "window_minutes": window_minutes,
+    }
 
 
 # ---- FastAPI shell ----------------------------------------------------------

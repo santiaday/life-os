@@ -82,6 +82,12 @@ class Settings(BaseSettings):
     # ---- Observability -----------------------------------------------------
     LOG_LEVEL: str = "INFO"
     SENTRY_DSN: str | None = None
+    # Optional OTLP exporter for MCP tool spans. Compatible with Langfuse
+    # Cloud (free tier) and Grafana Cloud (free tier). Leave empty to disable.
+    # The Postgres-side mcp_tool_log table works regardless.
+    LIFEOS_OTLP_ENDPOINT: str | None = None
+    LIFEOS_OTLP_HEADERS: str | None = None  # 'k=v,k2=v2' for Authorization etc.
+    LIFEOS_SERVICE_NAME: str = "life-os-mcp"
 
     # ---- Couples-split workflow ---------------------------------------------
     # Tag names used to mark who owns a transaction. Case-insensitive on read.

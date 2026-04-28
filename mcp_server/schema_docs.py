@@ -55,8 +55,11 @@ SCHEMA_DOCS: dict = {
                 "first_meal_time, last_meal_time": "Local time of first and last logged eating event.",
                 "eating_window_hours": "Time between first and last meal. NOT a fasting window.",
                 "breakfast_kcal, lunch_kcal, dinner_kcal, snack_kcal": "Sum of energy_kcal grouped by Cronometer's meal_group.",
-                "total_spend": "Sum of non-excluded positive transactions (Copilot convention: positive = expense).",
+                "total_spend": "Sum of non-excluded positive transactions (Copilot convention: positive = expense). 0 if no transactions on that day.",
                 "food_spend, restaurant_spend, groceries_spend, transportation_spend": "Subsets of total_spend by category name match.",
+                "alcohol_spend, bars_spend, entertainment_spend, shopping_spend, travel_spend": "Additional category subsets — useful for 'going-out' analysis. Bars matches 'Bars', 'Nightlife', or any category containing 'Bar'.",
+                "dining_out_txn_count": "Number of restaurant/bar transactions >= $50 posted on this date. Cleanest single signal for 'did I go out the night before'. Threshold ($50) keeps coffee/lunch noise out.",
+                "dining_out_txn_max": "Largest single restaurant/bar charge on this date.",
                 "weight_kg": "Most recent weight measurement on this day, from fact_biometric.",
                 "body_fat_pct": "Most recent body-fat % on this day.",
                 "had_alcohol, alcohol_drinks": "From Whoop journal. had_alcohol is the yes/no answer; alcohol_drinks is the magnitude (drinks).",
@@ -244,6 +247,27 @@ SCHEMA_DOCS: dict = {
             "the user to set COUPLE_ACCOUNTS_ME / _PARTNER / _JOINT in .env "
             "(comma-separated account_ids) so the balance math knows who paid."
         ),
+        "couples_owed_on_specific_cards": (
+            "User asks: 'how much do me and my wife owe on the joint Chase + "
+            "Amazon card this month, joint split 65/35'. Use compute_couple_owed "
+            "directly — no pre-tagging required. Pass account_names=['Chase','Amazon'] "
+            "(or account_ids), split_me=0.65, split_partner=0.35. The tool "
+            "auto-flags pending+posted duplicates and surfaces untagged charges "
+            "in needs_review for the user to triage. ONE tool call replaces the "
+            "old multi-step flow."
+        ),
+        "self_observability": (
+            "User asks 'why is the MCP slow' or 'which tools are getting called "
+            "the most'. Call get_tool_stats(window_minutes=60 or 1440). Returns "
+            "per-tool n, p50/p95 latency, and error count from mcp_tool_log."
+        ),
+    },
+    "performance_tips": {
+        "prefer_mart_daily": "For any daily-grain question (recovery, sleep, spend trends), mart_daily already has the joins done — one query, no expression-evaluation overhead.",
+        "lag_sweeps_in_one_call": "Use correlate_metrics with lag_range=[min,max] (up to 21 lags) instead of N separate calls. Returns the best-magnitude lag plus per-lag stats.",
+        "narrow_with_account": "Spending questions about specific cards: pass account_id (exact) or account=substring on get_spending / get_transactions instead of pulling all transactions and filtering client-side.",
+        "use_compute_couple_owed": "For 'who owes whom on these specific cards' questions, compute_couple_owed is one call. Don't combine list_account_owners + get_transactions + Python.",
+        "ask_sql_timeout": "ask_sql defaults to 15s statement_timeout. For heavier analytics you can raise via timeout_ms (max 60s). Pass explain=true to inspect a slow query's plan first.",
     },
 }
 

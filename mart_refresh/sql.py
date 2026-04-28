@@ -12,7 +12,6 @@ back-to-back inside a single transaction.
 
 from __future__ import annotations
 
-
 # ---- mart_daily ------------------------------------------------------------
 TRUNCATE_MART_DAILY = "TRUNCATE mart_daily"
 # Sources used:
@@ -45,6 +44,8 @@ INSERT INTO mart_daily (
   meal_count, first_meal_time, last_meal_time, eating_window_hours,
   breakfast_kcal, lunch_kcal, dinner_kcal, snack_kcal,
   total_spend, food_spend, restaurant_spend, groceries_spend, transportation_spend,
+  alcohol_spend, bars_spend, entertainment_spend, shopping_spend, travel_spend,
+  dining_out_txn_count, dining_out_txn_max,
   weight_kg, body_fat_pct,
   -- Whoop journal habit pivots
   had_alcohol, alcohol_drinks,
@@ -151,7 +152,41 @@ spend_agg AS (
     SUM(amount) FILTER (WHERE NOT is_excluded AND c.name ILIKE 'Food%%')            AS food_spend,
     SUM(amount) FILTER (WHERE NOT is_excluded AND c.name ILIKE 'Restaurants%%')     AS restaurant_spend,
     SUM(amount) FILTER (WHERE NOT is_excluded AND c.name ILIKE 'Groceries%%')       AS groceries_spend,
-    SUM(amount) FILTER (WHERE NOT is_excluded AND c.name ILIKE 'Trans%%')           AS transportation_spend
+    SUM(amount) FILTER (WHERE NOT is_excluded AND c.name ILIKE 'Trans%%')           AS transportation_spend,
+    SUM(amount) FILTER (WHERE NOT is_excluded AND c.name ILIKE 'Alcohol%%')         AS alcohol_spend,
+    SUM(amount) FILTER (
+      WHERE NOT is_excluded AND amount > 0 AND (
+        c.name ILIKE 'Bars%%' OR c.name ILIKE 'Nightlife%%'
+        OR c.name ILIKE '%%Bars & Nightlife%%' OR c.name ILIKE '%%Bar%%'
+      )
+    )                                                                                AS bars_spend,
+    SUM(amount) FILTER (
+      WHERE NOT is_excluded AND amount > 0 AND (
+        c.name ILIKE 'Entertainment%%' OR c.name ILIKE 'Music%%' OR c.name ILIKE 'Concerts%%'
+      )
+    )                                                                                AS entertainment_spend,
+    SUM(amount) FILTER (
+      WHERE NOT is_excluded AND amount > 0 AND (
+        c.name ILIKE 'Shopping%%' OR c.name ILIKE 'Clothing%%' OR c.name ILIKE 'Personal%%'
+      )
+    )                                                                                AS shopping_spend,
+    SUM(amount) FILTER (
+      WHERE NOT is_excluded AND amount > 0 AND (
+        c.name ILIKE 'Travel%%' OR c.name ILIKE 'Vacation%%' OR c.name ILIKE 'Hotel%%'
+      )
+    )                                                                                AS travel_spend,
+    COUNT(*) FILTER (
+      WHERE NOT is_excluded AND amount >= 50 AND (
+        c.name ILIKE 'Restaurants%%' OR c.name ILIKE 'Bars%%'
+        OR c.name ILIKE 'Nightlife%%' OR c.name ILIKE '%%Bar%%'
+      )
+    )                                                                                AS dining_out_txn_count,
+    MAX(amount) FILTER (
+      WHERE NOT is_excluded AND amount > 0 AND (
+        c.name ILIKE 'Restaurants%%' OR c.name ILIKE 'Bars%%'
+        OR c.name ILIKE 'Nightlife%%' OR c.name ILIKE '%%Bar%%'
+      )
+    )                                                                                AS dining_out_txn_max
   FROM fact_transaction t
   LEFT JOIN dim_category c ON c.category_id = t.category_id
   GROUP BY t.date
@@ -223,7 +258,18 @@ SELECT
   fd.energy_kcal, fd.protein_g, fd.carbs_g, fd.fat_g, fd.fiber_g, fd.alcohol_g, fd.caffeine_mg,
   fa.meal_count, fa.first_meal_time, fa.last_meal_time, fa.eating_window_hours,
   fa.breakfast_kcal, fa.lunch_kcal, fa.dinner_kcal, fa.snack_kcal,
-  sa.total_spend, sa.food_spend, sa.restaurant_spend, sa.groceries_spend, sa.transportation_spend,
+  -- Spending columns: COALESCE to 0 for any day where fact_transaction
+  -- has any rows but the category-FILTER produced NULL (no charges in that
+  -- subset). For days with NO fact_transaction rows at all, sa.* is NULL via
+  -- the LEFT JOIN — keep total_spend NULL (no spend data) but default the
+  -- derived counts/sums sensibly so analytics tools can sum them.
+  COALESCE(sa.total_spend,        0), COALESCE(sa.food_spend,           0),
+  COALESCE(sa.restaurant_spend,   0), COALESCE(sa.groceries_spend,      0),
+  COALESCE(sa.transportation_spend, 0),
+  COALESCE(sa.alcohol_spend,      0), COALESCE(sa.bars_spend,           0),
+  COALESCE(sa.entertainment_spend,0), COALESCE(sa.shopping_spend,       0),
+  COALESCE(sa.travel_spend,       0),
+  COALESCE(sa.dining_out_txn_count, 0), sa.dining_out_txn_max,
   bw.value, bf.value,
   hp.had_alcohol, hp.alcohol_drinks,
   hp.had_caffeine, hp.caffeine_servings, hp.caffeine_last_serving_time,
