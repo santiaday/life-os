@@ -36,11 +36,17 @@ log = get_logger(__name__)
 mcp = FastMCP(
     name="life-os",
     instructions=(
-        "Personal life-data tools for Santi: Whoop, Google Calendar, "
+        "Personal life-data tools for Santi: Whoop (recovery, sleep, "
+        "workouts, journal, ADVANCED LABS BIOMARKERS), Google Calendar, "
         "Cronometer, and Copilot Money in a single warehouse. "
         "Always call get_schema_docs first when answering an analytical "
-        "question. Prefer mart_daily for daily-grain queries. Use ask_sql "
-        "only when no semantic tool fits."
+        "question. Prefer mart_daily for daily-grain queries. "
+        "ANY health-related question (energy, recovery problems, hormones, "
+        "lipids, sleep, inflammation, vitamins, libido, weight) should "
+        "ALWAYS call get_lab_results first to ground the answer in the "
+        "user's actual biomarker values — out-of-range markers sort first. "
+        "Use get_biomarker_info(biomarker_id) for a deep dive on any "
+        "single biomarker. Use ask_sql only when no semantic tool fits."
     ),
     # The streamable-HTTP route lives at the *root* of the inner ASGI app so
     # FastAPI can mount it at /mcp without requiring the awkward
@@ -263,6 +269,33 @@ def get_habit_history(habit_key: str, start_date: date, end_date: date) -> dict:
     return T.get_habit_history(habit_key, start_date, end_date)
 
 
+@_tool(description=T.TOOLS["list_lab_tests"]["description"])
+def list_lab_tests() -> dict:
+    return T.list_lab_tests()
+
+
+@_tool(description=T.TOOLS["get_lab_results"]["description"])
+def get_lab_results(
+    biomarker_id: str | None = None,
+    status: str | None = None,
+    category: str | None = None,
+    test_id: str | None = None,
+    search: str | None = None,
+) -> dict:
+    return T.get_lab_results(
+        biomarker_id=biomarker_id,
+        status=status,
+        category=category,
+        test_id=test_id,
+        search=search,
+    )
+
+
+@_tool(description=T.TOOLS["get_biomarker_info"]["description"])
+def get_biomarker_info(biomarker_id: str) -> dict:
+    return T.get_biomarker_info(biomarker_id)
+
+
 @_tool(description=T.TOOLS["ask_sql"]["description"])
 def ask_sql(
     query: str,
@@ -463,11 +496,16 @@ def compute_couple_balances(
 @_tool(description=(
     "One-shot couples owed-on-card calc. Pass account_ids OR account_names "
     "(ILIKE) to scope to specific cards (joint Chase, Amazon, etc.). Override "
-    "split_me/split_partner per call (e.g. 0.65/0.35). Joint-tagged txns are "
-    "split per configured ratio; me/partner-tagged go fully to that person; "
-    "untagged are flagged in needs_review and (unless joint_only=true) treated "
-    "as joint. Pending+posted duplicates auto-flagged and skipped. Returns "
-    "per-account breakdown, totals owed by each person, and the line-item math."
+    "split_me/split_partner per call (e.g. 0.65/0.35). Joint-tagged charges "
+    "are split per configured ratio; me/partner-tagged go fully to that "
+    "person; untagged charges are flagged in needs_review and (unless "
+    "joint_only=true) treated as joint. Payments (negative amounts) are "
+    "credited per tag: a 'me'-tagged payment reduces what you owe; a "
+    "'joint'-tagged payment reduces the joint pool (both shares per split); "
+    "untagged payments go to needs_review and are NOT auto-applied. By default "
+    "auto-refreshes from Copilot if the local mirror is older than 30 minutes "
+    "(refresh_if_stale_minutes=null to disable). Pending+posted duplicates "
+    "auto-flagged and skipped."
 ))
 def compute_couple_owed(
     start_date: date,
@@ -478,6 +516,8 @@ def compute_couple_owed(
     split_partner: float | None = None,
     joint_only: bool = False,
     flag_duplicate_pending: bool = True,
+    include_payments: bool = True,
+    refresh_if_stale_minutes: int | None = 30,
 ) -> dict:
     return W.compute_couple_owed(
         start_date, end_date,
@@ -485,6 +525,8 @@ def compute_couple_owed(
         split_me=split_me, split_partner=split_partner,
         joint_only=joint_only,
         flag_duplicate_pending=flag_duplicate_pending,
+        include_payments=include_payments,
+        refresh_if_stale_minutes=refresh_if_stale_minutes,
     )
 
 
