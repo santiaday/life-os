@@ -560,12 +560,29 @@ def list_account_owners() -> dict:
     )
 
 
+def _default_window(
+    start_date: date | None, end_date: date | None
+) -> tuple[date, date]:
+    """If a couples-calc caller omits dates, default to the current calendar
+    month (1st of this month → today). Set independently so a caller can
+    pass just one bound and get a sensible default for the other."""
+    from datetime import date as _date
+
+    today = _date.today()
+    if end_date is None:
+        end_date = today
+    if start_date is None:
+        start_date = end_date.replace(day=1)
+    return start_date, end_date
+
+
 def compute_couple_balances(
-    start_date: date,
-    end_date: date,
+    start_date: date | None = None,
+    end_date: date | None = None,
     include_personal: bool = False,
 ) -> dict:
-    """Compute who owes whom for the period.
+    """Compute who owes whom for the period. Defaults to the current calendar
+    month if dates are omitted.
 
     Algorithm:
       For every transaction in [start_date, end_date] that has a couple tag:
@@ -586,6 +603,7 @@ def compute_couple_balances(
         settings.COUPLE_TAG_PARTNER.lower(): "partner",
         settings.COUPLE_TAG_JOINT.lower(): "joint",
     }
+    start_date, end_date = _default_window(start_date, end_date)
     ownership = settings.couple_account_ownership()
     split_me = float(settings.COUPLE_SPLIT_ME)
     split_partner = float(settings.COUPLE_SPLIT_PARTNER)
@@ -690,8 +708,8 @@ def compute_couple_balances(
 
 
 def compute_couple_owed(
-    start_date: date,
-    end_date: date,
+    start_date: date | None = None,
+    end_date: date | None = None,
     account_ids: list[str] | None = None,
     account_names: list[str] | None = None,
     split_me: float | None = None,
@@ -703,10 +721,11 @@ def compute_couple_owed(
 ) -> dict:
     """One-shot couples calc for a specific set of cards.
 
-    Built for the common conversation: "calculate what me and my wife owe on
-    our joint Chase card and Amazon card this month, split joint-tagged
-    transactions 65/35." Avoids the previous round-trip-per-tool, raw-fetch,
-    Python-dedupe path.
+    Defaults to the current calendar month if dates are omitted. Built for
+    the common conversation: "calculate what me and my wife owe on our joint
+    Chase card and Amazon card this month, split joint-tagged transactions
+    65/35." Avoids the previous round-trip-per-tool, raw-fetch, Python-dedupe
+    path.
 
     Charges (amount > 0) accrue debt per their couple tag. Payments (amount < 0)
     on the same accounts CREDIT the relevant pool per their tag — so a payment
@@ -749,6 +768,7 @@ def compute_couple_owed(
             ),
         )
 
+    start_date, end_date = _default_window(start_date, end_date)
     sm = float(split_me if split_me is not None else settings.COUPLE_SPLIT_ME)
     sp = float(split_partner if split_partner is not None else settings.COUPLE_SPLIT_PARTNER)
     if abs(sm + sp - 1.0) > 0.001:

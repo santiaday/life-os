@@ -479,37 +479,41 @@ def list_account_owners() -> dict:
 
 @_tool(description=(
     "Compute who owes whom for the period using couple tags + account "
-    "ownership. For each tagged transaction: identifies the payer from the "
-    "account, applies the configured split (default 50/50) for joint expenses "
-    "or full amount for cross-paid personal expenses. Returns net 'me owes "
-    "partner' figure plus per-transaction breakdown. Skips transactions whose "
-    "account isn't in the COUPLE_ACCOUNTS_* mapping (count surfaced)."
+    "ownership. DEFAULTS TO THE CURRENT CALENDAR MONTH if dates are omitted "
+    "— always omit them unless the user explicitly asks for a different "
+    "window. For each tagged transaction: identifies the payer from the "
+    "account, applies the configured split for joint expenses or full amount "
+    "for cross-paid personal expenses. Returns net 'me owes partner' figure "
+    "plus per-transaction breakdown. Skips transactions whose account isn't "
+    "in the COUPLE_ACCOUNTS_* mapping (count surfaced)."
 ))
 def compute_couple_balances(
-    start_date: date,
-    end_date: date,
+    start_date: date | None = None,
+    end_date: date | None = None,
     include_personal: bool = False,
 ) -> dict:
     return W.compute_couple_balances(start_date, end_date, include_personal)
 
 
 @_tool(description=(
-    "One-shot couples owed-on-card calc. Pass account_ids OR account_names "
-    "(ILIKE) to scope to specific cards (joint Chase, Amazon, etc.). Override "
-    "split_me/split_partner per call (e.g. 0.65/0.35). Joint-tagged charges "
-    "are split per configured ratio; me/partner-tagged go fully to that "
-    "person; untagged charges are flagged in needs_review and (unless "
-    "joint_only=true) treated as joint. Payments (negative amounts) are "
-    "credited per tag: a 'me'-tagged payment reduces what you owe; a "
-    "'joint'-tagged payment reduces the joint pool (both shares per split); "
-    "untagged payments go to needs_review and are NOT auto-applied. By default "
-    "auto-refreshes from Copilot if the local mirror is older than 30 minutes "
-    "(refresh_if_stale_minutes=null to disable). Pending+posted duplicates "
-    "auto-flagged and skipped."
+    "One-shot couples owed-on-card calc. DEFAULTS TO THE CURRENT CALENDAR "
+    "MONTH if dates are omitted — always omit them unless the user explicitly "
+    "asks for a different window (e.g. 'last month', 'YTD'). Pass account_ids "
+    "OR account_names (ILIKE) to scope to specific cards (joint Chase, "
+    "Amazon, etc.). Override split_me/split_partner per call (e.g. 0.65/0.35). "
+    "Joint-tagged charges are split per configured ratio; me/partner-tagged "
+    "go fully to that person; untagged charges are flagged in needs_review "
+    "and (unless joint_only=true) treated as joint. Payments (negative "
+    "amounts) are credited per tag: a 'me'-tagged payment reduces what you "
+    "owe; a 'joint'-tagged payment reduces the joint pool (both shares per "
+    "split); untagged payments go to needs_review and are NOT auto-applied. "
+    "By default auto-refreshes from Copilot if the local mirror is older than "
+    "30 minutes (refresh_if_stale_minutes=null to disable). Pending+posted "
+    "duplicates auto-flagged and skipped."
 ))
 def compute_couple_owed(
-    start_date: date,
-    end_date: date,
+    start_date: date | None = None,
+    end_date: date | None = None,
     account_ids: list[str] | None = None,
     account_names: list[str] | None = None,
     split_me: float | None = None,
