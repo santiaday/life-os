@@ -40,6 +40,7 @@ COPY ingest_calendar ./ingest_calendar
 COPY ingest_cronometer ./ingest_cronometer
 COPY ingest_copilot ./ingest_copilot
 COPY ingest_whoop_journal ./ingest_whoop_journal
+COPY ingest_whoop_labs ./ingest_whoop_labs
 COPY mart_refresh ./mart_refresh
 
 EXPOSE 8080

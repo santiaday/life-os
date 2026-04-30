@@ -36,11 +36,17 @@ log = get_logger(__name__)
 mcp = FastMCP(
     name="life-os",
     instructions=(
-        "Personal life-data tools for Santi: Whoop, Google Calendar, "
+        "Personal life-data tools for Santi: Whoop (recovery, sleep, "
+        "workouts, journal, Advanced Labs biomarkers), Google Calendar, "
         "Cronometer, and Copilot Money in a single warehouse. "
         "Always call get_schema_docs first when answering an analytical "
-        "question. Prefer mart_daily for daily-grain queries. Use ask_sql "
-        "only when no semantic tool fits."
+        "question. Prefer mart_daily for daily-grain queries. "
+        "For health questions (energy, hormones, lipids, sleep, "
+        "inflammation, vitamins, libido, weight, recovery problems) "
+        "ALWAYS call get_lab_results first to ground the answer in "
+        "actual biomarker values — out-of-range markers sort first. "
+        "Use get_biomarker_info(biomarker_id) for a deep dive on a "
+        "single marker. Use ask_sql only when no semantic tool fits."
     ),
     # The streamable-HTTP route lives at the *root* of the inner ASGI app so
     # FastAPI can mount it at /mcp without requiring the awkward
@@ -261,6 +267,33 @@ def get_journal_entries(
 ))
 def get_habit_history(habit_key: str, start_date: date, end_date: date) -> dict:
     return T.get_habit_history(habit_key, start_date, end_date)
+
+
+@_tool(description=T.TOOLS["list_lab_tests"]["description"])
+def list_lab_tests() -> dict:
+    return T.list_lab_tests()
+
+
+@_tool(description=T.TOOLS["get_lab_results"]["description"])
+def get_lab_results(
+    biomarker_id: str | None = None,
+    status: str | None = None,
+    category: str | None = None,
+    test_id: str | None = None,
+    search: str | None = None,
+) -> dict:
+    return T.get_lab_results(
+        biomarker_id=biomarker_id,
+        status=status,
+        category=category,
+        test_id=test_id,
+        search=search,
+    )
+
+
+@_tool(description=T.TOOLS["get_biomarker_info"]["description"])
+def get_biomarker_info(biomarker_id: str) -> dict:
+    return T.get_biomarker_info(biomarker_id)
 
 
 @_tool(description=T.TOOLS["ask_sql"]["description"])

@@ -37,13 +37,14 @@ def refresh_data(source: str = "all") -> dict:
     `source` ∈ {all, whoop, calendar, cronometer, copilot, mart}. Default 'all'
     re-runs every ingester and the mart. Use this at session start to ensure
     you're not analyzing stale data."""
-    valid = {"all", "whoop", "whoop_journal", "calendar", "cronometer", "copilot", "mart"}
+    valid = {"all", "whoop", "whoop_journal", "whoop_labs", "calendar",
+             "cronometer", "copilot", "mart"}
     if source not in valid:
         return _err("refresh_data", ValueError(f"source must be one of {sorted(valid)}"))
 
     out: dict[str, Any] = {}
     targets = (
-        ("whoop", "whoop_journal", "calendar", "cronometer", "copilot")
+        ("whoop", "whoop_journal", "whoop_labs", "calendar", "cronometer", "copilot")
         if source == "all" else (source,)
     )
 
@@ -56,6 +57,13 @@ def refresh_data(source: str = "all") -> dict:
                 elif name == "whoop_journal":
                     from ingest_whoop_journal import ingest as journal_ingest
                     out[name] = journal_ingest.run_all()
+                elif name == "whoop_labs":
+                    # Catalog-only refresh: panel ingestion is file-based
+                    # (Whoop has no public API yet) so it's not part of the
+                    # automatic source list. Re-seeds dim_lab_biomarker from
+                    # the curated reference data — idempotent.
+                    from ingest_whoop_labs import ingest as labs_ingest
+                    out[name] = {"biomarker_catalog": labs_ingest.ingest_biomarker_catalog()}
                 elif name == "calendar":
                     from ingest_calendar import ingest as calendar_ingest
                     out[name] = calendar_ingest.run_all()

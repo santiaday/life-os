@@ -10,7 +10,6 @@ context. If you add new tables or columns, add them here too.
 
 from __future__ import annotations
 
-
 SCHEMA_DOCS: dict = {
     "tables": {
         "mart_daily": {
@@ -146,6 +145,61 @@ SCHEMA_DOCS: dict = {
                 "behavior_type": "POSITIVE / NEGATIVE / NORMAL / NOT_ACTIONABLE — Whoop's directionality hint.",
             },
         },
+        "dim_lab_biomarker": {
+            "purpose": (
+                "Catalog of every biomarker Whoop Advanced Labs measures (75 in "
+                "the Comprehensive Health Panel). Curated reference data: "
+                "description, category, optimal/sufficient ranges, what high/low "
+                "means, and influencing factors. Joined to fact_lab_result on "
+                "biomarker_id. CONSULT THIS FOR ANY HEALTH QUESTION involving "
+                "blood markers, hormones, lipids, kidney/liver function, "
+                "inflammation, or vitamins."
+            ),
+            "grain": "1 row per biomarker.",
+            "columns": {
+                "biomarker_id": "Whoop's stable slug — e.g. 'apolipoprotein_b', 'vitamin_d', 'hemoglobin_a1c'.",
+                "category": "Cardiometabolic | Liver | Kidney | Hormones | Inflammation | Blood Count | Iron Metabolism | Vitamins & Minerals.",
+                "optimal_low, optimal_high": "Tight clinical target (Whoop's 'Optimal' band). Inside this = OPTIMAL classification.",
+                "sufficient_low, sufficient_high": "Outer acceptable range. Outside this = OUT_OF_RANGE.",
+                "what_high_means, what_low_means": "Clinical interpretation strings — surface these when explaining a result.",
+                "influenced_by": "Lifestyle / drug / physiologic factors that shift the value.",
+            },
+        },
+        "fact_lab_result": {
+            "purpose": (
+                "Per-biomarker results from Whoop Advanced Labs panels. One row "
+                "per (test_id, biomarker_id). Always join to dim_lab_biomarker "
+                "to get the description and reference ranges — do that via the "
+                "get_lab_results tool, which composes the join for you."
+            ),
+            "grain": "1 row per (test_id, biomarker_id).",
+            "columns": {
+                "value_text": "Raw value as Whoop displays it (e.g. '6.0', '293.0', '0.31').",
+                "value_numeric": "Parsed numeric for filtering/comparison.",
+                "status_type": "OPTIMAL | SUFFICIENT | OUT_OF_RANGE — Whoop's classification.",
+                "trend": "POSITIVE_RANGE | SUFFICIENT_BLUE | CONCERN_RANGE — UI tint hint.",
+                "indicator_percent": "Where the value sits on Whoop's range meter, 0-1.",
+                "range_meter": "JSONB of normalized meter sections + indicator. UI geometry, not absolute units.",
+            },
+            "common_queries": [
+                "Out of range: SELECT biomarker_id, value_text, unit FROM fact_lab_result WHERE status_type = 'OUT_OF_RANGE'",
+                "Hormones: prefer get_lab_results(category='Hormones').",
+            ],
+            "gotchas": [
+                "range_meter holds 0-1 normalized positions, NOT absolute reference range bounds. For absolute ranges read dim_lab_biomarker.optimal_low/high or sufficient_low/high.",
+                "Same biomarker can appear in multiple panels over time — filter by test_id or test_date for a specific draw.",
+            ],
+        },
+        "raw_whoop_labs": {
+            "purpose": "Raw JSON payloads from Whoop Advanced Labs panels. Keyed by test_id.",
+            "grain": "1 row per panel test.",
+            "columns": {
+                "test_id": "Whoop's UUID for the test.",
+                "test_name": "e.g. 'Comprehensive Health Panel (75)'.",
+                "test_date": "Date of blood draw (parsed from the panel header).",
+                "payload": "Full UI JSON dump — only useful as a fallback; everything actionable is parsed into fact_lab_result.",
+            },
+        },
         "fact_food_daily_apple_health": {
             "purpose": "Daily macros from Apple Health, pulled via Whoop's integrations.tracker_inputs. Use for cross-validation with Cronometer's fact_food_daily, or as a fallback when Cronometer is broken.",
             "grain": "1 row per day.",
@@ -255,6 +309,24 @@ SCHEMA_DOCS: dict = {
             "auto-flags pending+posted duplicates and surfaces untagged charges "
             "in needs_review for the user to triage. ONE tool call replaces the "
             "old multi-step flow."
+        ),
+        "health_question_with_labs": (
+            "User asks about anything blood-test-adjacent — energy, fatigue, "
+            "recovery problems, hormones, libido, lipids/cholesterol, liver, "
+            "kidney, inflammation, vitamin status, sleep + biomarkers, etc. "
+            "1) `get_lab_results()` — the latest panel, sorted out-of-range "
+            "first. Skim the OUT_OF_RANGE rows to identify what's actually "
+            "off. "
+            "2) For specific biomarker deep dives: `get_biomarker_info("
+            "biomarker_id)` returns description, optimal/sufficient ranges, "
+            "what high/low means, influencing factors — pair with the "
+            "user's value to give a grounded answer. "
+            "3) Reach for `get_lab_results(category='Hormones')` (or "
+            "'Cardiometabolic', 'Liver', 'Kidney', 'Inflammation', "
+            "'Blood Count', 'Iron Metabolism', 'Vitamins & Minerals') to "
+            "scope to one body system. "
+            "4) Reference recovery/sleep/journal data alongside (mart_daily) "
+            "when the user asks how lifestyle correlates."
         ),
         "self_observability": (
             "User asks 'why is the MCP slow' or 'which tools are getting called "

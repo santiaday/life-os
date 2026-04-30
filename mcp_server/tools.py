@@ -795,6 +795,154 @@ def get_habit_history(
     )
 
 
+# ---- Whoop labs reads ------------------------------------------------------
+def list_lab_tests() -> dict:
+    """All ingested Advanced Labs panels — one row per test_id."""
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT r.test_id, r.test_name, r.test_date, r.fetched_at,
+                   COUNT(f.id) AS biomarker_count,
+                   COUNT(*) FILTER (WHERE f.status_type = 'OPTIMAL')      AS n_optimal,
+                   COUNT(*) FILTER (WHERE f.status_type = 'SUFFICIENT')   AS n_sufficient,
+                   COUNT(*) FILTER (WHERE f.status_type = 'OUT_OF_RANGE') AS n_out_of_range
+            FROM raw_whoop_labs r
+            LEFT JOIN fact_lab_result f ON f.test_id = r.test_id
+            GROUP BY r.test_id, r.test_name, r.test_date, r.fetched_at
+            ORDER BY r.test_date DESC NULLS LAST
+            """
+        )
+        rows = _serialize(cur.fetchall())
+    return _ok("list_lab_tests", rows)
+
+
+def get_lab_results(
+    biomarker_id: str | None = None,
+    status: str | None = None,
+    category: str | None = None,
+    test_id: str | None = None,
+    search: str | None = None,
+) -> dict:
+    """Lab biomarker results joined with their reference info.
+
+    Defaults to the most recent panel. Filters compose with AND.
+    Returns one row per biomarker with: current value+unit, status,
+    optimal/sufficient bands, description, what high/low means, and
+    the indicator's percentile on Whoop's range meter.
+    """
+    where: list[str] = []
+    params: list = []
+
+    if test_id is None:
+        where.append("f.test_id = (SELECT test_id FROM raw_whoop_labs ORDER BY test_date DESC NULLS LAST LIMIT 1)")
+    else:
+        where.append("f.test_id = %s")
+        params.append(test_id)
+
+    if biomarker_id:
+        where.append("f.biomarker_id = %s")
+        params.append(biomarker_id)
+
+    if status:
+        where.append("f.status_type = %s")
+        params.append(status.upper())
+
+    if category:
+        where.append("d.category ILIKE %s")
+        params.append(category)
+
+    if search:
+        where.append("(d.title ILIKE %s OR d.biomarker_id ILIKE %s OR d.description ILIKE %s)")
+        params.append(f"%{search}%")
+        params.append(f"%{search}%")
+        params.append(f"%{search}%")
+
+    where_clause = " WHERE " + " AND ".join(where) if where else ""
+    q = f"""
+        SELECT
+          f.biomarker_id,
+          d.title,
+          d.category,
+          f.value_text       AS value,
+          f.value_numeric,
+          COALESCE(f.unit, d.unit) AS unit,
+          f.status_type,
+          f.trend,
+          f.trend_display,
+          d.optimal_low,
+          d.optimal_high,
+          d.sufficient_low,
+          d.sufficient_high,
+          d.description,
+          d.what_high_means,
+          d.what_low_means,
+          d.influenced_by,
+          d.notes,
+          f.indicator_percent,
+          f.test_id,
+          f.test_date
+        FROM fact_lab_result f
+        JOIN dim_lab_biomarker d ON d.biomarker_id = f.biomarker_id
+        {where_clause}
+        ORDER BY
+          CASE f.status_type
+            WHEN 'OUT_OF_RANGE' THEN 0
+            WHEN 'SUFFICIENT'   THEN 1
+            WHEN 'OPTIMAL'      THEN 2
+            ELSE 3
+          END,
+          d.category, d.title
+        LIMIT 200
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, params)
+        rows = _serialize(cur.fetchall())
+
+    summary = {
+        "total": len(rows),
+        "n_optimal":      sum(1 for r in rows if r.get("status_type") == "OPTIMAL"),
+        "n_sufficient":   sum(1 for r in rows if r.get("status_type") == "SUFFICIENT"),
+        "n_out_of_range": sum(1 for r in rows if r.get("status_type") == "OUT_OF_RANGE"),
+    }
+    return _ok("get_lab_results", rows, extra={"summary": summary})
+
+
+def get_biomarker_info(biomarker_id: str) -> dict:
+    """Reference card for a biomarker: description, optimal/sufficient
+    ranges, what high/low means, influenced_by — plus the user's most
+    recent measured value if a panel has been ingested."""
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT
+              d.biomarker_id, d.title, d.category, d.unit, d.description,
+              d.optimal_low, d.optimal_high, d.sufficient_low, d.sufficient_high,
+              d.what_high_means, d.what_low_means, d.influenced_by, d.notes,
+              f.value_text         AS most_recent_value,
+              f.value_numeric      AS most_recent_value_numeric,
+              f.unit               AS most_recent_unit,
+              f.status_type        AS most_recent_status,
+              f.trend_display      AS most_recent_trend_display,
+              f.test_date          AS most_recent_test_date
+            FROM dim_lab_biomarker d
+            LEFT JOIN LATERAL (
+              SELECT * FROM fact_lab_result
+              WHERE biomarker_id = d.biomarker_id
+              ORDER BY test_date DESC NULLS LAST
+              LIMIT 1
+            ) f ON TRUE
+            WHERE d.biomarker_id = %s
+            """,
+            [biomarker_id],
+        )
+        row = cur.fetchone()
+    if row is None:
+        return _err("get_biomarker_info", ValueError(
+            f"Unknown biomarker_id '{biomarker_id}'. Use get_lab_results(search=...) to discover."
+        ))
+    return _ok("get_biomarker_info", _serialize([row]))
+
+
 # ---- ask_sql ----------------------------------------------------------------
 def ask_sql(
     query: str,
@@ -1081,6 +1229,54 @@ TOOLS: dict[str, dict] = {
                 "method": {"type": "string", "enum": ["pearson", "spearman"], "default": "pearson"},
                 "return_series": {"type": "boolean", "default": True},
             },
+        },
+    },
+    "list_lab_tests": {
+        "fn": list_lab_tests,
+        "description": (
+            "List all ingested Whoop Advanced Labs panels with per-panel "
+            "biomarker counts (n optimal / sufficient / out-of-range). One "
+            "row per test_id."
+        ),
+        "input": {"type": "object", "properties": {}},
+    },
+    "get_lab_results": {
+        "fn": get_lab_results,
+        "description": (
+            "Whoop Advanced Labs biomarker results joined with reference info. "
+            "Defaults to the most recent panel. Filters: biomarker_id (exact), "
+            "status (OPTIMAL|SUFFICIENT|OUT_OF_RANGE), category (ILIKE — e.g. "
+            "'Cardiometabolic', 'Hormones', 'Liver', 'Kidney', 'Inflammation', "
+            "'Blood Count', 'Iron Metabolism', 'Vitamins & Minerals'), test_id, "
+            "or search (substring across title/description). Each row carries "
+            "the user's value, unit, optimal/sufficient ranges, description, "
+            "what high/low means, and influencing factors. Out-of-range rows "
+            "sort first. ALWAYS check this for any health/biomarker question."
+        ),
+        "input": {
+            "type": "object",
+            "properties": {
+                "biomarker_id": {"type": "string"},
+                "status": {"type": "string", "enum": ["OPTIMAL", "SUFFICIENT", "OUT_OF_RANGE"]},
+                "category": {"type": "string"},
+                "test_id": {"type": "string"},
+                "search": {"type": "string"},
+            },
+        },
+    },
+    "get_biomarker_info": {
+        "fn": get_biomarker_info,
+        "description": (
+            "Reference card for a single biomarker: description, optimal "
+            "and sufficient ranges, clinical interpretation of high/low, "
+            "what influences it, plus the user's most recent measured "
+            "value if available. biomarker_id is the Whoop slug "
+            "(e.g. 'apolipoprotein_b', 'vitamin_d', 'estradiol')."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["biomarker_id"],
+            "properties": {"biomarker_id": {"type": "string"}},
         },
     },
     "ask_sql": {
