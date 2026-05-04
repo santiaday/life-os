@@ -65,6 +65,18 @@ class Settings(BaseSettings):
     GOOGLE_CALENDAR_IDS: str = "primary"  # comma-separated
     INTERNAL_EMAIL_DOMAINS: str = ""  # comma-separated
 
+    # ---- Lifelog calendar sync --------------------------------------------
+    # JSON map from event.category → Google Calendar id. Calendars must be
+    # created manually in Google Calendar UI; ids look like
+    # "abc123@group.calendar.google.com" or "primary".
+    # Example:
+    #   {"Sleep":"abc@...","Workout":"abc@...",
+    #    "DoorLoop work":"def@...","Personal work":"ghi@..."}
+    LIFELOG_CALENDAR_MAP_JSON: str = "{}"
+    LIFELOG_SYNC_BATCH_SIZE: int = 200
+    # If True, calendar events render as "free" rather than blocking.
+    LIFELOG_EVENTS_TRANSPARENT: bool = True
+
     # ---- Cronometer --------------------------------------------------------
     CRONOMETER_USERNAME: str | None = None
     CRONOMETER_PASSWORD: str | None = None
@@ -108,6 +120,23 @@ class Settings(BaseSettings):
     @property
     def calendar_ids(self) -> list[str]:
         return [c.strip() for c in self.GOOGLE_CALENDAR_IDS.split(",") if c.strip()]
+
+    @property
+    def lifelog_calendar_map(self) -> dict[str, str]:
+        """{category: google_calendar_id}. Empty dict if unconfigured —
+        calendar_sync will refuse to run with a clear error rather than
+        spamming events into the wrong place."""
+        import json
+
+        try:
+            parsed = json.loads(self.LIFELOG_CALENDAR_MAP_JSON or "{}")
+        except json.JSONDecodeError as e:
+            raise RuntimeError(
+                f"LIFELOG_CALENDAR_MAP_JSON is not valid JSON: {e}"
+            ) from e
+        if not isinstance(parsed, dict):
+            raise RuntimeError("LIFELOG_CALENDAR_MAP_JSON must be a JSON object")
+        return {str(k): str(v) for k, v in parsed.items()}
 
     @property
     def internal_email_domains(self) -> list[str]:

@@ -103,6 +103,22 @@ def build() -> BlockingScheduler:
         coalesce=True,
     )
 
+    # ---- Lifelog calendar publisher ----------------------------------------
+    # Pushes events table rows (Whoop sleep/workout, ActivityWatch work
+    # blocks) out to the dedicated lifelog Google calendars. Doesn't touch
+    # the mart layer, so chain_mart=False keeps mart_refresh from firing
+    # on every tick.
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(minute="*/15"),
+        args=["calendar_sync", "sync"],
+        kwargs={"chain_mart": False},
+        id="calendar_sync_15min",
+        name="Lifelog events → Google Calendar push (every 15 min)",
+        max_instances=1,
+        coalesce=True,
+    )
+
     # ---- Cronometer (Phase 6) ---------------------------------------------
     sched.add_job(
         run_subprocess,

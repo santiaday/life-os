@@ -22,7 +22,15 @@ from lifeos_core.settings import settings
 
 log = get_logger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
+# Two scopes: read-only on calendars (used by ingest_calendar to mirror events
+# into the warehouse) and read/write on events (used by calendar_sync to push
+# lifelog events out to the dedicated lifelog calendars). One token covers
+# both services. Adding a new scope requires re-running `oauth-init` to
+# re-consent — Google won't broaden a previously-granted token automatically.
+SCOPES = [
+    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/calendar.events",
+]
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 
 

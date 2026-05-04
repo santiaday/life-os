@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd template for aw_sync. Install via aw_sync/install.sh, which
+  substitutes ${HOME} and the LifeOS repo path into a copy at
+  ~/Library/LaunchAgents/io.lifeos.awsync.plist and runs launchctl bootstrap.
+
+  Why launchd not cron: we want it to wake up on system unlock and survive
+  reboots. cron on macOS is deprecated; launchd is the supported path.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>io.lifeos.awsync</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__LIFEOS_VENV_PYTHON__</string>
+    <string>-m</string>
+    <string>aw_sync</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__LIFEOS_REPO__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <!-- Read .env from the repo working directory. The settings module
+       does this automatically; we just need WorkingDirectory set. -->
+
+  <key>StartInterval</key>
+  <integer>300</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/aw_sync.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/aw_sync.log</string>
+</dict>
+</plist>

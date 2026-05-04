@@ -127,6 +127,77 @@ def transform_workout(api: dict) -> dict:
     }
 
 
+# ---- Calendar event projections --------------------------------------------
+# These build rows for the unified `events` table from raw Whoop API records.
+# The unified table is what calendar_sync reads to push to Google Calendar.
+# We don't go through fact_* — the raw API record has everything we need and
+# avoids ordering coupling between fact upsert and event upsert.
+
+
+def to_sleep_event(api: dict) -> dict | None:
+    """Build an `events` row from a Whoop /v2/activity/sleep record.
+
+    Returns None if the record lacks start/end (rare, but Whoop can emit
+    incomplete sleeps mid-stage)."""
+    start = _parse_ts(api.get("start"))
+    end = _parse_ts(api.get("end"))
+    if start is None or end is None:
+        return None
+
+    score = api.get("score") or {}
+    perf = _safe_num(score.get("sleep_performance_percentage"))
+    is_nap = bool(api.get("nap", False))
+    label = "Nap" if is_nap else "Sleep"
+    title = f"{label} ({perf:.0f}%)" if perf is not None else label
+
+    return {
+        "source": "whoop_sleep",
+        "source_event_id": str(api["id"]),
+        "event_type": "nap" if is_nap else "sleep",
+        "category": label,
+        "title": title,
+        "started_at": start,
+        "ended_at": end,
+        "metadata": {
+            "sleep_performance_pct": perf,
+            "sleep_efficiency_pct": _safe_num(score.get("sleep_efficiency_percentage")),
+            "sleep_consistency_pct": _safe_num(score.get("sleep_consistency_percentage")),
+            "is_nap": is_nap,
+        },
+    }
+
+
+def to_workout_event(api: dict) -> dict | None:
+    """Build an `events` row from a Whoop /v2/activity/workout record."""
+    start = _parse_ts(api.get("start"))
+    end = _parse_ts(api.get("end"))
+    if start is None or end is None:
+        return None
+
+    score = api.get("score") or {}
+    sport = api.get("sport_name") or "Workout"
+    strain = _safe_num(score.get("strain"))
+    title = f"{sport} (strain {strain:.1f})" if strain is not None else sport
+
+    return {
+        "source": "whoop_workout",
+        "source_event_id": str(api["id"]),
+        "event_type": "workout",
+        "category": "Workout",
+        "title": title,
+        "started_at": start,
+        "ended_at": end,
+        "metadata": {
+            "sport_name": sport,
+            "strain": strain,
+            "kilojoules": _safe_int(score.get("kilojoule")),
+            "avg_heart_rate": _safe_int(score.get("average_heart_rate")),
+            "max_heart_rate": _safe_int(score.get("max_heart_rate")),
+            "distance_meters": _safe_num(score.get("distance_meter")),
+        },
+    }
+
+
 def _safe_int(v: Any) -> int | None:
     if v is None or v == "":
         return None

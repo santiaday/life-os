@@ -22,6 +22,7 @@ from psycopg.types.json import Jsonb
 from ingest_whoop import transforms
 from ingest_whoop.client import WhoopClient
 from lifeos_core.db import tx
+from lifeos_core.events import upsert_events
 from lifeos_core.logging import get_logger
 from lifeos_core.runs import ingestion_run, last_successful_run
 from lifeos_core.upsert import upsert_rows
@@ -150,8 +151,11 @@ def ingest_sleep(client: WhoopClient, *, backfill_days: int | None = None) -> in
                 row["updated_at"] = datetime.now(timezone.utc)
                 fact_rows.append(row)
             upsert_rows("fact_sleep", fact_rows, conflict_cols=["sleep_id"], connection=c)
+            event_rows = [e for e in (transforms.to_sleep_event(r) for r in records) if e]
+            upsert_events(event_rows, connection=c)
 
         run.upserted(len(fact_rows))
+        run.add_metadata(events_written=len(event_rows))
         return len(fact_rows)
 
 
@@ -182,8 +186,11 @@ def ingest_workouts(client: WhoopClient, *, backfill_days: int | None = None) ->
                 row["updated_at"] = datetime.now(timezone.utc)
                 fact_rows.append(row)
             upsert_rows("fact_workout", fact_rows, conflict_cols=["workout_id"], connection=c)
+            event_rows = [e for e in (transforms.to_workout_event(r) for r in records) if e]
+            upsert_events(event_rows, connection=c)
 
         run.upserted(len(fact_rows))
+        run.add_metadata(events_written=len(event_rows))
         return len(fact_rows)
 
 
