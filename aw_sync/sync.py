@@ -89,28 +89,34 @@ def _source_tag(category: str) -> str:
 
 
 # ---- Window resolution ------------------------------------------------------
-def _last_block_end(source: str) -> datetime | None:
-    """Most recent ended_at we've stored for this hostname's source.
-    Resume from there to avoid re-querying ground we already covered."""
+def _last_block(source: str) -> dict | None:
+    """Most recent block (started_at, ended_at, source_event_id) for this
+    hostname's source. We need the FULL block — not just ended_at — so
+    we can fold subsequent activity into it when the AFK gap is short.
+    AWQL's query_bucket drops events that started outside the query
+    window, so cross-run merging has to happen DB-side."""
     with tx() as c, c.cursor() as cur:
         cur.execute(
-            "SELECT max(ended_at) AS last_end FROM events WHERE source = %s",
+            """
+            SELECT started_at, ended_at, source_event_id
+            FROM events WHERE source = %s
+            ORDER BY ended_at DESC LIMIT 1
+            """,
             [source],
         )
-        row = cur.fetchone()
-        return row["last_end"] if row and row["last_end"] else None
+        return cur.fetchone()
 
 
-def _resolve_window(source: str, lookback_hours: int) -> tuple[datetime, datetime]:
+def _resolve_window(source: str, lookback_hours: int) -> tuple[datetime, datetime, dict | None]:
     end = datetime.now(UTC)
-    last = _last_block_end(source)
+    last = _last_block(source)
     if last is not None:
         # Re-query with a small overlap so a block that was still in
         # progress on the last sync gets its ended_at extended.
-        start = last - timedelta(minutes=15)
+        start = last["ended_at"] - timedelta(minutes=15)
     else:
         start = end - timedelta(hours=lookback_hours)
-    return start, end
+    return start, end, last
 
 
 # ---- ActivityWatch query ----------------------------------------------------
@@ -195,7 +201,7 @@ def sync_once(
     category = _category_for(hostname)
     source = _source_tag(category)
 
-    start, end = _resolve_window(source, lookback_hours)
+    start, end, last_db_block = _resolve_window(source, lookback_hours)
     log.info("aw_sync.window",
              hostname=hostname, source=source, category=category,
              start=start.isoformat(), end=end.isoformat())
@@ -208,12 +214,30 @@ def sync_once(
         max_block_s=max_block_s,
     )
 
-    rows = [
-        {
+    # Cross-run merge: if the earliest new block starts within idle_gap_s
+    # of the previous DB block's end, extend that DB block instead of
+    # creating a new fragment. Reuses the existing source_event_id so
+    # the upsert UPDATEs rather than INSERTs.
+    merged_with_last: str | None = None
+    if last_db_block is not None and blocks:
+        first_start, first_end = blocks[0]
+        gap_s = (first_start - last_db_block["ended_at"]).total_seconds()
+        if 0 <= gap_s < idle_gap_s:
+            blocks[0] = (
+                last_db_block["started_at"],
+                max(last_db_block["ended_at"], first_end),
+            )
+            merged_with_last = last_db_block["source_event_id"]
+
+    rows = []
+    for i, (s, e) in enumerate(blocks):
+        sid = (
+            merged_with_last if (i == 0 and merged_with_last is not None)
+            else events_store.make_aw_source_event_id(hostname, s.isoformat())
+        )
+        rows.append({
             "source": source,
-            "source_event_id": events_store.make_aw_source_event_id(
-                hostname, s.isoformat()
-            ),
+            "source_event_id": sid,
             "event_type": "work_block",
             "category": category,
             "title": category,
@@ -223,9 +247,7 @@ def sync_once(
                 "hostname": hostname,
                 "duration_seconds": int((e - s).total_seconds()),
             },
-        }
-        for s, e in blocks
-    ]
+        })
 
     written = events_store.upsert_events(rows)
     summary = {

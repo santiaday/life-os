@@ -39,8 +39,9 @@ import socket
 import sys
 import urllib.error
 import urllib.request
+# noqa: UP017 — this script must run on macOS system python3 (3.9), which
+# doesn't have `from datetime import UTC` (added in 3.11). Keep timezone.utc.
 from datetime import datetime, timedelta, timezone
-
 
 # ---- Config -----------------------------------------------------------------
 ENV_FILE = os.path.expanduser("~/.config/aw-sync.env")
@@ -154,14 +155,25 @@ def _sb_headers() -> dict:
     }
 
 
-def last_block_end(source: str) -> datetime | None:
-    """Most recent ended_at on this hostname's source. Returns None if no
-    rows yet (first run). Used as the resume point so we don't re-query
-    AW for ground we've already covered."""
+def _parse_ts(s: str) -> datetime:
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    return datetime.fromisoformat(s)
+
+
+def last_block(source: str) -> dict | None:
+    """Return the most recent block's full {started_at, ended_at,
+    source_event_id} for this hostname's source. Returns None on first run.
+
+    We need the full block (not just ended_at) so that when fresh AW
+    activity follows a brief AFK gap, we can fold it into the existing
+    block rather than creating a new short row. AWQL's query_bucket
+    drops merged events whose start is outside the query window, so
+    cross-run merging has to be done DB-side."""
     url = (
         f"{SUPABASE_URL}/rest/v1/events"
         f"?source=eq.{source}"
-        f"&select=ended_at"
+        f"&select=started_at,ended_at,source_event_id"
         f"&order=ended_at.desc"
         f"&limit=1"
     )
@@ -172,10 +184,11 @@ def last_block_end(source: str) -> datetime | None:
     rows = json.loads(body or b"[]")
     if not rows:
         return None
-    ts = rows[0]["ended_at"]
-    if ts.endswith("Z"):
-        ts = ts[:-1] + "+00:00"
-    return datetime.fromisoformat(ts)
+    return {
+        "started_at": _parse_ts(rows[0]["started_at"]),
+        "ended_at": _parse_ts(rows[0]["ended_at"]),
+        "source_event_id": rows[0]["source_event_id"],
+    }
 
 
 def upsert_events(rows: list[dict]) -> int:
@@ -270,11 +283,11 @@ def main() -> int:
     source = source_tag(category)
 
     end = datetime.now(timezone.utc)
-    last = last_block_end(source)
+    last = last_block(source)
     if last is not None:
         # Slight overlap so a block that was still in progress on the
         # last sync gets its ended_at extended on the next pass.
-        start = last - timedelta(minutes=15)
+        start = last["ended_at"] - timedelta(minutes=15)
     else:
         start = end - timedelta(hours=LOOKBACK_HOURS)
 
@@ -284,10 +297,34 @@ def main() -> int:
     aw_events = query_aw(start, end)
     blocks = build_blocks(aw_events)
 
-    rows = [
-        {
+    # Cross-run merge: if the earliest new block starts within IDLE_GAP_S
+    # of the previous block's end, fold it in. We reuse the previous block's
+    # source_event_id so the upsert UPDATEs the existing row (extending
+    # ended_at) rather than INSERTing a new short fragment. Without this,
+    # any AFK gap longer than 5 min (the launchd interval) creates a new
+    # row even when activity was effectively continuous.
+    merged_with_last: str | None = None
+    if last is not None and blocks:
+        first_start, first_end = blocks[0]
+        gap = (first_start - last["ended_at"]).total_seconds()
+        if 0 <= gap < IDLE_GAP_S:
+            merged_start = last["started_at"]
+            merged_end = max(last["ended_at"], first_end)
+            blocks[0] = (merged_start, merged_end)
+            merged_with_last = last["source_event_id"]
+
+    rows = []
+    for i, (s, e) in enumerate(blocks):
+        # Block 0 may have inherited the previous row's identity via the
+        # cross-run merge above; preserve its source_event_id so we UPDATE
+        # rather than INSERT. Otherwise hash from started_at as usual.
+        sid = (
+            merged_with_last if (i == 0 and merged_with_last is not None)
+            else make_source_event_id(host, s.isoformat())
+        )
+        rows.append({
             "source": source,
-            "source_event_id": make_source_event_id(host, s.isoformat()),
+            "source_event_id": sid,
             "event_type": "work_block",
             "category": category,
             "title": category,
@@ -297,9 +334,7 @@ def main() -> int:
                 "hostname": host,
                 "duration_seconds": int((e - s).total_seconds()),
             },
-        }
-        for s, e in blocks
-    ]
+        })
 
     written = upsert_events(rows)
     log("aw_sync.done", host=host, raw_aw=len(aw_events),
