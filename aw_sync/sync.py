@@ -33,9 +33,12 @@ from lifeos_core.logging import configure_logging, get_logger
 
 log = get_logger(__name__)
 
-# Defaults — mirror the build spec. Override via env on the laptop.
+# Defaults. Override via env on the laptop.
 DEFAULT_AW_HOST = "http://localhost:5600"
-DEFAULT_IDLE_GAP_S = 600         # >10min gap → split into separate blocks
+# 30 min: short enough that lunch still splits a workday into morning/
+# afternoon, but long enough that coffee / bathroom / slack-context-switch
+# breaks don't fragment a continuous working session.
+DEFAULT_IDLE_GAP_S = 1800
 DEFAULT_MIN_BLOCK_S = 300        # drop blocks shorter than 5min
 DEFAULT_LOOKBACK_HOURS = 1       # first run reaches back this far
 DEFAULT_MAX_BLOCK_S = 24 * 3600  # sanity cap

@@ -59,7 +59,7 @@ CATEGORY = HOST_CAT[HOSTNAME]
 SOURCE = "aw_personal" if "personal" in CATEGORY.lower() else "aw_work"
 
 AW_HOST = os.environ.get("AW_HOST", "http://localhost:5600").rstrip("/")
-IDLE_GAP_S = int(os.environ.get("AW_IDLE_GAP_S", "600"))
+IDLE_GAP_S = int(os.environ.get("AW_IDLE_GAP_S", "1800"))
 MIN_BLOCK_S = int(os.environ.get("AW_MIN_BLOCK_S", "300"))
 BACKFILL_HOURS = int(os.environ.get("BACKFILL_HOURS", "24"))
 

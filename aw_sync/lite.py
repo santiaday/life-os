@@ -83,7 +83,13 @@ SUPABASE_KEY = _require("SUPABASE_SERVICE_KEY")
 HOSTNAME_CATEGORY = json.loads(_require("AW_HOSTNAME_CATEGORY"))
 
 AW_HOST = os.environ.get("AW_HOST", "http://localhost:5600").rstrip("/")
-IDLE_GAP_S = int(os.environ.get("AW_IDLE_GAP_S", "600"))
+# 30 min default. The original 10 min split on every coffee / bathroom /
+# slack-context-switch break, producing a fragmented calendar view where
+# the user sees their morning as four short blocks rather than one
+# continuous working session. 30 min is short enough that lunch (~1h)
+# still splits, but long enough that everyday interruptions don't.
+# Override via AW_IDLE_GAP_S in ~/.config/aw-sync.env.
+IDLE_GAP_S = int(os.environ.get("AW_IDLE_GAP_S", "1800"))
 MIN_BLOCK_S = int(os.environ.get("AW_MIN_BLOCK_S", "300"))
 LOOKBACK_HOURS = int(os.environ.get("AW_LOOKBACK_HOURS", "1"))
 MAX_BLOCK_S = 24 * 3600  # sanity cap
