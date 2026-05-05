@@ -136,13 +136,19 @@ def _query_aw(host: str, start: datetime, end: datetime) -> list[dict]:
 
 
 def _parse_aw_event(ev: dict) -> tuple[datetime, datetime]:
-    """AW events have ISO timestamp and a duration in seconds."""
+    """AW events have ISO timestamp and a duration in seconds.
+
+    AW's merge_events_by_keys sums durations across merged events, so for
+    in-progress activity merged with earlier sessions the derived end can
+    extend past wall-clock now. Clamp to now() so blocks never end in
+    the future."""
     ts = ev["timestamp"]
     if ts.endswith("Z"):
         ts = ts[:-1] + "+00:00"
     start = datetime.fromisoformat(ts)
-    end = start + timedelta(seconds=ev["duration"])
-    return start, end
+    raw_end = start + timedelta(seconds=ev["duration"])
+    now_utc = datetime.now(UTC)
+    return start, min(raw_end, now_utc)
 
 
 # ---- Block construction -----------------------------------------------------

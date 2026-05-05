@@ -243,8 +243,15 @@ def query_aw(start: datetime, end: datetime) -> list[dict]:
 
 
 def parse_aw_event(ev: dict) -> tuple[datetime, datetime]:
+    """AW's merge_events_by_keys sums durations of merged events rather
+    than returning the span between their first start and last end. For
+    an in-progress activity that's been merged with earlier sessions,
+    that produces a 'duration' that extends into the future. Clamp the
+    derived end to wall-clock now() so blocks never end in the future."""
     s = _parse_ts(ev["timestamp"])
-    return s, s + timedelta(seconds=ev["duration"])
+    raw_end = s + timedelta(seconds=ev["duration"])
+    now_utc = datetime.now(timezone.utc)
+    return s, min(raw_end, now_utc)
 
 
 def build_blocks(aw_events: list[dict]) -> list[tuple[datetime, datetime]]:
