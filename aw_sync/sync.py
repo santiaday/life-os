@@ -168,7 +168,10 @@ def build_blocks(
     cur_start, cur_end = parsed[0]
     for s, e in parsed[1:]:
         gap = (s - cur_end).total_seconds()
-        if 0 <= gap < idle_gap_s:
+        # gap < idle_gap_s with no `0 <=` lower bound: a negative gap is
+        # an overlap, which still represents the same activity period
+        # and must merge rather than split.
+        if gap < idle_gap_s:
             cur_end = max(cur_end, e)
         else:
             blocks.append([cur_start, cur_end])
@@ -222,7 +225,8 @@ def sync_once(
     if last_db_block is not None and blocks:
         first_start, first_end = blocks[0]
         gap_s = (first_start - last_db_block["ended_at"]).total_seconds()
-        if 0 <= gap_s < idle_gap_s:
+        # See build_blocks: negative gap = overlap = merge.
+        if gap_s < idle_gap_s:
             blocks[0] = (
                 last_db_block["started_at"],
                 max(last_db_block["ended_at"], first_end),

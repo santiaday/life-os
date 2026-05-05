@@ -35,6 +35,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import socket
 import sys
 import urllib.error
@@ -156,8 +157,13 @@ def _sb_headers() -> dict:
 
 
 def _parse_ts(s: str) -> datetime:
+    """Tolerant ISO-8601 parser. Python 3.9's datetime.fromisoformat
+    requires exactly 3 or 6 fractional digits, but Supabase trims trailing
+    zeros (e.g. '18:30:10.17+00:00'), so we strip the fractional part
+    entirely — sub-second precision is irrelevant for AW work blocks."""
     if s.endswith("Z"):
         s = s[:-1] + "+00:00"
+    s = re.sub(r"\.\d+", "", s)
     return datetime.fromisoformat(s)
 
 
@@ -237,10 +243,7 @@ def query_aw(start: datetime, end: datetime) -> list[dict]:
 
 
 def parse_aw_event(ev: dict) -> tuple[datetime, datetime]:
-    ts = ev["timestamp"]
-    if ts.endswith("Z"):
-        ts = ts[:-1] + "+00:00"
-    s = datetime.fromisoformat(ts)
+    s = _parse_ts(ev["timestamp"])
     return s, s + timedelta(seconds=ev["duration"])
 
 
@@ -252,7 +255,12 @@ def build_blocks(aw_events: list[dict]) -> list[tuple[datetime, datetime]]:
     cs, ce = parsed[0]
     for s, e in parsed[1:]:
         gap = (s - ce).total_seconds()
-        if 0 <= gap < IDLE_GAP_S:
+        # gap < IDLE_GAP_S (no `0 <= gap` lower bound): a negative gap
+        # means the new event overlaps the running one. Overlapping AFK
+        # windows produce sub-window AW events whose start falls inside
+        # the previous query's end — those are the same activity period
+        # and must merge, not split.
+        if gap < IDLE_GAP_S:
             ce = max(ce, e)
         else:
             out_pre.append([cs, ce])
@@ -307,7 +315,8 @@ def main() -> int:
     if last is not None and blocks:
         first_start, first_end = blocks[0]
         gap = (first_start - last["ended_at"]).total_seconds()
-        if 0 <= gap < IDLE_GAP_S:
+        # See build_blocks: negative gap = overlap = same activity. Merge.
+        if gap < IDLE_GAP_S:
             merged_start = last["started_at"]
             merged_end = max(last["ended_at"], first_end)
             blocks[0] = (merged_start, merged_end)
