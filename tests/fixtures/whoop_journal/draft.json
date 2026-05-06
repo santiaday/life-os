@@ -1,0 +1,70 @@
+{
+  "journal": {
+    "id": 9000001,
+    "cycle_id": 555000111,
+    "tracked_behaviors": [
+      {
+        "journal_entry_id": 1001,
+        "cycle_id": 555000111,
+        "behavior_id": 11,
+        "behavior": {
+          "id": 11,
+          "internal_name": "alcohol",
+          "name": "alcohol",
+          "title": "Did you have any alcohol?",
+          "magnitude": {"unit": "drinks", "type": "INTEGER"}
+        },
+        "answered_yes": true,
+        "magnitude_input_value": 2,
+        "time_input_value": "2026-05-04T22:30:00.000Z",
+        "user_reviewed": true,
+        "notes": null
+      },
+      {
+        "journal_entry_id": 1002,
+        "cycle_id": 555000111,
+        "behavior_id": 22,
+        "behavior": {
+          "id": 22,
+          "internal_name": "caffeine",
+          "name": "caffeine",
+          "title": "Caffeine?",
+          "magnitude": {"unit": "servings", "type": "INTEGER"}
+        },
+        "answered_yes": true,
+        "magnitude_input_value": 3,
+        "time_input_value": "2026-05-04T15:00:00.000Z",
+        "user_reviewed": true,
+        "notes": "espresso after lunch"
+      },
+      {
+        "journal_entry_id": 1003,
+        "cycle_id": 555000111,
+        "behavior_id": 33,
+        "behavior": {
+          "id": 33,
+          "internal_name": "morning_sunlight",
+          "name": "morning_sunlight",
+          "title": "Got morning sunlight?",
+          "magnitude": null
+        },
+        "answered_yes": false,
+        "magnitude_input_value": null,
+        "time_input_value": null,
+        "user_reviewed": true,
+        "notes": null
+      }
+    ],
+    "notes": "felt sluggish",
+    "user_reviewed": true
+  },
+  "integrations": {
+    "tracker_inputs": [
+      {"name": "Calories", "value": 2400},
+      {"name": "Protein", "value": 165},
+      {"name": "Carbs", "value": 220},
+      {"name": "Fats", "value": 95},
+      {"name": "Water", "value": 8}
+    ]
+  }
+}

@@ -1,0 +1,24 @@
+[
+  {
+    "id": 11,
+    "internal_name": "alcohol",
+    "title": "Did you have any alcohol?",
+    "question_text": "Did you have any alcoholic drinks?",
+    "category": "DAYTIME",
+    "behavior_type": "NEGATIVE",
+    "question_type": "YES_NO_MAGNITUDE",
+    "magnitude": {"unit": "drinks", "type": "INTEGER", "min": 0, "max": 20},
+    "status": "active"
+  },
+  {
+    "id": 22,
+    "internal_name": "caffeine",
+    "title": "Caffeine?",
+    "question_text": "Did you have caffeine?",
+    "category": "DAYTIME",
+    "behavior_type": "NORMAL",
+    "question_type": "YES_NO_MAGNITUDE_TIME",
+    "magnitude": {"unit": "servings", "type": "INTEGER"},
+    "status": "active"
+  }
+]

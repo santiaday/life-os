@@ -126,10 +126,12 @@ SCHEMA_DOCS: dict = {
             },
         },
         "fact_habit_log": {
-            "purpose": "One row per (day, Whoop behavior). Sourced from Whoop's mobile journal. Behaviors not pivoted onto mart_daily live here for ad-hoc queries.",
-            "grain": "1 row per (day, whoop_behavior_id).",
+            "purpose": "One row per (day, behavior). Sourced from Whoop's mobile journal — both user-entered behaviors and Apple-Health autofill rows. Behaviors not pivoted onto mart_daily live here for ad-hoc queries.",
+            "grain": "1 row per (day, behavior_id).",
             "columns": {
                 "habit_key": "dim_whoop_behavior.internal_name. Use this string in get_habit_history.",
+                "behavior_id": "FK to dim_whoop_behavior.behavior_id (Whoop's numeric id).",
+                "source": "'whoop_private_api' for user-logged behaviors, 'whoop_apple_health' for autofill rows from Whoop's Apple Health integration. User-logged wins on conflict.",
                 "answered_yes": "Yes/No to the journal prompt. NULL if unanswered.",
                 "magnitude_value, magnitude_unit": "Numeric input for behaviors that ask one (e.g. drinks, mg).",
                 "time_input_value": "UTC timestamp for behaviors that ask 'when?' (e.g. last caffeine).",
@@ -140,10 +142,53 @@ SCHEMA_DOCS: dict = {
             "purpose": "Whoop's behavior catalog (200+ trackable behaviors). Reference table for what habit_key values mean.",
             "grain": "1 row per behavior.",
             "columns": {
+                "behavior_id": "Whoop's numeric id (PK). Used as fact_habit_log.behavior_id.",
                 "internal_name": "Stable string id (e.g. 'alcohol', 'caffeine'). Use as habit_key.",
-                "category": "DAYTIME / NIGHTTIME / YOUR WEEKLY PLAN / ...",
+                "category": "DAYTIME / NIGHTTIME / YOUR WEEKLY PLAN / AUTOFILL / ...",
                 "behavior_type": "POSITIVE / NEGATIVE / NORMAL / NOT_ACTIONABLE — Whoop's directionality hint.",
             },
+            "gotchas": [
+                "Rows with category='AUTOFILL' are synthesized by ingest_whoop_journal when an Apple-Health autofill row references a behavior_id that's not in the catalog yet. The next catalog refresh overwrites them with real metadata.",
+            ],
+        },
+        "fact_journal_day": {
+            "purpose": "Typed day-level pivot of the Whoop journal envelope (notes, cycle_id, sleep window). Source-of-truth for day-level journal data. fact_habit_log handles the per-behavior rows; this handles everything else.",
+            "grain": "1 row per day.",
+            "columns": {
+                "journal_entry_id": "Whoop's BIGINT for the entry.",
+                "cycle_id": "Whoop cycle id this journal entry belongs to.",
+                "notes": "Free-text day notes from the Whoop app.",
+                "user_reviewed": "True once Santi marked the entry done.",
+                "sleep_during": "JSONB: the sleep window the journal applies to (if Whoop tagged one).",
+            },
+            "gotchas": [
+                "mart_daily.journal_notes is sourced from raw_whoop_journal.payload (legacy); a follow-up PR will swap it to fact_journal_day.notes. For now, prefer mart_daily.journal_notes.",
+            ],
+        },
+        "raw_whoop_journal": {
+            "purpose": "Untyped JSON payloads from Whoop's /journal-service/v3/journals/drafts/mobile/{day}. One row per day. The fact_/dim_ tables are derived from this — query raw only if you need a field that isn't pivoted.",
+            "grain": "1 row per day.",
+            "columns": {
+                "day": "The local date the entry covers.",
+                "fetched_at": "When the ingester last upserted this row. Useful for staleness checks.",
+                "payload": "Full Whoop response. tracked_behaviors[], notes, integrations.tracker_inputs[], sleep_during all live here.",
+            },
+        },
+        "oauth_tokens": {
+            "purpose": "Per-source credential store. Single row per `service`. `whoop_private` is the iPhone-bridge Whoop journal token (refreshed by the iPhone Shortcut, consumed by ingest_whoop_journal). Other services: `whoop` (public OAuth), `google`, `copilot`.",
+            "grain": "1 row per service.",
+            "columns": {
+                "service": "Source key. Lookup with WHERE service = '<name>'.",
+                "access_token": "Bearer token. Short-lived (typically 24h for Whoop).",
+                "refresh_token": "Long-lived. Either rotated by the source on each refresh, or held stable for ~30 days (Whoop).",
+                "id_token": "Optional. Cognito JWT with identity claims (sub, email). Populated for whoop_private; null for OAuth-only sources.",
+                "expires_at": "When access_token expires. ingest_whoop_journal raises WhoopAuthExpired if past this minus a 5-min skew.",
+                "metadata": "JSONB. Provenance hints like {\"source\": \"ios_shortcut_refresh\", \"received_at\": \"...\"}.",
+            },
+            "gotchas": [
+                "Don't update partial — always pass all five token columns when writing, or you'll silently null id_token / metadata.",
+                "Refresh logic for whoop_private lives on the iPhone, not the server. If the row is stale, the fix is to re-trigger the Shortcut, not to call Cognito from the server.",
+            ],
         },
         "dim_lab_biomarker": {
             "purpose": (

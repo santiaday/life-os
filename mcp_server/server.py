@@ -670,6 +670,24 @@ def build_app() -> FastAPI:
     except ImportError as e:  # pragma: no cover
         log.warning("mcp.webhook_router_unavailable", error=str(e))
 
+    # Lifelog iOS app surface. Bearer auth via LIFELOG_API_TOKEN, enforced
+    # per-route by lifelog_api.auth.require_token. The path-secret middleware
+    # exempts /lifelog/* (PUBLIC_PREFIXES in mcp_server.auth).
+    try:
+        from lifelog_api.routes import router as lifelog_router
+        app.include_router(lifelog_router)
+    except ImportError as e:  # pragma: no cover
+        log.warning("mcp.lifelog_router_unavailable", error=str(e))
+
+    # Whoop journal token-refresh callback. Sits under /lifelog/whoop/* so it
+    # inherits the path-secret exemption, but uses its own X-Shared-Secret
+    # auth (independent of LIFELOG_API_TOKEN). See refresh_webhook.py.
+    try:
+        from ingest_whoop_journal.refresh_webhook import router as whoop_refresh_router
+        app.include_router(whoop_refresh_router)
+    except ImportError as e:  # pragma: no cover
+        log.warning("mcp.whoop_refresh_router_unavailable", error=str(e))
+
     return app
 
 

@@ -81,6 +81,9 @@ python -m ingest_whoop oauth-exchange --code <code>
 python -m ingest_calendar oauth-init
 python -m ingest_calendar oauth-exchange --code <code>
 
+# Whoop journal — see ingest_whoop_journal/RUNBOOK.md for the iPhone-Shortcut
+# bootstrap (one-time mitmproxy capture).
+
 # Copilot uses email+password, no bootstrap needed.
 ```
 
@@ -127,6 +130,7 @@ prunes objects older than `BACKUP_RETENTION_DAYS` (default 30).
 life-os/
 ├── lifeos_core/        shared library: db, settings, logging, oauth_store, runs, alerts
 ├── ingest_whoop/       Phase 2 — Whoop API
+├── ingest_whoop_journal/ Phase 5.5 — Whoop private journal API (Cognito-proxy auth)
 ├── ingest_calendar/    Phase 3 — Google Calendar API
 ├── ingest_cronometer/  Phase 6 — Cronometer (Go binary subprocess)
 ├── ingest_copilot/     Phase 7 — Copilot Money GraphQL
@@ -142,6 +146,36 @@ life-os/
     ├── fixtures/       saved API/CSV samples per source
     └── test_*.py       pure-function transform tests
 ```
+
+## Whoop Journal
+
+The journal is Whoop's private mobile API — daily yes/no/magnitude prompts
+("Did you have alcohol? How many drinks?"), free-text notes, and Apple
+Health macros via Whoop's integrations. Not part of the public Whoop OAuth
+surface.
+
+**Architecture:** the iPhone is the only auth broker. A Shortcut runs
+daily at 5:30 AM, does `REFRESH_TOKEN_AUTH` against Whoop's auth-service,
+and POSTs the fresh token bundle to `/lifelog/whoop/refresh-callback` on
+this server. The scheduler then pulls the journal at 5:35 AM using the
+just-saved token. The server itself never talks to Whoop's auth-service or
+AWS Cognito (Cloudflare blocks one, we don't have a `SECRET_HASH` for the
+other).
+
+Day-level data lands in `raw_whoop_journal`, `fact_journal_day`,
+`fact_habit_log`, `fact_food_daily_apple_health`, `dim_whoop_behavior`.
+Pivoted high-frequency habits (`had_alcohol`, `caffeine_servings`,
+`took_magnesium`, …) live on `mart_daily` for fast correlation queries.
+
+**Bootstrap and operations:** see
+[ingest_whoop_journal/RUNBOOK.md](ingest_whoop_journal/RUNBOOK.md) for the
+end-to-end mitmproxy capture → bootstrap CLI → iOS Shortcut walkthrough,
+plus failure-mode triage.
+
+The scheduler fires:
+- 5:35 AM daily — 2-day rolling rebackfill (catches late edits)
+- Sunday 5:40 AM — 7-day deep rebackfill
+- Sunday 5:45 AM — behavior-catalog refresh
 
 ## Key behaviors worth knowing
 

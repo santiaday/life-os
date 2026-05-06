@@ -69,23 +69,34 @@ def build() -> BlockingScheduler:
         coalesce=True,
     )
 
-    # ---- Whoop journal (Phase 5.5) -----------------------------------------
-    # Daily 3-day rebackfill catches late edits (Whoop journal entries are
-    # editable for several days after the fact).
+    # ---- Whoop journal (iPhone-bridge architecture) ------------------------
+    # iPhone Shortcut runs at 5:30 AM, POSTs fresh tokens to the webhook.
+    # We pull at 5:35 (5 min later) so the token row is fresh by then.
+    # Default mode is the 2-day rolling window (today + yesterday).
     sched.add_job(
         run_subprocess,
-        CronTrigger(hour=5, minute=0),
-        args=["ingest_whoop_journal", "ingest"],
+        CronTrigger(hour=5, minute=35),
+        args=["ingest_whoop_journal"],
         id="whoop_journal_daily",
-        name="Whoop journal 3-day rebackfill",
+        name="Whoop journal 2-day rebackfill",
         max_instances=1,
         coalesce=True,
     )
-    # Weekly catalog refresh — Whoop occasionally adds new behaviors.
+    # Sunday: deeper backfill (catches late journal edits within 7 days) +
+    # behavior-catalog refresh.
     sched.add_job(
         run_subprocess,
-        CronTrigger(day_of_week="sun", hour=5, minute=15),
-        args=["ingest_whoop_journal", "ingest", "--data-type", "catalog"],
+        CronTrigger(day_of_week="sun", hour=5, minute=40),
+        args=["ingest_whoop_journal", "--backfill", "7"],
+        id="whoop_journal_weekly_backfill",
+        name="Whoop journal Sunday 7-day rebackfill",
+        max_instances=1,
+        coalesce=True,
+    )
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(day_of_week="sun", hour=5, minute=45),
+        args=["ingest_whoop_journal", "--data-type", "catalog"],
         id="whoop_journal_catalog_weekly",
         name="Whoop behavior catalog weekly refresh",
         max_instances=1,
@@ -181,6 +192,20 @@ def build() -> BlockingScheduler:
         coalesce=True,
     )
 
+    # ---- Lifelog stale-session closer --------------------------------------
+    # iOS Live Activities die after 8h. If the user forgets to end the session
+    # (or the device went offline), the open ios_manual row will sit forever.
+    # Every 30 min, close any open session older than 12h with an estimated
+    # 4h end. See lifelog_api.service.close_stale_events.
+    sched.add_job(
+        _lifelog_stale_close,
+        CronTrigger(minute="*/30"),
+        id="lifelog_stale_close",
+        name="Lifelog: auto-close stale ios_manual sessions",
+        max_instances=1,
+        coalesce=True,
+    )
+
     return sched
 
 
@@ -190,6 +215,20 @@ def _alert_check() -> None:
 
     result = check_and_alert()
     log.info("scheduler.alert_check", result=result)
+
+
+def _lifelog_stale_close() -> None:
+    """In-process: close any ios_manual sessions open >12h. Same shape as
+    _alert_check — a single SQL UPDATE, not worth the subprocess overhead."""
+    try:
+        from lifelog_api.service import close_stale_events
+    except ImportError:  # pragma: no cover - module optional
+        return
+    closed = close_stale_events()
+    if closed:
+        log.warning("scheduler.lifelog_stale_close", closed=closed)
+    else:
+        log.info("scheduler.lifelog_stale_close", closed=0)
 
 
 def main() -> int:

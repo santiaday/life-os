@@ -1,169 +1,172 @@
-"""AWS Cognito refresh-token-only auth for Whoop's private journal API.
+"""Read-only token broker for the Whoop private journal API.
 
-Whoop's mobile/web Cognito client (37365lrcda1js3fapqfe2n40eh) is configured
-as a CONFIDENTIAL client — it requires a SECRET_HASH on password-flow calls,
-and the client_secret is not publicly known. Reverse-engineering the iOS
-binary to extract it is dicey and brittle.
+iPhone-bridge architecture: the iPhone Shortcut is the only thing that talks
+to Whoop's auth-service. It runs REFRESH_TOKEN_AUTH on a schedule, gets fresh
+tokens back, and POSTs them to our refresh-callback webhook
+(``/lifelog/whoop/refresh-callback``). The webhook persists them to
+``oauth_tokens(service='whoop_private')``.
 
-Workaround (same as our Copilot auth): capture a long-lived refresh token
-once from your Whoop browser session, store it in oauth_tokens.whoop_private,
-then exchange via REFRESH_TOKEN_AUTH on every subsequent call. REFRESH_TOKEN_AUTH
-typically doesn't enforce SECRET_HASH the way password-flow does — if your
-server-side investigation finds it does, run `--with-secret-hash` once after
-adding WHOOP_COGNITO_CLIENT_SECRET to .env.
+This module is the *consumer* side. It only reads from ``oauth_tokens`` and
+hands the bearer token to the ingester. It must NEVER:
 
-How to capture the refresh token (3 minutes in the browser):
-  1. Open https://app.prod.whoop.com in Chrome/Safari, sign in.
-  2. DevTools → Application tab → Storage → Local Storage → app.prod.whoop.com.
-  3. Look for a key like `CognitoIdentityServiceProvider.<client_id>.<sub>.refreshToken`.
-     Value is the refresh token (a very long string).
-  4. Run: `python -m ingest_whoop_journal set-refresh-token --token <paste>`
+  - call cognito-idp.us-west-2.amazonaws.com (we don't have SECRET_HASH)
+  - POST to api.prod.whoop.com/auth-service/* (Cloudflare hard-blocks servers)
+  - prompt for or store a password
+  - run a refresh flow
 
-Whoop's REFRESH_TOKEN_AUTH typically returns rotated AccessToken (24h ttl)
-without rotating the RefreshToken itself, so this captured token can power
-ingestion for weeks/months until Whoop revokes it.
+If the token is past its ``expires_at`` (with a small skew buffer),
+``ensure_fresh`` raises ``WhoopAuthExpired`` and the operator's job is to
+re-trigger the iPhone Shortcut (or run ``bootstrap_from_capture`` again).
+
+The ``save_tokens`` helper is the only writer in this module — used by the
+refresh webhook and the bootstrap CLI. It writes all five columns
+(access_token, refresh_token, id_token, expires_at, metadata) so we don't
+silently null any of them out on subsequent saves.
 """
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac as _hmac
+import json
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
-import boto3
-from botocore.exceptions import ClientError
-
-from lifeos_core import oauth_store
+from lifeos_core.db import tx
 from lifeos_core.logging import get_logger
-from lifeos_core.settings import settings
 
 log = get_logger(__name__)
 
 SERVICE = "whoop_private"
-ACCESS_TTL_BUFFER_MIN = 5
+# Treat tokens as expired this far before their nominal expires_at so we never
+# hand a near-dead token to a long-running ingest.
+EXPIRY_SKEW = timedelta(minutes=5)
 
 
-class WhoopJournalAuthError(RuntimeError):
-    pass
+# ---- exceptions ------------------------------------------------------------
+class WhoopAuthError(RuntimeError):
+    """Generic auth failure (e.g. no token row at all)."""
 
 
-def _cognito_client():
-    return boto3.client("cognito-idp", region_name=settings.WHOOP_COGNITO_REGION)
+class WhoopAuthExpired(WhoopAuthError):
+    """Token row exists but is past expires_at. Re-run the iPhone Shortcut
+    or bootstrap_from_capture to seed a fresh token."""
 
 
+# ---- helpers ---------------------------------------------------------------
 def _mask(t: str | None) -> str:
     if not t:
         return "<empty>"
     return f"{t[:6]}…{t[-4:]} ({len(t)} chars)"
 
 
-def _secret_hash(username: str) -> str | None:
-    """Compute Cognito SECRET_HASH if the client_secret is configured.
-    Returns None if no secret is configured."""
-    secret = getattr(settings, "WHOOP_COGNITO_CLIENT_SECRET", None)
-    if not secret:
-        return None
-    msg = (username + settings.WHOOP_COGNITO_CLIENT_ID).encode("utf-8")
-    digest = _hmac.new(secret.encode("utf-8"), msg, hashlib.sha256).digest()
-    return base64.b64encode(digest).decode("utf-8")
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
-def store_refresh_token(refresh_token: str) -> None:
-    """One-time bootstrap. Capture from your Whoop browser session and paste."""
-    if not refresh_token or len(refresh_token) < 50:
-        raise ValueError(
-            "Refresh token doesn't look right. Expected a long string from "
-            "your Whoop browser session's localStorage. Got: "
-            f"{_mask(refresh_token)}"
+# ---- writer (used by webhook + bootstrap) ---------------------------------
+def save_tokens(
+    *,
+    access_token: str,
+    refresh_token: str,
+    id_token: str | None,
+    expires_at: datetime,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    """Persist a fresh token bundle for the whoop_private service. Five
+    explicit columns so we never partial-update and silently null a sibling.
+
+    Caller is responsible for upstream validation (JWT shape, expires_at in
+    the future, refresh_token non-empty). This function only validates the
+    minimum needed to keep the table consistent."""
+    if not access_token or not refresh_token:
+        raise ValueError("access_token and refresh_token are both required")
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    md = metadata or {}
+
+    with tx() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO oauth_tokens
+                (service, access_token, refresh_token, id_token, expires_at, metadata, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s::jsonb, now())
+            ON CONFLICT (service) DO UPDATE SET
+                access_token  = EXCLUDED.access_token,
+                refresh_token = EXCLUDED.refresh_token,
+                id_token      = EXCLUDED.id_token,
+                expires_at    = EXCLUDED.expires_at,
+                metadata      = EXCLUDED.metadata,
+                updated_at    = now()
+            """,
+            [SERVICE, access_token, refresh_token, id_token, expires_at, json.dumps(md)],
         )
-    oauth_store.save(  # type: ignore[arg-type]
-        SERVICE, refresh_token=refresh_token, access_token=None, expires_at=None
-    )
-    log.info("whoop_journal.auth.refresh_token_stored", token=_mask(refresh_token))
-
-
-def refresh_access_token() -> str:
-    """Return a usable access token. Exchange the captured refresh token via
-    REFRESH_TOKEN_AUTH. Persists any new tokens Cognito hands back."""
-    stored = oauth_store.load(SERVICE)
-    if stored is None or not stored.get("refresh_token"):
-        raise WhoopJournalAuthError(
-            "No Whoop journal refresh token stored. Capture one from your "
-            "Whoop browser session (https://app.prod.whoop.com → DevTools → "
-            "Local Storage → CognitoIdentityServiceProvider.*.refreshToken) "
-            "and run: python -m ingest_whoop_journal set-refresh-token --token <...>"
-        )
-
-    now = datetime.now(timezone.utc)
-    if (
-        stored.get("access_token")
-        and stored.get("expires_at")
-        and stored["expires_at"] > now + timedelta(minutes=ACCESS_TTL_BUFFER_MIN)
-    ):
-        return stored["access_token"]
-
-    log.info("whoop_journal.auth.refresh", refresh=_mask(stored["refresh_token"]))
-    auth_params = {"REFRESH_TOKEN": stored["refresh_token"]}
-    # Cognito uses the `sub` (the original token's user id) as the username
-    # for SECRET_HASH on REFRESH_TOKEN_AUTH. We don't know the sub without
-    # a prior login, so we try without first; if it fails with a SECRET_HASH
-    # complaint and the user has provided WHOOP_COGNITO_CLIENT_SECRET we
-    # retry using their email as the SECRET_HASH input (Whoop's convention,
-    # observed in practice).
-    try:
-        resp = _cognito_client().initiate_auth(
-            ClientId=settings.WHOOP_COGNITO_CLIENT_ID,
-            AuthFlow="REFRESH_TOKEN_AUTH",
-            AuthParameters=auth_params,
-        )
-    except ClientError as e:
-        msg = str(e)
-        if "SECRET_HASH" in msg and settings.WHOOP_PRIVATE_EMAIL:
-            sh = _secret_hash(settings.WHOOP_PRIVATE_EMAIL)
-            if sh is None:
-                raise WhoopJournalAuthError(
-                    "Cognito requires SECRET_HASH on refresh-token flow but "
-                    "WHOOP_COGNITO_CLIENT_SECRET is not set in .env. The "
-                    "client secret isn't publicly published — to obtain it "
-                    "you'd need to extract it from the Whoop iOS app binary."
-                ) from e
-            auth_params["SECRET_HASH"] = sh
-            try:
-                resp = _cognito_client().initiate_auth(
-                    ClientId=settings.WHOOP_COGNITO_CLIENT_ID,
-                    AuthFlow="REFRESH_TOKEN_AUTH",
-                    AuthParameters=auth_params,
-                )
-            except ClientError as e2:
-                raise WhoopJournalAuthError(
-                    f"Cognito refresh failed even with SECRET_HASH: {e2}"
-                ) from e2
-        else:
-            raise WhoopJournalAuthError(
-                f"Cognito refresh failed: {msg}. If your captured refresh "
-                f"token is older than ~30 days it may have rotated out — "
-                f"recapture from your Whoop browser session."
-            ) from e
-
-    result = resp.get("AuthenticationResult") or {}
-    access = result.get("AccessToken")
-    if not access:
-        raise WhoopJournalAuthError(
-            f"Cognito refresh response missing AccessToken. Keys: {sorted(result.keys())}"
-        )
-    # Refresh-token flow doesn't return a new RefreshToken; carry the captured
-    # one forward so we keep using it until it expires.
-    new_refresh = result.get("RefreshToken") or stored["refresh_token"]
-    expires_at = now + timedelta(seconds=int(result.get("ExpiresIn") or 86400))
-
-    oauth_store.save(  # type: ignore[arg-type]
-        SERVICE, access_token=access, refresh_token=new_refresh, expires_at=expires_at,
-    )
     log.info(
-        "whoop_journal.auth.refreshed",
-        access=_mask(access),
-        new_refresh=_mask(new_refresh),
+        "whoop_journal.auth.tokens_saved",
+        access=_mask(access_token),
+        refresh=_mask(refresh_token),
+        id_token=_mask(id_token),
         expires_at=expires_at.isoformat(),
+        metadata=md,
     )
-    return access
+
+
+# ---- reader (used by the ingester) ---------------------------------------
+class WhoopAuth:
+    """Read-only auth helper. Loads tokens from ``oauth_tokens`` and returns
+    Authorization headers. Has NO refresh logic — refresh is the iPhone's job.
+
+    Usage:
+        auth = WhoopAuth()
+        auth.ensure_fresh()          # raises WhoopAuthExpired if stale
+        ... auth.headers() ...       # before each HTTP request
+
+    Loads once per instance; re-instantiate if you need to pick up a fresh
+    token persisted mid-run (e.g. the webhook fired during a long backfill).
+    """
+
+    def __init__(self) -> None:
+        self._access_token: str | None = None
+        self._expires_at: datetime | None = None
+
+    def _load(self) -> None:
+        """Read-only load from oauth_tokens. Idempotent."""
+        with tx() as c, c.cursor() as cur:
+            cur.execute(
+                "SELECT access_token, expires_at FROM oauth_tokens WHERE service = %s",
+                [SERVICE],
+            )
+            row = cur.fetchone()
+        if row is None or not row.get("access_token"):
+            raise WhoopAuthError(
+                "No Whoop token row in oauth_tokens. Bootstrap once with "
+                "`python -m ingest_whoop_journal.bootstrap_from_capture <flow-file>` "
+                "or wait for the iPhone Shortcut to POST a refresh."
+            )
+        self._access_token = row["access_token"]
+        self._expires_at = row["expires_at"]
+
+    def ensure_fresh(self) -> str:
+        """Return a usable access token. Raises WhoopAuthExpired if the row
+        is past expiry. Cheap when called repeatedly within one process —
+        only re-reads from the DB if the in-memory copy is stale or absent.
+        """
+        if self._access_token is None or self._expires_at is None:
+            self._load()
+        assert self._expires_at is not None and self._access_token is not None
+        if self._expires_at <= _now() + EXPIRY_SKEW:
+            log.warning(
+                "whoop_journal.auth.expired",
+                expires_at=self._expires_at.isoformat(),
+                now=_now().isoformat(),
+            )
+            raise WhoopAuthExpired(
+                f"Whoop token expired at {self._expires_at.isoformat()}. "
+                f"Trigger the iPhone Shortcut (or re-run bootstrap_from_capture) "
+                f"to seed a fresh token."
+            )
+        return self._access_token
+
+    def headers(self) -> dict:
+        """Bearer header for journal-service GETs. The iOS-app x-whoop-* and
+        x-amz-* headers are NOT needed on /journal-service — the gateway
+        only requires a valid bearer there."""
+        return {"Authorization": f"Bearer {self.ensure_fresh()}"}

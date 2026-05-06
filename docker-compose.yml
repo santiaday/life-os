@@ -45,6 +45,22 @@ services:
   #   env_file: .env
   #   profiles: ["manual"]   # only run via `docker compose run --rm ingest_whoop`
 
+  # ---- Phase 5.5 — Whoop journal (private API) ----
+  # Runs unattended via the scheduler container's subprocess. This service
+  # exists so the one-time interactive bootstrap works:
+  #     docker compose run --rm -it ingest_whoop_journal \
+  #         python -m ingest_whoop_journal.whoop_login
+  # tty + stdin_open are required for the password / SMS prompts.
+  ingest_whoop_journal:
+    image: ghcr.io/santi/life-os-ingest-whoop-journal:latest
+    build:
+      context: .
+      dockerfile: ingest_whoop_journal/Dockerfile
+    env_file: .env
+    profiles: ["manual"]
+    tty: true
+    stdin_open: true
+
   # ---- Phase 3 ----
   # ingest_calendar:
   #   image: ghcr.io/santi/life-os-ingest-calendar:latest

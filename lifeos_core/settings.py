@@ -46,15 +46,24 @@ class Settings(BaseSettings):
     WHOOP_REDIRECT_URI: str | None = None
     WHOOP_WEBHOOK_SECRET: str | None = None
 
-    # ---- Whoop private journal API (Cognito password flow) ------------------
+    # ---- Whoop private journal API (iPhone-bridge architecture) -------------
+    # The iPhone Shortcut runs REFRESH_TOKEN_AUTH against Whoop's auth-service
+    # and POSTs fresh tokens to /lifelog/whoop/refresh-callback. The server
+    # never talks to Whoop's auth-service or Cognito directly — Cloudflare
+    # blocks one and we don't have the client_secret for the other.
+    # See ingest_whoop_journal/RUNBOOK.md.
+    #
+    # Shared secret: 32-byte url-safe random, set on both this server and
+    # the iOS Shortcut's "Get Contents of URL → Headers" config. Generate:
+    #   python -c "import secrets; print(secrets.token_urlsafe(32))"
+    WHOOP_REFRESH_WEBHOOK_SECRET: str | None = None
+    # Legacy fields (unused now). Kept so existing .env files don't trip
+    # pydantic-settings on first run after the rewrite.
     WHOOP_PRIVATE_EMAIL: str | None = None
     WHOOP_PRIVATE_PASSWORD: str | None = None
     WHOOP_COGNITO_REGION: str = "us-west-2"
     WHOOP_COGNITO_USER_POOL: str = "us-west-2_rYv1jhSC3"
     WHOOP_COGNITO_CLIENT_ID: str = "37365lrcda1js3fapqfe2n40eh"
-    # Optional. If Cognito demands SECRET_HASH on refresh-token flow you'll
-    # need to extract this from the Whoop iOS app binary. Most users won't
-    # need it — REFRESH_TOKEN_AUTH typically works without.
     WHOOP_COGNITO_CLIENT_SECRET: str | None = None
     WHOOP_IOS_VERSION: str = "5.49.2"
 
@@ -90,6 +99,15 @@ class Settings(BaseSettings):
     MCP_PUBLIC_BASE_URL: str | None = None
     MCP_BIND_HOST: str = "0.0.0.0"
     MCP_BIND_PORT: int = 8080
+
+    # ---- Lifelog iOS app ---------------------------------------------------
+    # Bearer token shared with the iOS app (stored there in the Keychain).
+    # Generate once: `python -c "import secrets; print(secrets.token_urlsafe(32))"`
+    # The iOS app calls /lifelog/* endpoints with `Authorization: Bearer <token>`.
+    # Auth is enforced per-route in lifelog_api.auth — Settings is just a doc
+    # entry here; lifelog_api.auth reads os.environ directly so the token can
+    # be rotated without bouncing the whole settings cache.
+    LIFELOG_API_TOKEN: str | None = None
 
     # ---- Observability -----------------------------------------------------
     LOG_LEVEL: str = "INFO"

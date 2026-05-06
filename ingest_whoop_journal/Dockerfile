@@ -18,10 +18,11 @@ RUN pip install --upgrade pip \
       'pydantic-settings>=2.5' \
       'structlog>=24.4' \
       'sentry-sdk>=2.14' \
-      'boto3>=1.35'
+      # bootstrap_from_capture parses mitmproxy flow files. Only loaded by
+      # the one-shot bootstrap CLI — daily ingest never imports it.
+      'mitmproxy>=11.0'
 
 COPY lifeos_core ./lifeos_core
 COPY ingest_whoop_journal ./ingest_whoop_journal
 
 ENTRYPOINT ["python", "-m", "ingest_whoop_journal"]
-CMD ["ingest"]
