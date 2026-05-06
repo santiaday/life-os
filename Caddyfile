@@ -10,6 +10,13 @@ lifeos.ledion.io {
 		reverse_proxy mcp:8080
 	}
 
+	# Lifelog iOS app surface. Mounted on the same FastAPI app as the MCP
+	# server but uses bearer-token auth (Authorization: Bearer
+	# <LIFELOG_API_TOKEN>) per route, not path-secret. Pass through verbatim.
+	handle /lifelog/* {
+		reverse_proxy mcp:8080
+	}
+
 	# Everything else is the MCP HTTP server. Auth is enforced inside the app
 	# via the Authorization: Bearer <MCP_API_KEY> header.
 	handle {

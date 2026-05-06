@@ -35,6 +35,7 @@ RUN pip install --upgrade pip \
 # and the mart refresher, so all packages must be present in the image.
 COPY lifeos_core ./lifeos_core
 COPY mcp_server ./mcp_server
+COPY lifelog_api ./lifelog_api
 COPY ingest_whoop ./ingest_whoop
 COPY ingest_calendar ./ingest_calendar
 COPY ingest_cronometer ./ingest_cronometer

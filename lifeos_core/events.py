@@ -110,6 +110,10 @@ def fetch_unsynced(limit: int = 200) -> list[dict]:
     2. Synced before but updated since (updated_at > synced_at) — these
        need a PATCH on the calendar side.
 
+    Excludes rows with `ended_at IS NULL` — those represent an in-progress
+    Lifelog iOS session and have no calendar end time yet. They become
+    eligible the moment the user (or the stale closer) sets ended_at.
+
     Ordered by started_at so calendar_event_ids tend to be allocated in
     chronological order (cosmetic, not load-bearing)."""
     with tx() as c, c.cursor() as cur:
@@ -117,8 +121,9 @@ def fetch_unsynced(limit: int = 200) -> list[dict]:
             """
             SELECT *
             FROM events
-            WHERE synced_at IS NULL
-               OR updated_at > synced_at
+            WHERE ended_at IS NOT NULL
+              AND (synced_at IS NULL
+                   OR updated_at > synced_at)
             ORDER BY started_at
             LIMIT %s
             """,

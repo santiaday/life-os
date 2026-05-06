@@ -40,6 +40,7 @@ RUN pip install --upgrade pip \
 
 # Copy every service package — scheduler invokes them as subprocesses.
 COPY lifeos_core ./lifeos_core
+COPY lifelog_api ./lifelog_api
 COPY ingest_whoop ./ingest_whoop
 COPY ingest_calendar ./ingest_calendar
 COPY ingest_cronometer ./ingest_cronometer
