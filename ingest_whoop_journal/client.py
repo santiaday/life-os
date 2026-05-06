@@ -34,7 +34,7 @@ from lifeos_core.logging import get_logger
 
 log = get_logger(__name__)
 
-BASE = "https://api-7.whoop.com"
+BASE = "https://api.prod.whoop.com"
 TIMEOUT = 30.0
 
 
