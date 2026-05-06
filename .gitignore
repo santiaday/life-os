@@ -43,6 +43,11 @@ data/
 *.dump
 *.sql.gz
 
+# Whoop bootstrap secrets — written by ingest_whoop_journal.bootstrap_from_capture
+whoop_refresh_token.txt
+*.flow
+proxyflow*
+
 # Docker
 .docker/
 copilot-money-cli/
