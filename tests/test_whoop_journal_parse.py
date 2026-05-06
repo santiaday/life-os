@@ -83,7 +83,9 @@ def test_parse_tracked_behavior_full_magnitude_and_time(fx):
     assert row["time_input_value"].isoformat() == "2026-05-04T22:30:00+00:00"
     assert row["whoop_journal_entry_id"] == 1001
     assert row["whoop_cycle_id"] == 555000111
-    assert row["user_reviewed"] is True
+    # Whoop's API doesn't expose user_reviewed per-row — it's on the journal
+    # envelope (fact_journal_day captures it). Per-row stays None.
+    assert row["user_reviewed"] is None
     assert row["source"] == "whoop_private_api"
     assert row["source_row_hash"]
 
@@ -112,6 +114,69 @@ def test_parse_tracked_behavior_returns_none_when_internal_name_missing():
 def test_parse_tracked_behavior_returns_none_when_behavior_id_missing():
     bad = {"behavior": {"internal_name": "alcohol"}, "answered_yes": True}
     assert transforms.transform_tracked_behavior(bad, date(2026, 5, 4)) is None
+
+
+def test_parse_tracked_behavior_real_api_shape():
+    """Regression: pin the actual /journal-service/v3/journals/drafts/mobile
+    shape (tracker_input + behavior_tracker nesting, epoch-ms timestamps).
+    The wire format we observed against api.prod.whoop.com on 2026-05-06."""
+    real = {
+        "tracker_input": {
+            "source": "USER",
+            "answered_yes": False,
+            "magnitude_input_value": None,
+            "time_input_value": 1777939200000,  # 2026-05-05 00:00 UTC
+            "behavior_tracker_id": 6,
+            "journal_entry_id": 749754522,
+        },
+        "behavior_tracker": {
+            "id": 6,
+            "internal_name": "late-meal",
+            "title": "Late Meal",
+            "category": "NIGHTTIME",
+            "behavior_type": "NORMAL",
+            "magnitude": None,
+        },
+    }
+    row = transforms.transform_tracked_behavior(real, date(2026, 5, 4))
+    assert row is not None
+    assert row["habit_key"] == "late-meal"
+    assert row["behavior_id"] == 6
+    assert row["answered_yes"] is False
+    assert row["magnitude_value"] is None
+    assert row["time_input_value"] is not None  # epoch ms parsed
+    assert row["whoop_journal_entry_id"] == 749754522
+    assert row["source"] == "whoop_private_api"
+
+
+def test_parse_tracked_behavior_real_api_apple_health_source_tagged():
+    """When tracker_input.source != 'USER' the row is tagged
+    'whoop_apple_health' so downstream queries can split them out."""
+    real = {
+        "tracker_input": {
+            "source": "AUTOFILL_APPLE_HEALTH",
+            "answered_yes": True,
+            "magnitude_input_value": 7.5,
+            "behavior_tracker_id": 12,
+        },
+        "behavior_tracker": {"id": 12, "internal_name": "sleep", "title": "Sleep"},
+    }
+    row = transforms.transform_tracked_behavior(real, date(2026, 5, 4))
+    assert row["source"] == "whoop_apple_health"
+
+
+def test_to_dt_accepts_epoch_ms_int():
+    """Whoop journal-service uses unix epoch milliseconds for time_input_value."""
+    dt = transforms._to_dt(1777939200000)
+    assert dt is not None
+    assert dt.isoformat() == "2026-05-05T00:00:00+00:00"
+
+
+def test_to_dt_accepts_epoch_seconds_float():
+    """Older fixtures used epoch seconds. Accept both via magnitude heuristic."""
+    dt = transforms._to_dt(1777939200.0)
+    assert dt is not None
+    assert dt.isoformat() == "2026-05-05T00:00:00+00:00"
 
 
 # ---- integrations.tracker_inputs[] → fact_food_daily_apple_health --------
@@ -252,17 +317,27 @@ def test_ingest_journal_day_round_trip(fx, monkeypatch):
 
     assert counts["raw"] == 1
     assert counts["journal_day"] == 1
-    assert counts["habit_log"] == 3  # alcohol, caffeine, morning_sunlight
+    # 3 user-logged behaviors (alcohol, caffeine, morning_sunlight)
+    # + 5 autofill rows (calories, protein, carbs, fats, water).
+    assert counts["habit_log"] == 3
+    assert counts["habit_log_autofill"] == 5
     assert counts["food_daily_ah"] == 1
 
     habit_keys = sorted(r["habit_key"] for r in captured["fact_habit_log"])
-    assert habit_keys == ["alcohol", "caffeine", "morning_sunlight"]
+    assert habit_keys == sorted([
+        "alcohol", "caffeine", "morning_sunlight",      # tracked_behaviors
+        "calories", "protein", "carbs", "fats", "water", # autofill
+    ])
 
     alcohol = next(r for r in captured["fact_habit_log"] if r["habit_key"] == "alcohol")
     assert alcohol["behavior_id"] == 11
     assert alcohol["answered_yes"] is True
     assert alcohol["magnitude_value"] == pytest.approx(2.0)
     assert alcohol["source"] == "whoop_private_api"
+
+    calories = next(r for r in captured["fact_habit_log"] if r["habit_key"] == "calories")
+    assert calories["source"] == "whoop_apple_health"
+    assert calories["magnitude_value"] == pytest.approx(2400.0)
 
     journal_day = captured["fact_journal_day"][0]
     assert journal_day["day"] == date(2026, 5, 4)

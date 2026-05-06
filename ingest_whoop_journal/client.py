@@ -88,11 +88,31 @@ class WhoopJournalClient:
 
     # ---- public surface ----------------------------------------------------
     def behaviors_catalog(self) -> list[dict]:
-        """Full Whoop behavior dictionary (200+ behaviors)."""
-        data = self._get("/journal-service/v3/journals/behaviors")
-        if isinstance(data, list):
-            return data
-        return data.get("behaviors") or data.get("results") or []
+        """Full Whoop behavior dictionary (~310 behaviors today).
+
+        v3/journals/behaviors returns UI-grouped categories (no records);
+        v2/journals/behaviors returns ``{records, next_token}`` with one
+        record per behavior. Paginate via next_token until empty so we get
+        every behavior, not just the first page.
+        """
+        out: list[dict] = []
+        token: str | None = None
+        # Hard cap on iterations so a misbehaving cursor can't loop forever.
+        for _ in range(20):
+            path = "/journal-service/v2/journals/behaviors"
+            if token:
+                path = f"{path}?next_token={token}"
+            data = self._get(path)
+            if isinstance(data, list):
+                # Defensive — older API shape returned a list directly.
+                out.extend(data)
+                break
+            records = data.get("records") or data.get("behaviors") or data.get("results") or []
+            out.extend(records)
+            token = data.get("next_token")
+            if not token:
+                break
+        return out
 
     def user_behaviors_for_day(self, day: date) -> list[dict]:
         """Behaviors the user currently has activated."""

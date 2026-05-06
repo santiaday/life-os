@@ -1,70 +1,84 @@
 {
   "journal": {
-    "id": 9000001,
+    "journal_entry_id": 9000001,
     "cycle_id": 555000111,
+    "user_id": 13129888,
+    "user_reviewed": true,
+    "notes": "felt sluggish",
     "tracked_behaviors": [
       {
-        "journal_entry_id": 1001,
-        "cycle_id": 555000111,
-        "behavior_id": 11,
-        "behavior": {
+        "tracker_input": {
+          "source": "USER",
+          "answered_yes": true,
+          "magnitude_input_value": 2,
+          "time_input_value": 1777933800000,
+          "behavior_tracker_id": 11,
+          "journal_entry_id": 1001,
+          "cycle_id": 555000111
+        },
+        "behavior_tracker": {
           "id": 11,
           "internal_name": "alcohol",
-          "name": "alcohol",
           "title": "Did you have any alcohol?",
-          "magnitude": {"unit": "drinks", "type": "INTEGER"}
-        },
-        "answered_yes": true,
-        "magnitude_input_value": 2,
-        "time_input_value": "2026-05-04T22:30:00.000Z",
-        "user_reviewed": true,
-        "notes": null
+          "category": "DAYTIME",
+          "behavior_type": "NEGATIVE",
+          "magnitude": {"units": "drinks", "type": "range"}
+        }
       },
       {
-        "journal_entry_id": 1002,
-        "cycle_id": 555000111,
-        "behavior_id": 22,
-        "behavior": {
+        "tracker_input": {
+          "source": "USER",
+          "answered_yes": true,
+          "magnitude_input_value": 3,
+          "time_input_value": "2026-05-04T15:00:00.000Z",
+          "behavior_tracker_id": 22,
+          "journal_entry_id": 1002,
+          "cycle_id": 555000111
+        },
+        "behavior_tracker": {
           "id": 22,
           "internal_name": "caffeine",
-          "name": "caffeine",
           "title": "Caffeine?",
-          "magnitude": {"unit": "servings", "type": "INTEGER"}
+          "category": "DAYTIME",
+          "behavior_type": "NORMAL",
+          "magnitude": {"units": "servings", "type": "range"}
         },
-        "answered_yes": true,
-        "magnitude_input_value": 3,
-        "time_input_value": "2026-05-04T15:00:00.000Z",
-        "user_reviewed": true,
         "notes": "espresso after lunch"
       },
       {
-        "journal_entry_id": 1003,
-        "cycle_id": 555000111,
-        "behavior_id": 33,
-        "behavior": {
+        "tracker_input": {
+          "source": "USER",
+          "answered_yes": false,
+          "magnitude_input_value": null,
+          "time_input_value": null,
+          "behavior_tracker_id": 33,
+          "journal_entry_id": 1003,
+          "cycle_id": 555000111
+        },
+        "behavior_tracker": {
           "id": 33,
           "internal_name": "morning_sunlight",
-          "name": "morning_sunlight",
           "title": "Got morning sunlight?",
+          "category": "DAYTIME",
+          "behavior_type": "POSITIVE",
           "magnitude": null
-        },
-        "answered_yes": false,
-        "magnitude_input_value": null,
-        "time_input_value": null,
-        "user_reviewed": true,
-        "notes": null
+        }
       }
-    ],
-    "notes": "felt sluggish",
-    "user_reviewed": true
+    ]
+  },
+  "metadata": {
+    "sleep_during": {
+      "lower_endpoint": "2026-05-04T03:30:00Z",
+      "upper_endpoint": "2026-05-04T11:00:00Z"
+    }
   },
   "integrations": {
     "tracker_inputs": [
-      {"name": "Calories", "value": 2400},
-      {"name": "Protein", "value": 165},
-      {"name": "Carbs", "value": 220},
-      {"name": "Fats", "value": 95},
-      {"name": "Water", "value": 8}
+      {"behavior_tracker_id": 145, "source_tracking_key": "Calories", "magnitude_input_value": 2400, "answered_yes": true, "source_display_name": "Apple Health"},
+      {"behavior_tracker_id": 89, "source_tracking_key": "Protein", "magnitude_input_value": 165, "answered_yes": true, "source_display_name": "Apple Health"},
+      {"behavior_tracker_id": 85, "source_tracking_key": "Carbs", "magnitude_input_value": 220, "answered_yes": true, "source_display_name": "Apple Health"},
+      {"behavior_tracker_id": 91, "source_tracking_key": "Fats", "magnitude_input_value": 95, "answered_yes": true, "source_display_name": "Apple Health"},
+      {"behavior_tracker_id": 57, "source_tracking_key": "Water", "magnitude_input_value": 8, "answered_yes": true, "source_display_name": "Apple Health"}
     ]
   }
 }
