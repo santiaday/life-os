@@ -22,6 +22,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from lifeos_core.db import close_pools, conn
 from lifeos_core.logging import configure_logging, get_logger
 from lifeos_core.settings import settings
+from mcp_server import hevy_write_tools as HW
 from mcp_server import tools as T
 from mcp_server import write_tools as W
 from mcp_server.auth import (
@@ -37,7 +38,8 @@ mcp = FastMCP(
     name="life-os",
     instructions=(
         "Personal life-data tools for Santi: Whoop (recovery, sleep, "
-        "workouts, journal, Advanced Labs biomarkers), Google Calendar, "
+        "workouts, journal, Advanced Labs biomarkers), Hevy (strength "
+        "training — per-set weight/reps/volume), Google Calendar, "
         "Cronometer, and Copilot Money in a single warehouse. "
         "Always call get_schema_docs first when answering an analytical "
         "question. Prefer mart_daily for daily-grain queries. "
@@ -46,7 +48,11 @@ mcp = FastMCP(
         "ALWAYS call get_lab_results first to ground the answer in "
         "actual biomarker values — out-of-range markers sort first. "
         "Use get_biomarker_info(biomarker_id) for a deep dive on a "
-        "single marker. Use ask_sql only when no semantic tool fits."
+        "single marker. For lifting / sets / reps / PR / volume / "
+        "specific-exercise questions use get_strength_workouts, "
+        "get_exercise_progression, get_strength_volume_trend, or "
+        "get_strength_sets — fact_workout (Whoop) only has HR/strain. "
+        "Use ask_sql only when no semantic tool fits."
     ),
     # The streamable-HTTP route lives at the *root* of the inner ASGI app so
     # FastAPI can mount it at /mcp without requiring the awkward
@@ -126,6 +132,232 @@ def get_workouts(
     sport_name: str | None = None,
 ) -> dict:
     return T.get_workouts(start_date, end_date, sport_name)
+
+
+@_tool(description=T.TOOLS["get_strength_workouts"]["description"])
+def get_strength_workouts(
+    start_date: date,
+    end_date: date,
+    exercise_search: str | None = None,
+) -> dict:
+    return T.get_strength_workouts(start_date, end_date, exercise_search)
+
+
+@_tool(description=T.TOOLS["get_strength_sets"]["description"])
+def get_strength_sets(
+    start_date: date,
+    end_date: date,
+    exercise_search: str | None = None,
+    set_type: str | None = None,
+    working_sets_only: bool = True,
+) -> dict:
+    return T.get_strength_sets(
+        start_date, end_date, exercise_search, set_type, working_sets_only,
+    )
+
+
+@_tool(description=T.TOOLS["get_exercise_progression"]["description"])
+def get_exercise_progression(
+    exercise_search: str,
+    start_date: date,
+    end_date: date,
+    metric: str = "top_weight",
+) -> dict:
+    return T.get_exercise_progression(exercise_search, start_date, end_date, metric)
+
+
+@_tool(description=T.TOOLS["get_strength_volume_trend"]["description"])
+def get_strength_volume_trend(
+    start_date: date,
+    end_date: date,
+    granularity: str = "week",
+    group_by_muscle_group: bool = False,
+) -> dict:
+    return T.get_strength_volume_trend(
+        start_date, end_date, granularity, group_by_muscle_group,
+    )
+
+
+# ---- Hevy write tools -----------------------------------------------------
+@_tool(description=(
+    "Search Hevy's exercise template catalog (dim_hevy_exercise) by ILIKE on "
+    "title. CALL THIS FIRST whenever you need to log a workout — Hevy keys "
+    "exercises by an 8-char `exercise_template_id` (e.g. '3BC06AD3'), not by "
+    "name, so you must resolve the user's free-text exercise name to a "
+    "template id before calling log_strength_workout. Optional "
+    "primary_muscle_group filter (chest, back, biceps, abdominals, "
+    "quadriceps, ...). If results are empty, call refresh_data('hevy') to "
+    "seed the catalog."
+))
+def find_exercise_templates(
+    query: str,
+    primary_muscle_group: str | None = None,
+    limit: int = 50,
+) -> dict:
+    return HW.find_exercise_templates(query, primary_muscle_group, limit)
+
+
+@_tool(description=(
+    "Log a new strength-training workout to Hevy via POST /v1/workouts and "
+    "mirror the response into raw_hevy_workout / fact_strength_set / "
+    "fact_strength_workout. "
+    "Inputs: title (str), start_time + end_time (ISO8601 — naive treated as "
+    "UTC), exercises (list of dicts), optional description and is_private. "
+    "Each exercise dict: {exercise_template_id (REQUIRED — get from "
+    "find_exercise_templates), notes?, superset_id?, sets: [{type: "
+    "warmup|normal|failure|dropset, weight_kg, reps, rpe? (one of 6, 7, "
+    "7.5, 8, 8.5, 9, 9.5, 10), distance_meters?, duration_seconds?, "
+    "custom_metric?}]}. "
+    "Pass dry_run=True to validate the payload without writing. "
+    "Returns the created hevy_workout_id + a hevy.com URL. Note: "
+    "mart_daily.strength_* won't reflect the new workout until "
+    "refresh_data('mart') runs."
+))
+def log_strength_workout(
+    title: str,
+    start_time: str,
+    end_time: str,
+    exercises: list[dict],
+    description: str | None = None,
+    is_private: bool = True,
+    dry_run: bool = False,
+) -> dict:
+    return HW.log_strength_workout(
+        title=title,
+        start_time=start_time,
+        end_time=end_time,
+        exercises=exercises,
+        description=description,
+        is_private=is_private,
+        dry_run=dry_run,
+    )
+
+
+@_tool(description=(
+    "Overwrite an existing Hevy workout via PUT /v1/workouts/{id}. Body "
+    "shape is identical to log_strength_workout — Hevy replaces the WHOLE "
+    "workout (no partial updates). Read the current state first via "
+    "get_strength_workouts or raw_hevy_workout.payload, then re-send the "
+    "full body with your edits. After a successful update we re-mirror "
+    "the response so local fact tables stay in sync."
+))
+def update_strength_workout(
+    hevy_workout_id: str,
+    title: str,
+    start_time: str,
+    end_time: str,
+    exercises: list[dict],
+    description: str | None = None,
+    is_private: bool = True,
+    dry_run: bool = False,
+) -> dict:
+    return HW.update_strength_workout(
+        hevy_workout_id=hevy_workout_id,
+        title=title,
+        start_time=start_time,
+        end_time=end_time,
+        exercises=exercises,
+        description=description,
+        is_private=is_private,
+        dry_run=dry_run,
+    )
+
+
+# ---- Hevy routines (templates) -------------------------------------------
+@_tool(description=T.TOOLS["list_routines"]["description"])
+def list_routines(folder_id: int | None = None, search: str | None = None) -> dict:
+    return T.list_routines(folder_id, search)
+
+
+@_tool(description=T.TOOLS["list_routine_folders"]["description"])
+def list_routine_folders() -> dict:
+    return T.list_routine_folders()
+
+
+@_tool(description=T.TOOLS["get_routine"]["description"])
+def get_routine(hevy_routine_id: str) -> dict:
+    return T.get_routine(hevy_routine_id)
+
+
+@_tool(description=T.TOOLS["get_exercise_history"]["description"])
+def get_exercise_history(
+    exercise_search: str,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    limit: int = 500,
+) -> dict:
+    return T.get_exercise_history(exercise_search, start_date, end_date, limit)
+
+
+@_tool(description=(
+    "Create a new Hevy routine (template / program) via POST /v1/routines "
+    "and mirror it into raw_hevy_routine. Inputs: title, exercises (list — "
+    "same shape as log_strength_workout but each exercise can carry "
+    "rest_seconds, and each set can carry a rep_range {start, end} "
+    "instead of/alongside reps), folder_id (optional — from "
+    "list_routine_folders), notes (optional), dry_run. Sets in routines "
+    "are PRESCRIPTIONS, not executions, so RPE is not part of a routine "
+    "set (the workout-side log_strength_workout still accepts it). "
+    "Returns hevy_routine_id + a hevy.com URL."
+))
+def create_routine(
+    title: str,
+    exercises: list[dict],
+    folder_id: int | None = None,
+    notes: str | None = None,
+    dry_run: bool = False,
+) -> dict:
+    return HW.create_routine(title, exercises, folder_id, notes, dry_run)
+
+
+@_tool(description=(
+    "Overwrite an existing Hevy routine via PUT /v1/routines/{id}. Body "
+    "shape mirrors create_routine; folder_id is NOT updatable through "
+    "this endpoint (Hevy enforces folder moves via the app UI). Read "
+    "current state via get_routine first, then re-send the full body."
+))
+def update_routine(
+    hevy_routine_id: str,
+    title: str,
+    exercises: list[dict],
+    notes: str | None = None,
+    dry_run: bool = False,
+) -> dict:
+    return HW.update_routine(hevy_routine_id, title, exercises, notes, dry_run)
+
+
+@_tool(description=(
+    "Create a new routine folder. New folders are inserted at index 0 in "
+    "Hevy's UI; existing folders shift down. Mirrors into "
+    "raw_hevy_routine_folder."
+))
+def create_routine_folder(title: str) -> dict:
+    return HW.create_routine_folder(title)
+
+
+@_tool(description=(
+    "Create a custom exercise template (when Hevy's 400+ catalog doesn't "
+    "have what you need). Inputs: title, exercise_type ∈ {weight_reps, "
+    "reps_only, bodyweight_reps, bodyweight_assisted_reps, duration, "
+    "weight_duration, distance_duration, short_distance_weight}, "
+    "equipment_category ∈ {none, barbell, dumbbell, kettlebell, machine, "
+    "plate, resistance_band, suspension, other}, muscle_group ∈ "
+    "{abdominals, shoulders, biceps, triceps, forearms, quadriceps, "
+    "hamstrings, calves, glutes, abductors, adductors, lats, upper_back, "
+    "traps, lower_back, chest, cardio, neck, full_body, other}, "
+    "other_muscles (optional list of muscle_group values). Mirrored "
+    "into dim_hevy_exercise immediately."
+))
+def create_custom_exercise(
+    title: str,
+    exercise_type: str,
+    equipment_category: str,
+    muscle_group: str,
+    other_muscles: list[str] | None = None,
+) -> dict:
+    return HW.create_custom_exercise(
+        title, exercise_type, equipment_category, muscle_group, other_muscles,
+    )
 
 
 @_tool(description=T.TOOLS["get_food_log"]["description"])

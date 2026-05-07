@@ -51,6 +51,7 @@ CORRELATE_ALLOWLIST = {
     "alcohol_spend", "bars_spend", "entertainment_spend", "shopping_spend", "travel_spend",
     "dining_out_txn_count", "dining_out_txn_max",
     "weight_kg", "body_fat_pct",
+    "strength_total_volume_kg", "strength_total_sets", "strength_unique_exercises",
 }
 
 
@@ -193,16 +194,29 @@ def get_sleep_summary(start_date: date, end_date: date, include_naps: bool = Fal
 
 # ---- get_workouts -----------------------------------------------------------
 def get_workouts(start_date: date, end_date: date, sport_name: str | None = None) -> dict:
-    where = "day BETWEEN %s AND %s"
+    where = "fw.day BETWEEN %s AND %s"
     params: list = [start_date, end_date]
     if sport_name:
-        where += " AND sport_name ILIKE %s"
+        where += " AND fw.sport_name ILIKE %s"
         params.append(sport_name)
+    # LEFT JOIN to fact_strength_workout via the soft-FK whoop_workout_id
+    # populated by ingest_hevy. NULL strength_* columns = no Hevy session
+    # linked (cardio, walks, etc.); non-NULL = the same physical workout
+    # was logged in both Whoop (HR/strain) and Hevy (per-set detail).
     q = f"""
-        SELECT workout_id, day, start_ts, end_ts, sport_name, strain, kilojoules,
-               avg_heart_rate, max_heart_rate, distance_meters,
-               zone_two_min, zone_three_min, zone_four_min, zone_five_min
-        FROM fact_workout WHERE {where} ORDER BY start_ts DESC LIMIT 200
+        SELECT fw.workout_id, fw.day, fw.start_ts, fw.end_ts,
+               fw.sport_name, fw.strain, fw.kilojoules,
+               fw.avg_heart_rate, fw.max_heart_rate, fw.distance_meters,
+               fw.zone_two_min, fw.zone_three_min, fw.zone_four_min, fw.zone_five_min,
+               fsw.hevy_workout_id,
+               fsw.total_volume_kg AS strength_total_volume_kg,
+               fsw.total_sets      AS strength_total_sets,
+               fsw.unique_exercises AS strength_unique_exercises
+        FROM fact_workout fw
+        LEFT JOIN fact_strength_workout fsw
+          ON fsw.whoop_workout_id = fw.workout_id
+        WHERE {where}
+        ORDER BY fw.start_ts DESC LIMIT 200
     """
     with conn() as c, c.cursor() as cur:
         cur.execute(q, params)
@@ -210,6 +224,518 @@ def get_workouts(start_date: date, end_date: date, sport_name: str | None = None
     truncated = len(rows) >= 200
     warnings = ["Limit 200 workouts. Narrow the window if needed."] if truncated else []
     return _ok("get_workouts", rows, truncated=truncated, warnings=warnings)
+
+
+# ---- Hevy strength tools ---------------------------------------------------
+STRENGTH_WORKOUT_LIMIT = 200
+STRENGTH_SET_LIMIT = 1000
+EXERCISE_PROGRESSION_LIMIT = 200
+
+
+def get_strength_workouts(
+    start_date: date,
+    end_date: date,
+    exercise_search: str | None = None,
+) -> dict:
+    """List Hevy strength sessions with rollup metrics. Joins Whoop's
+    HR/strain view via the soft-FK whoop_workout_id populated by
+    ingest_hevy."""
+    params: list = [start_date, end_date]
+    where = ["fsw.day BETWEEN %s AND %s"]
+    if exercise_search:
+        where.append(
+            "EXISTS (SELECT 1 FROM fact_strength_set fss "
+            "WHERE fss.hevy_workout_id = fsw.hevy_workout_id "
+            "AND fss.exercise_title ILIKE %s)"
+        )
+        params.append(f"%{exercise_search}%")
+
+    q = f"""
+        SELECT fsw.hevy_workout_id, fsw.day, fsw.start_ts, fsw.end_ts,
+               fsw.title, fsw.duration_seconds,
+               fsw.total_sets, fsw.total_reps, fsw.total_volume_kg,
+               fsw.unique_exercises,
+               fsw.whoop_workout_id,
+               fw.strain        AS whoop_strain,
+               fw.avg_heart_rate AS whoop_avg_hr,
+               fw.max_heart_rate AS whoop_max_hr,
+               fw.kilojoules     AS whoop_kilojoules
+        FROM fact_strength_workout fsw
+        LEFT JOIN fact_workout fw ON fw.workout_id = fsw.whoop_workout_id
+        WHERE {" AND ".join(where)}
+        ORDER BY fsw.start_ts DESC
+        LIMIT {STRENGTH_WORKOUT_LIMIT + 1}
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, params)
+        rows = _serialize(cur.fetchall())
+    truncated = len(rows) > STRENGTH_WORKOUT_LIMIT
+    if truncated:
+        rows = rows[:STRENGTH_WORKOUT_LIMIT]
+    warnings = (
+        [f"More than {STRENGTH_WORKOUT_LIMIT} workouts; truncated. Narrow the window."]
+        if truncated else []
+    )
+    return _ok("get_strength_workouts", rows, truncated=truncated, warnings=warnings)
+
+
+def get_strength_sets(
+    start_date: date,
+    end_date: date,
+    exercise_search: str | None = None,
+    set_type: str | None = None,
+    working_sets_only: bool = True,
+) -> dict:
+    """Per-set Hevy data, filterable. `working_sets_only=True` (default)
+    drops warmup sets — what you almost always want for volume / PR work."""
+    params: list = [start_date, end_date]
+    where = ["day BETWEEN %s AND %s"]
+    if exercise_search:
+        where.append("exercise_title ILIKE %s")
+        params.append(f"%{exercise_search}%")
+    if set_type:
+        where.append("set_type = %s")
+        params.append(set_type)
+    elif working_sets_only:
+        where.append("(set_type IS NULL OR set_type <> 'warmup')")
+
+    q = f"""
+        SELECT hevy_workout_id, exercise_index, set_index,
+               exercise_template_id, exercise_title, set_type,
+               weight_kg, reps, rpe,
+               distance_meters, duration_seconds,
+               superset_id,
+               workout_start_ts, workout_end_ts, day
+        FROM fact_strength_set
+        WHERE {" AND ".join(where)}
+        ORDER BY workout_start_ts DESC, exercise_index, set_index
+        LIMIT {STRENGTH_SET_LIMIT + 1}
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, params)
+        rows = _serialize(cur.fetchall())
+    truncated = len(rows) > STRENGTH_SET_LIMIT
+    if truncated:
+        rows = rows[:STRENGTH_SET_LIMIT]
+    warnings = (
+        [f"More than {STRENGTH_SET_LIMIT} sets; truncated. Filter further."]
+        if truncated else []
+    )
+    return _ok("get_strength_sets", rows, truncated=truncated, warnings=warnings)
+
+
+def get_exercise_progression(
+    exercise_search: str,
+    start_date: date,
+    end_date: date,
+    metric: str = "top_weight",
+) -> dict:
+    """Per-session progression for an exercise. ILIKE matches >1 distinct
+    exercise_title (e.g. 'squat' → 'Front Squat (Barbell)' + 'Back Squat
+    (Barbell)') we resolve to the most-frequent title in the window so the
+    series stays comparable.
+
+    metric ∈ {top_weight, top_set_volume, session_volume, estimated_1rm}.
+    Each row carries every numeric so callers can pivot client-side; the
+    `metric` param drives the trend summary at the end.
+    """
+    valid_metrics = {"top_weight", "top_set_volume", "session_volume", "estimated_1rm"}
+    if metric not in valid_metrics:
+        return _err("get_exercise_progression",
+                    ValueError(f"metric must be one of {sorted(valid_metrics)}"))
+
+    # Resolve which exercise_title to anchor on. Most-frequent match in the
+    # window wins — keeps Front Squat vs Back Squat from being silently
+    # mixed.
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT exercise_title, COUNT(*) AS n
+              FROM fact_strength_set
+             WHERE day BETWEEN %s AND %s
+               AND exercise_title ILIKE %s
+               AND (set_type IS NULL OR set_type <> 'warmup')
+             GROUP BY exercise_title
+             ORDER BY n DESC
+             LIMIT 5
+            """,
+            [start_date, end_date, f"%{exercise_search}%"],
+        )
+        candidates = _serialize(cur.fetchall())
+    if not candidates:
+        return _ok(
+            "get_exercise_progression",
+            [],
+            warnings=[f"No working sets matched '{exercise_search}' in window."],
+            extra={"matched_titles": [], "anchored_title": None, "metric": metric},
+        )
+
+    anchored = candidates[0]["exercise_title"]
+    other_matches = [c["exercise_title"] for c in candidates[1:]]
+
+    # Per-session aggregates. Estimated 1RM uses Epley: w * (1 + r/30).
+    q = """
+        WITH sets AS (
+          SELECT hevy_workout_id, day, exercise_title,
+                 weight_kg, reps,
+                 weight_kg * reps AS set_volume_kg,
+                 weight_kg * (1 + reps / 30.0) AS epley_1rm
+            FROM fact_strength_set
+           WHERE day BETWEEN %s AND %s
+             AND exercise_title = %s
+             AND (set_type IS NULL OR set_type <> 'warmup')
+             AND weight_kg IS NOT NULL
+             AND reps      IS NOT NULL
+        ),
+        per_session AS (
+          SELECT
+            day, hevy_workout_id, exercise_title,
+            COUNT(*)                            AS n_working_sets,
+            MAX(weight_kg)                      AS top_weight_kg,
+            MAX(set_volume_kg)                  AS top_set_volume_kg,
+            SUM(set_volume_kg)                  AS session_volume_kg,
+            MAX(epley_1rm)                      AS estimated_1rm_kg
+          FROM sets
+          GROUP BY day, hevy_workout_id, exercise_title
+        ),
+        top_reps AS (
+          SELECT DISTINCT ON (s.hevy_workout_id)
+            s.hevy_workout_id, s.reps AS top_reps_at_top_weight
+          FROM sets s
+          JOIN per_session p ON p.hevy_workout_id = s.hevy_workout_id
+                            AND p.top_weight_kg  = s.weight_kg
+          ORDER BY s.hevy_workout_id, s.reps DESC
+        )
+        SELECT p.day, p.hevy_workout_id, p.exercise_title, p.n_working_sets,
+               p.top_weight_kg, tr.top_reps_at_top_weight,
+               p.top_set_volume_kg, p.session_volume_kg, p.estimated_1rm_kg
+          FROM per_session p
+          LEFT JOIN top_reps tr ON tr.hevy_workout_id = p.hevy_workout_id
+          ORDER BY p.day
+          LIMIT %s
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, [start_date, end_date, anchored, EXERCISE_PROGRESSION_LIMIT + 1])
+        rows = _serialize(cur.fetchall())
+
+    truncated = len(rows) > EXERCISE_PROGRESSION_LIMIT
+    if truncated:
+        rows = rows[:EXERCISE_PROGRESSION_LIMIT]
+
+    summary = _exercise_progression_summary(rows, metric)
+    if other_matches:
+        summary["other_matched_titles"] = other_matches
+
+    return _ok(
+        "get_exercise_progression",
+        rows,
+        truncated=truncated,
+        extra={
+            "anchored_title": anchored,
+            "metric": metric,
+            "matched_titles": [c["exercise_title"] for c in candidates],
+            "summary": summary,
+        },
+    )
+
+
+def _exercise_progression_summary(rows: list[dict], metric: str) -> dict:
+    """PR row + linear-regression slope (per 30 days) over the chosen metric.
+
+    Skipped (returns empty fields) for <3 sessions because slope is
+    meaningless on tiny n."""
+    metric_col = {
+        "top_weight": "top_weight_kg",
+        "top_set_volume": "top_set_volume_kg",
+        "session_volume": "session_volume_kg",
+        "estimated_1rm": "estimated_1rm_kg",
+    }[metric]
+
+    valid = [r for r in rows if r.get(metric_col) is not None]
+    if not valid:
+        return {"current_pr": None, "trend_pct_change_30d": None, "n_sessions": 0}
+
+    pr_row = max(valid, key=lambda r: float(r[metric_col]))
+
+    n = len(valid)
+    out: dict = {
+        "n_sessions": n,
+        "current_pr_value": float(pr_row[metric_col]),
+        "current_pr_metric": metric,
+        "current_pr_session_id": pr_row["hevy_workout_id"],
+        "current_pr_date": pr_row["day"],
+    }
+
+    if n < 3:
+        out["trend_pct_change_30d"] = None
+        return out
+
+    # Linear regression: y = a + b*x, with x = days from first session, y =
+    # the metric value. Project slope * 30 / mean(y) → 30-day % change.
+    from datetime import date as _date
+
+    first_day = valid[0]["day"]
+    if isinstance(first_day, str):
+        first_day = _date.fromisoformat(first_day)
+    xs: list[float] = []
+    ys: list[float] = []
+    for r in valid:
+        d = r["day"]
+        if isinstance(d, str):
+            d = _date.fromisoformat(d)
+        xs.append(float((d - first_day).days))
+        ys.append(float(r[metric_col]))
+
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
+    num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    den = sum((x - mean_x) ** 2 for x in xs)
+    if den == 0 or mean_y == 0:
+        out["trend_pct_change_30d"] = None
+    else:
+        slope = num / den
+        out["trend_pct_change_30d"] = round((slope * 30.0) / mean_y * 100.0, 2)
+    return out
+
+
+def get_strength_volume_trend(
+    start_date: date,
+    end_date: date,
+    granularity: str = "week",
+    group_by_muscle_group: bool = False,
+) -> dict:
+    """Volume rollup over time. granularity ∈ {day, week, month}.
+    `group_by_muscle_group=True` joins through dim_hevy_exercise to break
+    out per primary_muscle_group — useful for 'am I balancing push/pull'
+    questions."""
+    if granularity not in {"day", "week", "month"}:
+        return _err(
+            "get_strength_volume_trend",
+            ValueError("granularity must be day | week | month"),
+        )
+
+    bucket_expr = {
+        "day":   "fsw.day",
+        "week":  "date_trunc('week', fsw.day)::date",
+        "month": "date_trunc('month', fsw.day)::date",
+    }[granularity]
+
+    if not group_by_muscle_group:
+        q = f"""
+            SELECT
+              {bucket_expr} AS period_start,
+              COUNT(*)                                  AS total_workouts,
+              SUM(fsw.total_sets)                       AS total_sets,
+              SUM(fsw.total_volume_kg)                  AS total_volume_kg,
+              SUM(fsw.unique_exercises)                 AS total_unique_exercises,
+              ROUND(AVG(fsw.total_volume_kg), 2)        AS avg_volume_per_workout
+            FROM fact_strength_workout fsw
+            WHERE fsw.day BETWEEN %s AND %s
+            GROUP BY {bucket_expr}
+            ORDER BY period_start
+            LIMIT 366
+        """
+        with conn() as c, c.cursor() as cur:
+            cur.execute(q, [start_date, end_date])
+            return _ok("get_strength_volume_trend", _serialize(cur.fetchall()))
+
+    # Muscle-group breakout: per-set volume joined to dim_hevy_exercise.
+    bucket_expr_set = bucket_expr.replace("fsw.day", "fss.day")
+    q = f"""
+        SELECT
+          {bucket_expr_set}                              AS period_start,
+          COALESCE(dhe.primary_muscle_group, 'unknown')  AS primary_muscle_group,
+          COUNT(DISTINCT fss.hevy_workout_id)            AS total_workouts,
+          COUNT(*)                                       AS total_sets,
+          SUM(fss.weight_kg * fss.reps) FILTER (
+            WHERE (fss.set_type IS NULL OR fss.set_type <> 'warmup')
+              AND fss.weight_kg IS NOT NULL AND fss.reps IS NOT NULL
+          )                                              AS total_volume_kg,
+          COUNT(DISTINCT fss.exercise_template_id)       AS total_unique_exercises
+        FROM fact_strength_set fss
+        LEFT JOIN dim_hevy_exercise dhe
+          ON dhe.exercise_template_id = fss.exercise_template_id
+        WHERE fss.day BETWEEN %s AND %s
+        GROUP BY {bucket_expr_set}, dhe.primary_muscle_group
+        ORDER BY period_start, primary_muscle_group
+        LIMIT 1000
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, [start_date, end_date])
+        return _ok("get_strength_volume_trend", _serialize(cur.fetchall()))
+
+
+# ---- Hevy routines + exercise history -------------------------------------
+ROUTINE_LIMIT = 100
+
+
+def list_routines(folder_id: int | None = None, search: str | None = None) -> dict:
+    """Hevy routines (templates). Reads from local mirror raw_hevy_routine,
+    populated by `python -m ingest_hevy ingest` (or refresh_data('hevy'))."""
+    where: list[str] = ["NOT deleted"]
+    params: list = []
+    if folder_id is not None:
+        where.append("folder_id = %s")
+        params.append(folder_id)
+    if search:
+        where.append("title ILIKE %s")
+        params.append(f"%{search}%")
+    q = f"""
+        SELECT hevy_routine_id, title, folder_id, updated_at_src,
+               jsonb_array_length(COALESCE(payload->'exercises', '[]'::jsonb)) AS exercise_count,
+               (SELECT COUNT(*) FROM jsonb_array_elements(payload->'exercises') ex,
+                                       jsonb_array_elements(ex->'sets') s) AS set_count,
+               payload->>'notes' AS notes
+        FROM raw_hevy_routine
+        WHERE {" AND ".join(where)}
+        ORDER BY COALESCE(updated_at_src, fetched_at) DESC NULLS LAST
+        LIMIT {ROUTINE_LIMIT}
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, params)
+        rows = _serialize(cur.fetchall())
+    warnings: list[str] = []
+    if not rows:
+        warnings.append(
+            "No routines found locally. Run refresh_data('hevy') if you've "
+            "created routines in the Hevy app."
+        )
+    return _ok("list_routines", rows, warnings=warnings)
+
+
+def list_routine_folders() -> dict:
+    """Routine folders, in Hevy's display order."""
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT f.folder_id, f.title, f.index,
+                   COUNT(r.hevy_routine_id) FILTER (WHERE NOT r.deleted) AS routine_count
+              FROM raw_hevy_routine_folder f
+              LEFT JOIN raw_hevy_routine r ON r.folder_id = f.folder_id
+             GROUP BY f.folder_id, f.title, f.index
+             ORDER BY COALESCE(f.index, 0), f.title
+            """
+        )
+        return _ok("list_routine_folders", _serialize(cur.fetchall()))
+
+
+def get_routine(hevy_routine_id: str) -> dict:
+    """Full payload for one routine — every exercise, every prescribed set,
+    rest_seconds, notes, rep_range. Use this before starting a workout from
+    a routine, so you know what to do."""
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT hevy_routine_id, title, folder_id, updated_at_src,
+                   payload
+              FROM raw_hevy_routine
+             WHERE hevy_routine_id = %s
+            """,
+            [hevy_routine_id],
+        )
+        row = cur.fetchone()
+    if row is None:
+        return _err("get_routine", ValueError(
+            f"Unknown routine id '{hevy_routine_id}'. Use list_routines to discover."
+        ))
+    return _ok("get_routine", _serialize([row]))
+
+
+def get_exercise_history(
+    exercise_search: str,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    limit: int = 500,
+) -> dict:
+    """Every set ever logged for one exercise across all your workouts.
+    Hits Hevy's /v1/exercise_history/{template_id} live, so it's authoritative
+    even for workouts older than your local backfill window. exercise_search
+    is ILIKE on dim_hevy_exercise.title; if it matches multiple templates we
+    pick the most-frequent one in fact_strength_set so the series stays
+    comparable."""
+    if not exercise_search or not exercise_search.strip():
+        return _err("get_exercise_history", ValueError("exercise_search is required"))
+
+    # Resolve template_id locally (most-frequent first, falls back to title len).
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT dhe.exercise_template_id, dhe.title,
+                   COALESCE((
+                     SELECT COUNT(*) FROM fact_strength_set fss
+                      WHERE fss.exercise_template_id = dhe.exercise_template_id
+                   ), 0) AS n_sets
+              FROM dim_hevy_exercise dhe
+             WHERE dhe.title ILIKE %s
+             ORDER BY n_sets DESC, length(dhe.title), dhe.title
+             LIMIT 5
+            """,
+            [f"%{exercise_search}%"],
+        )
+        candidates = _serialize(cur.fetchall())
+
+    if not candidates:
+        return _err("get_exercise_history", ValueError(
+            f"No exercise matched '{exercise_search}'. Use find_exercise_templates "
+            f"to discover. If the catalog is empty, run refresh_data('hevy')."
+        ))
+
+    chosen = candidates[0]
+    template_id = chosen["exercise_template_id"]
+    other = [c["title"] for c in candidates[1:]]
+
+    # Hit Hevy live for the canonical history.
+    try:
+        from ingest_hevy.client import HevyClient
+        with HevyClient() as client:
+            entries = client.exercise_history(
+                template_id,
+                start_date=str(start_date) if start_date else None,
+                end_date=str(end_date) if end_date else None,
+            )
+    except Exception as e:  # noqa: BLE001
+        return _err("get_exercise_history", e)
+
+    truncated = len(entries) > limit
+    if truncated:
+        entries = entries[:limit]
+
+    # Compute lightweight summary stats (top weight, top reps, est 1RM).
+    working = [
+        e for e in entries
+        if (e.get("set_type") or "normal") != "warmup"
+        and e.get("weight_kg") is not None
+        and e.get("reps") is not None
+    ]
+    summary: dict = {
+        "anchored_title": chosen["title"],
+        "exercise_template_id": template_id,
+        "n_total_sets": len(entries),
+        "n_working_sets": len(working),
+    }
+    if working:
+        top = max(working, key=lambda r: float(r["weight_kg"]))
+        epley = max(
+            float(r["weight_kg"]) * (1 + float(r["reps"]) / 30.0)
+            for r in working
+        )
+        summary.update({
+            "top_weight_kg": float(top["weight_kg"]),
+            "top_weight_reps": int(top["reps"]),
+            "top_weight_workout_id": top.get("workout_id"),
+            "top_weight_date": top.get("workout_start_time"),
+            "estimated_1rm_kg": round(epley, 2),
+        })
+    if other:
+        summary["other_matched_titles"] = other
+
+    return _ok(
+        "get_exercise_history",
+        _serialize(entries),
+        truncated=truncated,
+        warnings=([f"Truncated to {limit} sets."] if truncated else []),
+        extra={"summary": summary},
+    )
 
 
 # ---- get_food_log -----------------------------------------------------------
@@ -1064,7 +1590,15 @@ TOOLS: dict[str, dict] = {
     },
     "get_workouts": {
         "fn": get_workouts,
-        "description": "Individual workouts from fact_workout. Optional sport_name ILIKE filter.",
+        "description": (
+            "Individual workouts from fact_workout (Whoop HR/strain view). "
+            "Optional sport_name ILIKE filter. Each row carries the linked "
+            "Hevy session's per-set rollup (hevy_workout_id, "
+            "strength_total_volume_kg, strength_total_sets, "
+            "strength_unique_exercises) when both apps logged the same "
+            "physical workout — NULL columns mean no Hevy match (cardio, "
+            "walks, etc.)."
+        ),
         "input": {
             "type": "object",
             "required": ["start_date", "end_date"],
@@ -1072,6 +1606,165 @@ TOOLS: dict[str, dict] = {
                 "start_date": {"type": "string", "format": "date"},
                 "end_date": {"type": "string", "format": "date"},
                 "sport_name": {"type": "string"},
+            },
+        },
+    },
+    "get_strength_workouts": {
+        "fn": get_strength_workouts,
+        "description": (
+            "Hevy strength sessions with rollup metrics (total_sets, total_reps, "
+            "total_volume_kg over working sets, unique_exercises) and the linked "
+            "Whoop workout's strain + HR if the same session was logged in both. "
+            "Use exercise_search (ILIKE) to scope to sessions that included a "
+            "specific lift."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["start_date", "end_date"],
+            "properties": {
+                "start_date": {"type": "string", "format": "date"},
+                "end_date":   {"type": "string", "format": "date"},
+                "exercise_search": {"type": "string"},
+            },
+        },
+    },
+    "get_strength_sets": {
+        "fn": get_strength_sets,
+        "description": (
+            "Per-set Hevy data. Filters: exercise_search (ILIKE on title), "
+            "set_type (warmup|normal|failure|dropset), working_sets_only "
+            "(default true — drops warmup). Returns weight_kg, reps, rpe, "
+            "set_type, exercise_title, distance/duration for every matching "
+            "set within the window."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["start_date", "end_date"],
+            "properties": {
+                "start_date": {"type": "string", "format": "date"},
+                "end_date":   {"type": "string", "format": "date"},
+                "exercise_search":   {"type": "string"},
+                "set_type": {
+                    "type": "string",
+                    "enum": ["warmup", "normal", "failure", "dropset"],
+                },
+                "working_sets_only": {"type": "boolean", "default": True},
+            },
+        },
+    },
+    "get_exercise_progression": {
+        "fn": get_exercise_progression,
+        "description": (
+            "Per-session progression for a specific exercise. exercise_search "
+            "is ILIKE on fact_strength_set.exercise_title; if it matches "
+            "multiple distinct titles, we anchor on the most-frequent one in "
+            "the window (so 'squat' won't silently mix Front + Back Squat). "
+            "Returns one row per session with top_weight_kg, "
+            "top_reps_at_top_weight, top_set_volume_kg, session_volume_kg, "
+            "and estimated_1rm_kg (Epley: w * (1 + r/30)). The summary block "
+            "carries the current PR for the selected metric and a 30-day "
+            "linear-trend % change. metric ∈ {top_weight, top_set_volume, "
+            "session_volume, estimated_1rm}."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["exercise_search", "start_date", "end_date"],
+            "properties": {
+                "exercise_search": {"type": "string"},
+                "start_date": {"type": "string", "format": "date"},
+                "end_date":   {"type": "string", "format": "date"},
+                "metric": {
+                    "type": "string",
+                    "enum": ["top_weight", "top_set_volume", "session_volume", "estimated_1rm"],
+                    "default": "top_weight",
+                },
+            },
+        },
+    },
+    "get_strength_volume_trend": {
+        "fn": get_strength_volume_trend,
+        "description": (
+            "Volume rollup over time across all strength training. "
+            "granularity ∈ {day, week, month}. Set "
+            "group_by_muscle_group=true to break each period out by "
+            "dim_hevy_exercise.primary_muscle_group — handy for "
+            "'am I hitting all muscle groups' / push-pull balance questions."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["start_date", "end_date"],
+            "properties": {
+                "start_date": {"type": "string", "format": "date"},
+                "end_date":   {"type": "string", "format": "date"},
+                "granularity": {
+                    "type": "string",
+                    "enum": ["day", "week", "month"],
+                    "default": "week",
+                },
+                "group_by_muscle_group": {"type": "boolean", "default": False},
+            },
+        },
+    },
+    "list_routines": {
+        "fn": list_routines,
+        "description": (
+            "List Hevy routines (templates / programs) the user has saved. "
+            "Optional folder_id (from list_routine_folders) and search "
+            "(ILIKE on title). Each row carries the routine id, title, "
+            "folder, exercise count, set count, and notes — call "
+            "get_routine(id) for the full prescription."
+        ),
+        "input": {
+            "type": "object",
+            "properties": {
+                "folder_id": {"type": "integer"},
+                "search": {"type": "string"},
+            },
+        },
+    },
+    "list_routine_folders": {
+        "fn": list_routine_folders,
+        "description": (
+            "List the user's routine folders, in display order. Returns "
+            "folder_id (use as filter for list_routines), title, index, "
+            "and routine_count."
+        ),
+        "input": {"type": "object", "properties": {}},
+    },
+    "get_routine": {
+        "fn": get_routine,
+        "description": (
+            "Full payload for one routine — every exercise, every "
+            "prescribed set, rest_seconds, notes, rep_range. Use this "
+            "before logging a workout from a routine so you know the "
+            "prescription. hevy_routine_id is from list_routines."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["hevy_routine_id"],
+            "properties": {"hevy_routine_id": {"type": "string"}},
+        },
+    },
+    "get_exercise_history": {
+        "fn": get_exercise_history,
+        "description": (
+            "Every set ever logged for one exercise, across ALL workouts in "
+            "Hevy (live API call — authoritative even outside the local "
+            "backfill window). exercise_search is ILIKE on the template "
+            "catalog; if multiple titles match, the most-frequent in "
+            "fact_strength_set is anchored. Returns one row per set "
+            "(weight_kg, reps, set_type, RPE, workout_id, workout_start_time) "
+            "plus a summary with top_weight_kg, estimated_1rm_kg, "
+            "n_working_sets."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["exercise_search"],
+            "properties": {
+                "exercise_search": {"type": "string"},
+                "start_date": {"type": "string", "format": "date"},
+                "end_date":   {"type": "string", "format": "date"},
+                "limit": {"type": "integer", "default": 500, "minimum": 1, "maximum": 5000},
             },
         },
     },

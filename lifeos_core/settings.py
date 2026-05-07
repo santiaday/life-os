@@ -90,6 +90,12 @@ class Settings(BaseSettings):
     CRONOMETER_USERNAME: str | None = None
     CRONOMETER_PASSWORD: str | None = None
 
+    # ---- Hevy --------------------------------------------------------------
+    # Static API key from the Hevy mobile app's Settings → Developer (Pro plan).
+    # Hevy's API uses a long-lived key — no OAuth — so we read it straight from
+    # env rather than oauth_tokens.
+    HEVY_API_KEY: str | None = None
+
     # ---- Copilot -----------------------------------------------------------
     COPILOT_EMAIL: str | None = None
     COPILOT_PASSWORD: str | None = None

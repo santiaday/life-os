@@ -56,6 +56,8 @@ INSERT INTO mart_daily (
   took_magnesium, took_vitamin_d, took_creatine, took_l_theanine,
   joint_pain, headache,
   journal_notes,
+  -- Hevy strength rollup
+  strength_total_volume_kg, strength_total_sets, strength_unique_exercises,
   refreshed_at
 )
 WITH bounds AS (
@@ -71,7 +73,8 @@ WITH bounds AS (
       COALESCE((SELECT MIN(day)  FROM fact_food_daily),     CURRENT_DATE),
       COALESCE((SELECT MIN(day)  FROM fact_food_log),       CURRENT_DATE),
       COALESCE((SELECT MIN(date) FROM fact_transaction),    CURRENT_DATE),
-      COALESCE((SELECT MIN(day)  FROM fact_biometric),      CURRENT_DATE)
+      COALESCE((SELECT MIN(day)  FROM fact_biometric),      CURRENT_DATE),
+      COALESCE((SELECT MIN(day)  FROM fact_strength_workout), CURRENT_DATE)
     ) AS min_day
 ),
 days AS (
@@ -90,12 +93,31 @@ sleep_primary AS (
   ORDER BY day, total_in_bed_min DESC
 ),
 cycle_primary AS (
+  -- Whoop cycles run bedtime → next bedtime. Neither start_ts nor end_ts
+  -- gives the right calendar day for the cycle's activity:
+  --   * local_date(start_ts) = bedtime-of-day-N — wrong, activity is mostly N+1
+  --   * local_date(end_ts)   = bedtime-of-day-N+1 — wrong when bedtime is just
+  --     past midnight (e.g. cycle ends 01:34, but activity was the prior day)
+  -- The correct attribution is the cycle's midpoint, which lands during the
+  -- waking-activity portion regardless of bedtime drift. For the active cycle
+  -- (end_ts IS NULL), use now() as the open-bound proxy.
+  --
   -- Whoop occasionally produces multiple cycles per local day around tz
-  -- transitions / naps. Pick the longest one as the "main" daily cycle.
-  SELECT DISTINCT ON (day)
-    day, scaled_strain, day_kilojoules
-  FROM fact_cycle
-  ORDER BY day, COALESCE(end_ts - start_ts, INTERVAL '0') DESC
+  -- transitions / naps; we keep the longest as the "main" daily cycle.
+  SELECT DISTINCT ON (effective_day)
+    effective_day AS day, scaled_strain, day_kilojoules
+  FROM (
+    SELECT
+      c.cycle_id,
+      local_date(c.start_ts + (COALESCE(c.end_ts, now()) - c.start_ts) / 2)
+        AS effective_day,
+      c.scaled_strain,
+      c.day_kilojoules,
+      c.start_ts,
+      c.end_ts
+    FROM fact_cycle c
+  ) rebucketed
+  ORDER BY effective_day, COALESCE(end_ts - start_ts, INTERVAL '0') DESC
 ),
 recovery_primary AS (
   -- Recovery is keyed to cycle_id, not day. If there are multiple recoveries
@@ -200,6 +222,21 @@ workout_agg AS (
     MAX(strain) AS workout_max_strain
   FROM fact_workout GROUP BY day
 ),
+strength_agg AS (
+  -- Per-day rollup of Hevy strength sessions. unique_exercises is the
+  -- DISTINCT-COUNT across the day (not the SUM), so two sessions that both
+  -- did Front Squat count it once.
+  SELECT
+    fsw.day,
+    SUM(fsw.total_volume_kg)::numeric(12,2) AS strength_total_volume_kg,
+    SUM(fsw.total_sets)::int                AS strength_total_sets,
+    COUNT(DISTINCT fss.exercise_template_id)::int AS strength_unique_exercises
+  FROM fact_strength_workout fsw
+  LEFT JOIN fact_strength_set fss
+    ON fss.hevy_workout_id = fsw.hevy_workout_id
+   AND fss.exercise_template_id IS NOT NULL
+  GROUP BY fsw.day
+),
 journal_notes_agg AS (
   -- Whoop's daily notes lives in raw_whoop_journal.payload.journal.notes;
   -- pull straight from JSONB so we don't have to materialize a column.
@@ -279,6 +316,9 @@ SELECT
   hp.took_magnesium, hp.took_vitamin_d, hp.took_creatine, hp.took_l_theanine,
   hp.joint_pain, hp.headache,
   jn.journal_notes,
+  COALESCE(st.strength_total_volume_kg, 0),
+  COALESCE(st.strength_total_sets,      0),
+  COALESCE(st.strength_unique_exercises, 0),
   now()
 FROM days d
 LEFT JOIN recovery_primary r  ON r.day  = d.day
@@ -292,6 +332,7 @@ LEFT JOIN journal_notes_agg jn ON jn.day = d.day
 LEFT JOIN fact_food_daily fd ON fd.day = d.day
 LEFT JOIN food_agg        fa ON fa.day = d.day
 LEFT JOIN spend_agg       sa ON sa.day = d.day
+LEFT JOIN strength_agg    st ON st.day = d.day
 LEFT JOIN LATERAL (
   SELECT value FROM fact_biometric
   WHERE day = d.day AND metric = 'weight'

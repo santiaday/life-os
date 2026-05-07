@@ -150,6 +150,30 @@ def build() -> BlockingScheduler:
         coalesce=True,
     )
 
+    # ---- Hevy strength training -------------------------------------------
+    # Daily incremental at 6 AM (after Whoop's 6:00 backfill so the Whoop ↔
+    # Hevy linker can find fact_workout rows from this morning's session).
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(hour=6, minute=10),
+        args=["ingest_hevy", "ingest"],
+        id="hevy_daily",
+        name="Hevy daily incremental (last_run lookback)",
+        max_instances=1,
+        coalesce=True,
+    )
+    # Sunday: deeper rebackfill (catches per-set tweaks made hours-to-days
+    # later in the Hevy app) + exercise template catalog refresh.
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(day_of_week="sun", hour=6, minute=15),
+        args=["ingest_hevy", "ingest", "--backfill", "30", "--catalog"],
+        id="hevy_weekly_rebackfill",
+        name="Hevy Sunday 30-day rebackfill + exercise catalog",
+        max_instances=1,
+        coalesce=True,
+    )
+
     # ---- Copilot (Phase 7) ------------------------------------------------
     sched.add_job(
         run_subprocess,

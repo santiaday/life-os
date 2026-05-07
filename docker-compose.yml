@@ -88,6 +88,18 @@ services:
   #   env_file: .env
   #   profiles: ["manual"]
 
+  # ---- Hevy strength training ----
+  # Like the other ingesters, runs unattended via the scheduler container's
+  # subprocess. The image is here so a manual one-shot is also available:
+  #     docker compose run --rm ingest_hevy ingest --backfill 30
+  ingest_hevy:
+    image: ghcr.io/santi/life-os-ingest-hevy:latest
+    build:
+      context: .
+      dockerfile: ingest_hevy/Dockerfile
+    env_file: .env
+    profiles: ["manual"]
+
   # ---- Phase 4 ----
   # mart_refresh:
   #   image: ghcr.io/santi/life-os-mart-refresh:latest

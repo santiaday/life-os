@@ -35,7 +35,7 @@ SCHEMA_DOCS: dict = {
                 "sleep_start_ts, sleep_end_ts": "UTC timestamps of the primary night's sleep. Convert to local for human display.",
                 "nap_count": "Naps logged for this day. Naps are NOT in sleep_total_hours.",
                 "nap_total_min": "Sum of nap minutes for this day.",
-                "strain": "Whoop's daily strain (0-21). Logarithmic scale.",
+                "strain": "Whoop's daily strain (0-21). Logarithmic scale. Whoop cycles run bedtime→bedtime, so neither cycle.start_ts nor end_ts cleanly maps to the activity day. mart_daily re-buckets each cycle to local_date(midpoint) — the day where the cycle's waking activity lives. Active (still-running) cycles treat now() as the open bound.",
                 "day_kilojoules": "Estimated daily energy expenditure (kJ).",
                 "workout_count": "Number of distinct logged workouts.",
                 "workout_total_min": "Sum of workout durations.",
@@ -68,6 +68,9 @@ SCHEMA_DOCS: dict = {
                 "took_magnesium, took_vitamin_d, took_creatine, took_l_theanine": "Supplement compliance from Whoop journal.",
                 "joint_pain, headache": "Discomfort flags from Whoop journal.",
                 "journal_notes": "Free-text notes from Whoop journal for the day.",
+                "strength_total_volume_kg": "Sum of total_volume_kg across Hevy sessions on this day (working sets only). 0 on rest days. Use this for daily strength load alongside meeting/recovery context.",
+                "strength_total_sets": "Total working+warmup sets across all Hevy sessions on the day. 0 on rest days.",
+                "strength_unique_exercises": "Distinct dim_hevy_exercise.exercise_template_id values touched on the day. 0 on rest days.",
             },
             "common_queries": [
                 "Average recovery for the last 30 days: SELECT AVG(recovery_score) FROM mart_daily WHERE day >= CURRENT_DATE - 30",
@@ -117,12 +120,112 @@ SCHEMA_DOCS: dict = {
             },
         },
         "fact_workout": {
-            "purpose": "Per-workout detail. Zone breakdown for HR-zone analysis.",
+            "purpose": (
+                "Per-workout detail (Whoop view: HR/strain/zones/kJ). For "
+                "the per-set / weight / reps view of the same physical "
+                "session, see fact_strength_workout — soft-linked via "
+                "fact_strength_workout.whoop_workout_id."
+            ),
             "grain": "1 row per workout.",
             "columns": {
                 "sport_name": "Whoop's sport label (e.g. 'Running', 'Cycling').",
                 "strain": "Whoop strain for just this workout.",
                 "zone_zero_min..zone_five_min": "Minutes spent in each Whoop HR zone.",
+            },
+        },
+        "fact_strength_workout": {
+            "purpose": (
+                "Per-strength-session rollup from Hevy. Covers what Whoop "
+                "deliberately doesn't (per-exercise volume, sets, reps). "
+                "whoop_workout_id is a soft FK to fact_workout, populated "
+                "by ingest_hevy via a ±10/15min start/end window match — "
+                "use that to join Whoop's HR/strain to Hevy's per-set data. "
+                "ALWAYS prefer this over fact_workout for strength/volume "
+                "questions."
+            ),
+            "grain": "1 row per Hevy workout.",
+            "columns": {
+                "hevy_workout_id": "UUID from Hevy. Joinable to fact_strength_set.",
+                "title": "User-entered workout title from Hevy (e.g. 'Push Day').",
+                "duration_seconds": "end_ts - start_ts.",
+                "total_sets": "All sets, including warmups.",
+                "total_reps": "Sum of reps across all sets.",
+                "total_volume_kg": "Sum of weight_kg * reps over WORKING SETS ONLY (set_type != 'warmup').",
+                "unique_exercises": "Distinct exercise_template_id count for this session.",
+                "whoop_workout_id": "Soft FK to fact_workout when both apps logged the same physical session. NULL if no match within ±10/15min.",
+            },
+            "common_queries": [
+                "Sessions in a window: SELECT * FROM fact_strength_workout WHERE day BETWEEN ... — but prefer get_strength_workouts.",
+            ],
+            "gotchas": [
+                "total_volume_kg excludes warmups; if you want the truly raw figure, recompute from fact_strength_set without the set_type filter.",
+                "whoop_workout_id is a SOFT link — Whoop re-ingests can change workout_ids; the link is recomputed on next Hevy ingest, not auto-repaired.",
+            ],
+        },
+        "fact_strength_set": {
+            "purpose": (
+                "One row per set across every Hevy session. Use this for "
+                "exercise-progression / per-rep questions. Composite PK "
+                "(hevy_workout_id, exercise_index, set_index) — re-ingest "
+                "is a clean DELETE+INSERT per workout."
+            ),
+            "grain": "1 row per (hevy_workout_id, exercise_index, set_index).",
+            "columns": {
+                "exercise_template_id": "FK to dim_hevy_exercise. NULL for custom-exercise sets the user entered freehand without selecting a template.",
+                "exercise_title": "Hevy's display name (e.g. 'Front Squat (Barbell)').",
+                "set_type": "warmup | normal | failure | dropset. Filter set_type='warmup' out of volume math.",
+                "weight_kg": "Always kg in storage; the Hevy app handles lb-display locally.",
+                "rpe": "Rate of perceived exertion, 0-10. Often NULL.",
+                "day": "Generated from local_date(workout_start_ts). Pre-indexed.",
+            },
+        },
+        "dim_hevy_exercise": {
+            "purpose": "Hevy's exercise-template catalog (refreshable via `python -m ingest_hevy catalog`). The reference table for primary_muscle_group breakouts in get_strength_volume_trend.",
+            "grain": "1 row per exercise template.",
+            "columns": {
+                "exercise_template_id": "Hevy's UUID. Used as fact_strength_set.exercise_template_id.",
+                "exercise_type": "weight_reps | reps_only | duration | distance_duration.",
+                "primary_muscle_group": "e.g. 'quadriceps', 'chest', 'back'.",
+                "secondary_muscle_groups": "TEXT[] — additional muscles worked.",
+                "is_custom": "True for user-defined templates; False for Hevy's built-in catalog.",
+            },
+        },
+        "raw_hevy_workout": {
+            "purpose": "Full JSON payload per Hevy workout. fact_strength_workout / fact_strength_set are derived from this. Query raw only if you need a payload field that isn't pivoted.",
+            "grain": "1 row per Hevy workout.",
+            "columns": {
+                "hevy_workout_id": "UUID natural key.",
+                "updated_at_src": "payload.updated_at — promoted out so the daily incremental can pick max(updated_at_src) as its `since` cursor.",
+                "deleted": "Tombstone flag. Hevy /workouts/events 'deleted' marks the row, but the corresponding fact_* rows are hard-deleted on the same pass so reads stay clean.",
+            },
+        },
+        "raw_hevy_routine": {
+            "purpose": (
+                "Hevy routine templates (the user's saved programs — 'Push "
+                "A', 'Pull B', etc.). Each row is one routine; "
+                "payload->'exercises' is a JSONB array of {exercise_template_id, "
+                "rest_seconds, sets: [{type, weight_kg, reps, rep_range, ...}]}. "
+                "Workouts (raw_hevy_workout) are EXECUTIONS; routines are "
+                "the PRESCRIPTIONS."
+            ),
+            "grain": "1 row per routine.",
+            "columns": {
+                "hevy_routine_id": "UUID natural key.",
+                "title, folder_id": "Promoted out of payload for fast list queries.",
+                "payload": "Full Hevy response, including the exercises[] / sets[] prescription.",
+            },
+            "common_queries": [
+                "Routines in folder 42: SELECT title FROM raw_hevy_routine WHERE folder_id = 42 AND NOT deleted",
+                "All exercises across routines: SELECT title, ex->>'exercise_template_id', s FROM raw_hevy_routine, jsonb_array_elements(payload->'exercises') ex, jsonb_array_elements(ex->'sets') s",
+            ],
+        },
+        "raw_hevy_routine_folder": {
+            "purpose": "Hevy routine folders for grouping templates (e.g. 'Hypertrophy block', 'Cutting phase'). Tiny table.",
+            "grain": "1 row per folder.",
+            "columns": {
+                "folder_id": "Hevy's INT id (NOT a UUID).",
+                "title": "Folder name.",
+                "index": "Display order in Hevy's UI.",
             },
         },
         "fact_habit_log": {
@@ -377,6 +480,61 @@ SCHEMA_DOCS: dict = {
             "User asks 'why is the MCP slow' or 'which tools are getting called "
             "the most'. Call get_tool_stats(window_minutes=60 or 1440). Returns "
             "per-tool n, p50/p95 latency, and error count from mcp_tool_log."
+        ),
+        "manage_hevy_routines": (
+            "Routines are TEMPLATES (the prescription); workouts are "
+            "SESSIONS (the execution). Use routines when the user wants a "
+            "reusable program ('build me a 3-day push/pull/legs', 'save "
+            "this as my Tuesday workout'); use log_strength_workout when "
+            "they're logging today's actual session. Discovery: "
+            "list_routine_folders → list_routines(folder_id=...) → "
+            "get_routine(id). Editing: update_routine REPLACES the whole "
+            "thing (read first via get_routine, then re-send with edits — "
+            "folder_id is not updatable through PUT). Routines support "
+            "rep_range {start, end} per set — use this when you want to "
+            "prescribe '8-12 reps' rather than a fixed target. Workouts "
+            "support RPE per set; routines do not. Folder moves require "
+            "the Hevy mobile app — only NEW folders can be created via "
+            "API. To follow a routine in a session: get_routine(id), "
+            "translate prescribed sets into actual sets (with the weights "
+            "the user lifted), call log_strength_workout."
+        ),
+        "log_strength_workout": (
+            "User says 'log a workout' / 'I just did X / Y / Z' / 'add this "
+            "to Hevy'. "
+            "1) For each exercise the user mentions, call "
+            "find_exercise_templates(query='front squat') to resolve the "
+            "free-text name to an 8-char exercise_template_id. If multiple "
+            "match, pick the one whose title best matches (prefer 'Front "
+            "Squat (Barbell)' over 'Front Squat (Smith Machine)' unless "
+            "the user specified equipment). "
+            "2) Build the `exercises` list with sets. type defaults to "
+            "'normal'; mark warmups explicitly as 'warmup'. weight_kg, "
+            "reps, rpe optional per set — but for typical lifts include "
+            "weight_kg + reps. "
+            "3) Call log_strength_workout(title, start_time, end_time, "
+            "exercises, dry_run=True) FIRST to surface validation errors "
+            "without polluting the user's Hevy account. "
+            "4) Once the dry-run looks right, re-call without dry_run. The "
+            "tool returns the hevy_workout_id and a hevy.com URL. "
+            "5) Mention to the user that mart_daily strength columns won't "
+            "show the new workout until refresh_data('mart') runs."
+        ),
+        "strength_progression": (
+            "User asks about lifting / sets / reps / PRs / volume / "
+            "specific-exercise progress. Tools: "
+            "1) get_strength_workouts(start, end) for a window of sessions. "
+            "2) get_exercise_progression(exercise_search='squat', start, end, "
+            "metric='top_weight'|'estimated_1rm'|...) for time-series of one "
+            "lift with a PR + 30-day-trend summary. "
+            "3) get_strength_volume_trend(start, end, granularity='week', "
+            "group_by_muscle_group=true) for push/pull-balance and weekly load. "
+            "4) get_strength_sets(...) for raw per-set data when you need "
+            "set-level detail (e.g. RPE distribution, failure-set count). "
+            "Strength sessions are also linked to Whoop's HR/strain view: "
+            "get_strength_workouts returns whoop_strain + whoop_avg_hr when "
+            "the user wore the band, and get_workouts now carries the linked "
+            "hevy_workout_id + strength rollup."
         ),
     },
     "performance_tips": {
