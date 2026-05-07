@@ -38,7 +38,12 @@ from lifeos_core.upsert import upsert_rows
 
 log = get_logger(__name__)
 
-DEFAULT_INCREMENTAL_DAYS = 1  # 1 day back + today = 2 days total
+# Daily rebackfill window. Whoop's journal API doesn't expose a day's
+# tracked_behaviors[] until the user's *next* sleep closes the cycle, so a
+# cron firing at 5:35 AM ET against "yesterday" routinely sees `no_entry`.
+# A 7-day rolling re-pull always catches the prior day on the next run, plus
+# any late edits within the week. ~7 GETs/day is trivial.
+DEFAULT_INCREMENTAL_DAYS = 6  # 6 days back + today = 7 days total
 
 
 # ---- behavior catalog ------------------------------------------------------
