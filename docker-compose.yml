@@ -100,6 +100,34 @@ services:
     env_file: .env
     profiles: ["manual"]
 
+  # ---- PushPress (programmed gym workouts) ----
+  # Daily window sync of programmed workouts across class types. One-shot:
+  #     docker compose run --rm ingest_pushpress ingest
+  # Bootstrap auth (one-time, every ~60 days when refresh fails):
+  #     docker compose run --rm -it ingest_pushpress login
+  ingest_pushpress:
+    image: ghcr.io/santi/life-os-ingest-pushpress:latest
+    build:
+      context: .
+      dockerfile: ingest_pushpress/Dockerfile
+    env_file: .env
+    profiles: ["manual"]
+    tty: true
+    stdin_open: true
+
+  # ---- Coach (parser + load recommender + Hevy routine writer) ----
+  # Cron-driven via the scheduler container; image is here so a manual
+  # one-shot is also available:
+  #     docker compose run --rm coach run
+  #     docker compose run --rm coach sync --dry-run
+  coach:
+    image: ghcr.io/santi/life-os-coach:latest
+    build:
+      context: .
+      dockerfile: coach/Dockerfile
+    env_file: .env
+    profiles: ["manual"]
+
   # ---- Phase 4 ----
   # mart_refresh:
   #   image: ghcr.io/santi/life-os-mart-refresh:latest

@@ -315,6 +315,48 @@ class HevyClient:
 
     # ---- Custom exercise templates ---------------------------------------
     def create_custom_exercise(self, exercise: dict) -> dict:
-        return self._send_json(
-            "POST", "/exercise_templates", {"exercise": exercise}
+        """POST /v1/exercise_templates. Hevy's response shape here is
+        QUIRKY: instead of returning the full template JSON it returns a
+        bare UUID string (raw text body, not even quoted). We detect that
+        and rebuild a normal {id, title, ...} dict from the request body
+        so callers get a consistent shape."""
+        log.info("hevy.client.send_json", method="POST", path="/exercise_templates")
+        resp = self._client.request(
+            "POST", "/exercise_templates",
+            json={"exercise": exercise},
+            headers={"content-type": "application/json"},
         )
+        if resp.status_code in (401, 403):
+            raise HevyAuthError(f"{resp.status_code} on POST /exercise_templates")
+        if resp.status_code >= 400:
+            log.warning(
+                "hevy.client.write_error",
+                method="POST", path="/exercise_templates",
+                status=resp.status_code, body=resp.text[:500],
+            )
+            raise HevyAPIError(
+                f"POST /exercise_templates returned {resp.status_code}: {resp.text[:300]}"
+            )
+        body_text = resp.text.strip()
+        try:
+            data = resp.json()
+            tpl = data.get("exercise_template") or data.get("exercise") or data
+            if isinstance(tpl, dict) and tpl.get("id"):
+                return tpl
+        except Exception:  # noqa: BLE001
+            pass
+        # Bare-UUID branch — synthesize a template dict from what we sent.
+        new_id = body_text.strip().strip('"')
+        if not new_id or len(new_id) < 8:
+            raise HevyAPIError(
+                f"POST /exercise_templates returned an unexpected body: {body_text[:200]!r}"
+            )
+        return {
+            "id": new_id,
+            "title": exercise.get("title"),
+            "exercise_type": exercise.get("exercise_type"),
+            "equipment_category": exercise.get("equipment_category"),
+            "primary_muscle_group": exercise.get("muscle_group"),
+            "secondary_muscle_groups": exercise.get("other_muscles") or [],
+            "is_custom": True,
+        }

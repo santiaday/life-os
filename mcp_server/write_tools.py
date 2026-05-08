@@ -37,14 +37,15 @@ def refresh_data(source: str = "all") -> dict:
     `source` ∈ {all, whoop, calendar, cronometer, copilot, mart}. Default 'all'
     re-runs every ingester and the mart. Use this at session start to ensure
     you're not analyzing stale data."""
-    valid = {"all", "whoop", "whoop_journal", "whoop_labs", "hevy", "calendar",
-             "cronometer", "copilot", "mart"}
+    valid = {"all", "whoop", "whoop_journal", "whoop_labs", "hevy", "pushpress",
+             "coach", "calendar", "cronometer", "copilot", "mart"}
     if source not in valid:
         return _err("refresh_data", ValueError(f"source must be one of {sorted(valid)}"))
 
     out: dict[str, Any] = {}
     targets = (
-        ("whoop", "whoop_journal", "whoop_labs", "hevy", "calendar", "cronometer", "copilot")
+        ("whoop", "whoop_journal", "whoop_labs", "hevy", "pushpress", "coach",
+         "calendar", "cronometer", "copilot")
         if source == "all" else (source,)
     )
 
@@ -67,6 +68,12 @@ def refresh_data(source: str = "all") -> dict:
                 elif name == "hevy":
                     from ingest_hevy import ingest as hevy_ingest
                     out[name] = hevy_ingest.run_all()
+                elif name == "pushpress":
+                    from ingest_pushpress import ingest as pushpress_ingest
+                    out[name] = pushpress_ingest.run_all()
+                elif name == "coach":
+                    from coach import orchestrator as coach_orch
+                    out[name] = coach_orch.run_all()
                 elif name == "calendar":
                     from ingest_calendar import ingest as calendar_ingest
                     out[name] = calendar_ingest.run_all()

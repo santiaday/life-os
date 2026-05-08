@@ -578,6 +578,11 @@ def _send_routine(
         return _err(tool, e)
 
     routine_resp = resp.get("routine") if isinstance(resp, dict) else None
+    # Hevy's POST /v1/routines wraps the result as {"routine": [{...}]} (a
+    # one-element list), while PUT /v1/routines/{id} returns {"routine": {...}}.
+    # Accept both shapes — and also a bare dict at the top level just in case.
+    if isinstance(routine_resp, list) and routine_resp:
+        routine_resp = routine_resp[0]
     if not isinstance(routine_resp, dict):
         routine_resp = resp if isinstance(resp, dict) and resp.get("id") else None
     if not routine_resp or "id" not in routine_resp:
@@ -649,7 +654,10 @@ def _build_routine_payload(
                         f"exercises[{i}].sets[{j}].rep_range needs start <= end"
                     )
                 rep_range = {"start": int(rs), "end": int(re)}
-            out_sets.append({
+            # Hevy's PUT validator rejects explicit nulls on optional fields
+            # (rep_range, custom_metric, etc.) even though POST allows them.
+            # Drop any None-valued keys so both verbs work.
+            set_dict = {
                 "type": stype,
                 "weight_kg": s.get("weight_kg"),
                 "reps": s.get("reps"),
@@ -657,7 +665,8 @@ def _build_routine_payload(
                 "duration_seconds": s.get("duration_seconds"),
                 "custom_metric": s.get("custom_metric"),
                 "rep_range": rep_range,
-            })
+            }
+            out_sets.append({k: v for k, v in set_dict.items() if v is not None})
 
         rest = ex.get("rest_seconds")
         if rest is not None and (not isinstance(rest, int) or rest < 0):

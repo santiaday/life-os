@@ -174,6 +174,48 @@ def build() -> BlockingScheduler:
         coalesce=True,
     )
 
+    # ---- PushPress (programmed gym workouts) ------------------------------
+    # Gym typically publishes the next week's programming by 4 PM ET the
+    # prior week, so 4 AM the next day gives a comfortable buffer. Window is
+    # ±7 days around today — past for late coach edits, future for new
+    # programming as soon as it lands.
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(hour=4, minute=0),
+        args=["ingest_pushpress", "ingest"],
+        kwargs={"chain_mart": False},
+        id="pushpress_daily",
+        name="PushPress daily ±7-day programmed-workout sync",
+        max_instances=1,
+        coalesce=True,
+    )
+    # Coach: parse → normalize → recommend loads → push Hevy routines.
+    # Runs 5 min after the PushPress sync so today's programming is fresh.
+    # No mart-refresh chain — coach writes don't affect mart_daily.
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(hour=4, minute=5),
+        args=["coach", "run"],
+        kwargs={"chain_mart": False},
+        id="coach_daily",
+        name="Coach: parse PushPress + recommend loads + sync Hevy routines",
+        max_instances=1,
+        coalesce=True,
+    )
+    # Hourly load recompute — picks up new actuals (PR set last night, RPE
+    # change in the latest Hevy session) and updates open future routines
+    # so the prescribed weight matches the user's latest training state.
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(minute=35),
+        args=["coach", "recompute", "--future", "14"],
+        kwargs={"chain_mart": False},
+        id="coach_recompute_hourly",
+        name="Coach: hourly load recompute (post-Hevy-ingest fresh PRs)",
+        max_instances=1,
+        coalesce=True,
+    )
+
     # ---- Copilot (Phase 7) ------------------------------------------------
     sched.add_job(
         run_subprocess,

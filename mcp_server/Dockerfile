@@ -24,6 +24,7 @@ RUN pip install --upgrade pip \
       'scipy>=1.14' \
       'numpy>=2.1' \
       'apscheduler>=3.10' \
+      'anthropic>=0.39' \
       'google-api-python-client>=2.140' \
       'google-auth-oauthlib>=1.2' \
       'google-auth>=2.34' \
@@ -43,6 +44,8 @@ COPY ingest_copilot ./ingest_copilot
 COPY ingest_whoop_journal ./ingest_whoop_journal
 COPY ingest_whoop_labs ./ingest_whoop_labs
 COPY ingest_hevy ./ingest_hevy
+COPY ingest_pushpress ./ingest_pushpress
+COPY coach ./coach
 COPY mart_refresh ./mart_refresh
 
 EXPOSE 8080

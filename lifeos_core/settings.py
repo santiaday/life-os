@@ -96,6 +96,38 @@ class Settings(BaseSettings):
     # env rather than oauth_tokens.
     HEVY_API_KEY: str | None = None
 
+    # ---- PushPress ---------------------------------------------------------
+    # Optional credentials used as a fallback when the cached refresh token
+    # in oauth_tokens(service='pushpress') has expired (60-day lifetime). When
+    # set, the ingester re-logs-in automatically; otherwise the operator has
+    # to run `python -m ingest_pushpress login` once every ~60 days.
+    PUSHPRESS_USERNAME: str | None = None
+    PUSHPRESS_PASSWORD: str | None = None
+
+    # ---- Coach (WOD parser + load recommender) ----------------------------
+    # The coach service uses Anthropic API directly (Sonnet 4.5 for parsing
+    # plaintext WOD descriptions, Haiku for movement-name fuzzy matching).
+    # Cron-driven; runs after every PushPress sync.
+    ANTHROPIC_API_KEY: str | None = None
+    # Parser sees the raw WOD plaintext + 8 few-shot examples and emits a
+    # structured workout plan. Opus 4.7 for the highest-stakes reasoning —
+    # this is where superset detection, complex grouping, novel-vs-catalog
+    # decisions, and the per-movement custom-template metadata get inferred.
+    COACH_PARSER_MODEL: str = "claude-opus-4-7"
+    # Normalizer is a cheap movement-name → catalog-id matcher. Haiku is fine.
+    COACH_NORMALIZER_MODEL: str = "claude-haiku-4-5-20251001"
+    # Recovery threshold below which the recommender de-loads. Keep
+    # configurable so we can tune it once we have a few weeks of routine
+    # adherence data.
+    COACH_RECOVERY_DELOAD_THRESHOLD: int = 50
+    COACH_RECOVERY_DELOAD_MULTIPLIER: float = 0.92
+    # Bar-loading granularity. 2.5 kg matches PushPress's barbell math; a
+    # bumper-plate-only gym would set 5.0.
+    COACH_LOAD_ROUNDING_KG: float = 2.5
+    # Hevy routine folder where coach-generated routines land. NULL = top
+    # level. Get the folder_id from list_routine_folders.
+    COACH_HEVY_FOLDER_ID: int | None = None
+
     # ---- Copilot -----------------------------------------------------------
     COPILOT_EMAIL: str | None = None
     COPILOT_PASSWORD: str | None = None

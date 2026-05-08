@@ -199,6 +199,55 @@ SCHEMA_DOCS: dict = {
                 "deleted": "Tombstone flag. Hevy /workouts/events 'deleted' marks the row, but the corresponding fact_* rows are hard-deleted on the same pass so reads stay clean.",
             },
         },
+        "fact_pushpress_session": {
+            "purpose": (
+                "One row per programmed gym session from PushPress (the gym's "
+                "workout-of-the-day across class types: CrossFit & HIIT, "
+                "Barbell / Weightlifting Club, HYROX). Programmed = what the "
+                "coach published, NOT what the user did — for the actually-"
+                "performed view see fact_strength_workout (Hevy) and "
+                "fact_workout (Whoop). Pulled by ingest_pushpress in a ±7-day "
+                "window around today, daily at 4 AM ET. Always prefer the "
+                "get_pushpress_* tools over raw SQL — they nest the parts[] "
+                "array for free."
+            ),
+            "grain": "1 row per programmed (workout_uid).",
+            "columns": {
+                "workout_uid": "UUID natural key (PushPress's stable id).",
+                "class_type_uuid": "FK to dim_pushpress_class_type. The programming track.",
+                "class_type_name": "Denorm of dim_pushpress_class_type.name for fast list views.",
+                "class_date": "Calendar date the workout is programmed for.",
+                "workout_state": "PUBLISHED | DRAFT | SCHEDULED. Filter to PUBLISHED for 'what's actually on'.",
+                "parts_count": "Number of fact_pushpress_part rows for this workout.",
+                "divisions": "TEXT[] — union of part-level divisions (e.g. {Performance, Fitness}).",
+                "whoop_workout_id": "Soft link to fact_workout on the same day. NULL if no Whoop session.",
+            },
+            "gotchas": [
+                "Descriptions on fact_pushpress_part are FREEFORM PLAINTEXT (e.g. 'AMRAP 16: 50 Box Step-ups @ 20\"'). To get structured movement counts you need an LLM-parsed version — fact_pushpress_movement is reserved but not built yet.",
+                "An empty raw_pushpress_workout_of_day row with is_empty=TRUE means we asked and got nothing back (rest day or unprogrammed) — distinct from 'we never fetched this date'.",
+            ],
+        },
+        "fact_pushpress_part": {
+            "purpose": (
+                "Exploded parts of a PushPress programmed session. Each row "
+                "is one section of the workout — POSTERIOR / WORKOUT OF THE "
+                "DAY / A) Snatch / etc. — with the prescribed lift, score "
+                "type, and the freeform plaintext description that names the "
+                "movements and rep schemes."
+            ),
+            "grain": "1 row per (workout_uid, ordinal).",
+            "columns": {
+                "ordinal": "0-indexed position within the workout (coach-authored order preserved).",
+                "title": "Section header (e.g. 'POSTERIOR', 'WORKOUT OF THE DAY').",
+                "workout_title": "Prescribed lift / WOD name (e.g. 'Deadlifts', 'Get on your hands').",
+                "description": "Freeform plaintext movements + rep schemes. The thing an LLM parser would consume.",
+                "score_type": "Weight | Rounds/Reps | Time | (and others). Drives how the score field is interpreted.",
+                "set_count": "Number of sets prescribed (API field 'sets').",
+                "default_reps": "Default reps per set, when applicable.",
+                "divisions": "TEXT[] — Performance / Fitness / RX divisions this part applies to.",
+                "unit": "IMPERIAL | METRIC | NULL.",
+            },
+        },
         "raw_hevy_routine": {
             "purpose": (
                 "Hevy routine templates (the user's saved programs — 'Push "

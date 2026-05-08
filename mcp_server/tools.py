@@ -105,6 +105,13 @@ def _coerce(v: Any) -> Any:
             return float(v)
     except ImportError:
         pass
+    # JSON-native containers (e.g. jsonb_agg results) — recurse so nested
+    # datetimes / Decimals get coerced too. Avoids stringifying entire payloads
+    # when a tool returns a structured field.
+    if isinstance(v, list):
+        return [_coerce(x) for x in v]
+    if isinstance(v, dict):
+        return {str(k): _coerce(val) for k, val in v.items()}
     return str(v)
 
 
@@ -1536,6 +1543,797 @@ def ask_sql(
     return _err("ask_sql", last_err or RuntimeError("ask_sql: unknown failure"))
 
 
+# ---- PushPress (programmed gym workouts) -----------------------------------
+# Reads from the local mirror populated by ingest_pushpress. The API itself
+# is private and rate-sensitive, so MCP tools never round-trip — they just
+# select from fact_pushpress_*. Run refresh_data('pushpress') if today's
+# programming was just published and you don't see it yet.
+
+PUSHPRESS_LIST_LIMIT = 200
+
+
+def _pushpress_class_type_filter(class_type: str | None) -> tuple[str, list]:
+    """Build a SQL clause for the class_type arg. Accepts a UUID, a partial
+    name match (ILIKE — 'crossfit' matches 'CrossFit & HIIT'), or None."""
+    if not class_type:
+        return "", []
+    if "-" in class_type and len(class_type) >= 32:
+        return "AND s.class_type_uuid = %s", [class_type]
+    return "AND s.class_type_name ILIKE %s", [f"%{class_type}%"]
+
+
+def list_pushpress_class_types() -> dict:
+    """Class-type registry: each row is one programming track the gym runs
+    (CrossFit & HIIT, Barbell / Weightlifting Club, HYROX, ...). Pass the
+    `uuid` or any substring of `name` to the other PushPress tools to scope
+    a query to one track."""
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT uuid, name, origin, is_static, progressive, last_day_num,
+                   fetched_at,
+                   (SELECT COUNT(*) FROM fact_pushpress_session s
+                     WHERE s.class_type_uuid = ct.uuid) AS session_count
+              FROM dim_pushpress_class_type ct
+             ORDER BY name
+            """
+        )
+        rows = _serialize(cur.fetchall())
+    warnings: list[str] = []
+    if not rows:
+        warnings.append(
+            "No PushPress class types yet. Bootstrap auth with "
+            "`python -m ingest_pushpress login` then run "
+            "`refresh_data('pushpress')`."
+        )
+    return _ok("list_pushpress_class_types", rows, warnings=warnings)
+
+
+def _fetch_pushpress_sessions(
+    where: list[str],
+    params: list,
+    *,
+    limit: int = PUSHPRESS_LIST_LIMIT,
+) -> list[dict]:
+    """Shared SELECT for the get_pushpress_* tools. Returns rows with the
+    parts list nested as JSON so a single round-trip gives Claude the full
+    programming for each session."""
+    q = f"""
+        SELECT s.workout_uid, s.class_date, s.class_type_uuid, s.class_type_name,
+               s.title, s.workout_state, s.origin, s.parts_count, s.divisions,
+               s.published_on, s.publishing_date, s.updated_date,
+               s.whoop_workout_id, s.fetched_at,
+               COALESCE(
+                 (SELECT jsonb_agg(
+                    jsonb_build_object(
+                      'ordinal', p.ordinal,
+                      'part_uid', p.part_uid,
+                      'title', p.title,
+                      'workout_title', p.workout_title,
+                      'description', p.description,
+                      'score_type', p.score_type,
+                      'score_count', p.score_count,
+                      'set_count', p.set_count,
+                      'default_reps', p.default_reps,
+                      'divisions', p.divisions,
+                      'unit', p.unit,
+                      'athletes_notes', p.athletes_notes,
+                      'coaches_notes', p.coaches_notes
+                    )
+                    ORDER BY p.ordinal
+                  )
+                  FROM fact_pushpress_part p
+                  WHERE p.workout_uid = s.workout_uid),
+                 '[]'::jsonb
+               ) AS parts
+          FROM fact_pushpress_session s
+         WHERE {" AND ".join(where) if where else "TRUE"}
+         ORDER BY s.class_date, s.class_type_name
+         LIMIT {int(limit)}
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, params)
+        return _serialize(cur.fetchall())
+
+
+def get_pushpress_upcoming(
+    days_ahead: int = 7,
+    class_type: str | None = None,
+) -> dict:
+    """Programmed sessions from today through `days_ahead` days forward.
+    Optional class_type filter accepts a UUID or any substring of the class
+    name (case-insensitive). One row per programmed session, each with a
+    nested `parts` array (POSTERIOR / WORKOUT OF THE DAY / etc., each with
+    its prescribed lift, score type, and freeform description)."""
+    if days_ahead < 0:
+        return _err("get_pushpress_upcoming",
+                    ValueError("days_ahead must be >= 0"))
+    today = date.today()
+    end = date.fromordinal(today.toordinal() + days_ahead)
+    where = ["s.class_date BETWEEN %s AND %s"]
+    params: list = [today, end]
+    extra_clause, extra_params = _pushpress_class_type_filter(class_type)
+    if extra_clause:
+        where.append(extra_clause.removeprefix("AND ").strip())
+        params.extend(extra_params)
+    rows = _fetch_pushpress_sessions(where, params)
+    warnings: list[str] = []
+    if not rows:
+        warnings.append(
+            "No upcoming PushPress sessions in window. The gym usually "
+            "publishes the next week's programming by 4 PM ET the prior "
+            "week — try refresh_data('pushpress') if you expect there to "
+            "be programming."
+        )
+    return _ok(
+        "get_pushpress_upcoming",
+        rows,
+        warnings=warnings,
+        extra={
+            "window_start": today.isoformat(),
+            "window_end": end.isoformat(),
+            "class_type": class_type,
+        },
+    )
+
+
+def get_pushpress_session(
+    class_date: date,
+    class_type: str,
+) -> dict:
+    """One programmed session for the given (class_date, class_type). Returns
+    parts[] inline. class_type accepts UUID or substring of class name —
+    if the substring matches multiple tracks, returns all matches and
+    surfaces the ambiguity in `warnings`."""
+    where = ["s.class_date = %s"]
+    params: list = [class_date]
+    extra_clause, extra_params = _pushpress_class_type_filter(class_type)
+    if extra_clause:
+        where.append(extra_clause.removeprefix("AND ").strip())
+        params.extend(extra_params)
+    rows = _fetch_pushpress_sessions(where, params, limit=10)
+
+    warnings: list[str] = []
+    if not rows:
+        warnings.append(
+            f"No programmed session for {class_date} matching '{class_type}'. "
+            "Either the date is a rest day, or programming hasn't been "
+            "published yet — try refresh_data('pushpress')."
+        )
+    elif len(rows) > 1:
+        warnings.append(
+            f"'{class_type}' matched {len(rows)} class types on {class_date}. "
+            "Pass a more specific name or the UUID to disambiguate."
+        )
+    return _ok("get_pushpress_session", rows, warnings=warnings)
+
+
+def get_pushpress_history(
+    start_date: date,
+    end_date: date,
+    class_type: str | None = None,
+) -> dict:
+    """Range query over programmed sessions. Same shape as
+    get_pushpress_upcoming but with explicit start/end dates so you can pull
+    historical programming alongside fact_strength_workout / fact_workout to
+    see what was programmed vs what you actually did."""
+    if end_date < start_date:
+        return _err("get_pushpress_history",
+                    ValueError("end_date must be >= start_date"))
+    where = ["s.class_date BETWEEN %s AND %s"]
+    params: list = [start_date, end_date]
+    extra_clause, extra_params = _pushpress_class_type_filter(class_type)
+    if extra_clause:
+        where.append(extra_clause.removeprefix("AND ").strip())
+        params.extend(extra_params)
+    rows = _fetch_pushpress_sessions(where, params)
+    return _ok(
+        "get_pushpress_history",
+        rows,
+        extra={
+            "window_start": start_date.isoformat(),
+            "window_end": end_date.isoformat(),
+            "class_type": class_type,
+        },
+    )
+
+
+# ---- Coach (parsed plan + load recommendations + review queue) ------------
+# These read from pushpress_part_movement (populated by the coach pipeline)
+# and surface the structured plan + reasoning to Claude. Never call the
+# Anthropic API at MCP-tool time — that's for the cron path. If a workout
+# hasn't been parsed yet, the tool returns the unparsed parts so Claude
+# can still describe what was programmed.
+
+def get_coach_plan(
+    class_date: date | None = None,
+    class_type: str | None = None,
+) -> dict:
+    """Today's recommended training plan: programmed movements with the
+    coach's recommended load + the reasoning behind each suggestion.
+
+    Defaults to today. Returns one row per programmed movement with the
+    matched exercise (or analog), recommended kg, prescribed reps/sets,
+    and a human-readable reasoning string. If a session hasn't been parsed
+    yet, the row count is 0 and the warnings list says so."""
+    target_date = class_date or date.today()
+    where = ["m.class_date = %s"]
+    params: list = [target_date]
+    if class_type:
+        if "-" in class_type and len(class_type) >= 32:
+            where.append("s.class_type_uuid = %s")
+        else:
+            where.append("s.class_type_name ILIKE %s")
+            class_type = f"%{class_type}%"
+        params.append(class_type)
+
+    q = f"""
+        SELECT m.id, m.workout_uid, m.class_date, m.sequence,
+               s.class_type_name, s.title AS session_title,
+               s.workout_format, s.workout_rounds, s.workout_duration_s,
+               s.parsed_at, s.hevy_routine_id, s.parser_confidence,
+               m.raw_text, m.exercise_template_id,
+               m.novel_exercise, m.analog_exercise_template_id,
+               m.prescribed_reps, m.prescribed_sets, m.prescribed_load_kg,
+               m.prescribed_load_pct, m.recommended_load_kg,
+               m.recommendation_reasoning, m.recommendation_confidence,
+               resolved.title AS exercise_title,
+               analog.title AS analog_title
+          FROM pushpress_part_movement m
+          JOIN fact_pushpress_session s ON s.workout_uid = m.workout_uid
+          LEFT JOIN dim_hevy_exercise resolved
+            ON resolved.exercise_template_id = m.exercise_template_id
+          LEFT JOIN dim_hevy_exercise analog
+            ON analog.exercise_template_id = m.analog_exercise_template_id
+         WHERE {" AND ".join(where)}
+         ORDER BY s.class_type_name, m.sequence
+         LIMIT 200
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, params)
+        rows = _serialize(cur.fetchall())
+
+    warnings: list[str] = []
+    if not rows:
+        # Check if the session exists but isn't parsed yet.
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COUNT(*) AS n,
+                       COUNT(*) FILTER (WHERE parsed_at IS NULL) AS unparsed
+                  FROM fact_pushpress_session
+                 WHERE class_date = %s
+                """,
+                [target_date],
+            )
+            stats = cur.fetchone()
+        if stats and stats["n"] > 0 and stats["unparsed"] > 0:
+            warnings.append(
+                f"{stats['unparsed']} session(s) on {target_date} not parsed yet. "
+                "Run refresh_data('coach') or wait for the next cron tick."
+            )
+        elif stats and stats["n"] == 0:
+            warnings.append(
+                f"No PushPress session for {target_date}. "
+                "Run refresh_data('pushpress') to fetch programming."
+            )
+    return _ok(
+        "get_coach_plan",
+        rows,
+        warnings=warnings,
+        extra={"class_date": target_date.isoformat(), "class_type": class_type},
+    )
+
+
+def list_coach_review_queue(limit: int = 50) -> dict:
+    """Movements the parser/normalizer flagged as novel — not a confident
+    match against the Hevy exercise catalog. The recommender used the
+    suggested analog, but a human (or Claude) should confirm or override.
+
+    Each row has the raw_text the coach wrote, the analog we picked, and
+    the workout context. Resolve via update_coach_review (TODO) or just
+    accept the analog by leaving resolved_at NULL — routines still go to
+    Hevy with the analog load either way."""
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT r.id, r.movement_id, r.raw_text,
+                   r.suggested_template_id, r.suggested_title,
+                   r.created_at, r.resolved_at, r.resolved_template_id,
+                   m.class_date, m.workout_uid, s.class_type_name,
+                   s.title AS session_title
+              FROM pushpress_movement_review r
+              JOIN pushpress_part_movement m ON m.id = r.movement_id
+              JOIN fact_pushpress_session s ON s.workout_uid = m.workout_uid
+             WHERE r.resolved_at IS NULL
+             ORDER BY m.class_date DESC, r.created_at DESC
+             LIMIT %s
+            """,
+            [limit],
+        )
+        rows = _serialize(cur.fetchall())
+    return _ok("list_coach_review_queue", rows)
+
+
+def get_rep_maxes(
+    exercise_search: str,
+    include_estimated: bool = True,
+) -> dict:
+    """Every direct rep-max the user has hit for one exercise — the actual
+    1RM, 3RM, 5RM, 8RM, 10RM, 12RM, 15RM weights they've logged in Hevy.
+    Plus (with include_estimated=true) the Epley-projected 1RM from each
+    rep count, so you can see which set is the user's strongest data point
+    overall.
+
+    Use this to ground load-recommendation conversations: 'you've hit
+    102.5 kg for 5 in May → estimated 1RM 119 kg → today's 5×5 should be
+    around X'. Resolves the exercise via dim_hevy_exercise.title (ILIKE).
+    Picks the most-frequent template if multiple match."""
+    if not exercise_search or not exercise_search.strip():
+        return _err("get_rep_maxes", ValueError("exercise_search is required"))
+
+    # Tier 1: direct ILIKE on the full search string. Catches the obvious
+    # cases ('Bench Press (Barbell)').
+    candidates: list[dict]
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT dhe.exercise_template_id, dhe.title,
+                   COALESCE((
+                     SELECT COUNT(*) FROM fact_strength_set fss
+                      WHERE fss.exercise_template_id = dhe.exercise_template_id
+                   ), 0) AS n_sets
+              FROM dim_hevy_exercise dhe
+             WHERE dhe.title ILIKE %s
+             ORDER BY n_sets DESC, length(dhe.title), dhe.title
+             LIMIT 5
+            """,
+            [f"%{exercise_search}%"],
+        )
+        candidates = _serialize(cur.fetchall())
+
+    # Tier 2: route through the coach normalizer so 'back squat' lands on
+    # Squat (Barbell) etc. Pure SQL path inside the normalizer (alias cache
+    # + stemmed ILIKE) — won't make an LLM call unless we explicitly let it.
+    if not candidates:
+        from coach.normalizer import resolve as _resolve
+        m = _resolve(exercise_search, write_alias=False)
+        tid = m.exercise_template_id or m.analog_template_id
+        if tid:
+            with conn() as c, c.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT exercise_template_id, title,
+                           (SELECT COUNT(*) FROM fact_strength_set fss
+                             WHERE fss.exercise_template_id = %s) AS n_sets
+                      FROM dim_hevy_exercise
+                     WHERE exercise_template_id = %s
+                    """,
+                    [tid, tid],
+                )
+                row = cur.fetchone()
+                if row:
+                    candidates = _serialize([row])
+
+    if not candidates:
+        return _err("get_rep_maxes", ValueError(
+            f"No exercise matched '{exercise_search}'. "
+            "Use find_exercise_templates to discover the exact catalog title."
+        ))
+
+    chosen = candidates[0]
+    template_id = chosen["exercise_template_id"]
+    other = [c["title"] for c in candidates[1:]]
+
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT rep_count,
+                   max_weight_kg,
+                   last_hit_day,
+                   sample_count
+              FROM vw_exercise_rep_max
+             WHERE exercise_template_id = %s
+             ORDER BY rep_count
+            """,
+            [template_id],
+        )
+        rep_maxes = _serialize(cur.fetchall())
+
+    rows: list[dict] = []
+    best_estimated_1rm: float | None = None
+    best_estimated_anchor: dict | None = None
+    for r in rep_maxes:
+        reps = int(r["rep_count"])
+        w = float(r["max_weight_kg"])
+        out: dict = {
+            "rep_count": reps,
+            "max_weight_kg": round(w, 2),
+            "last_hit_day": r["last_hit_day"],
+            "sample_count": r["sample_count"],
+        }
+        if include_estimated:
+            est = w * (1.0 + reps / 30.0)
+            out["estimated_1rm_kg"] = round(est, 2)
+            if best_estimated_1rm is None or est > best_estimated_1rm:
+                best_estimated_1rm = est
+                best_estimated_anchor = out
+        rows.append(out)
+
+    extra: dict = {
+        "exercise_template_id": template_id,
+        "exercise_title": chosen["title"],
+        "other_matches": other,
+        "rep_max_count": len(rows),
+    }
+    if best_estimated_1rm is not None and rows:
+        extra["best_estimated_1rm_kg"] = round(best_estimated_1rm, 2)
+        extra["best_estimated_1rm_anchor"] = (
+            f"{best_estimated_anchor['max_weight_kg']:g} kg × "
+            f"{best_estimated_anchor['rep_count']} reps "
+            f"on {best_estimated_anchor['last_hit_day']}"
+        )
+
+    warnings: list[str] = []
+    if not rows:
+        warnings.append(
+            f"No working sets logged for {chosen['title']!r}. Once you log "
+            "any normal-set in Hevy, future calls will populate the rep-max "
+            "table automatically."
+        )
+
+    return _ok("get_rep_maxes", rows, warnings=warnings, extra=extra)
+
+
+def record_workout_score(
+    score: str,
+    class_date: date | None = None,
+    class_type: str | None = None,
+    division: str | None = None,
+    rx: bool | None = None,
+    notes: str | None = None,
+) -> dict:
+    """Record the score for a metcon — the workout-level result that Hevy
+    can't represent natively. Pass `score` as a human string and we infer
+    the type:
+      '8:42'        → score_type=time, 522 seconds
+      '5+12'        → score_type=rounds_reps (5 rounds + 12 extra reps)
+      '250 reps'    → score_type=total_reps, 250
+      '120 kg'      → score_type=total_weight, 120
+      '1500 m'      → score_type=distance, 1500
+
+    Defaults: class_date=today, class_type matches the only parsed session
+    on that date if there's exactly one. division is freeform; common
+    values 'Performance', 'Fitness', 'RX'."""
+    target_date = class_date or date.today()
+
+    # Resolve the workout_uid.
+    where = ["s.class_date = %s", "s.parsed_at IS NOT NULL"]
+    params: list = [target_date]
+    if class_type:
+        if "-" in class_type and len(class_type) >= 32:
+            where.append("s.class_type_uuid = %s")
+        else:
+            where.append("s.class_type_name ILIKE %s")
+            class_type = f"%{class_type}%"
+        params.append(class_type)
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            f"SELECT s.workout_uid, s.class_type_name FROM fact_pushpress_session s "
+            f"WHERE {' AND '.join(where)} ORDER BY s.class_type_name LIMIT 5",
+            params,
+        )
+        sessions = cur.fetchall()
+    if not sessions:
+        return _err("record_workout_score", ValueError(
+            f"No parsed PushPress session for {target_date}"
+            + (f" matching {class_type!r}" if class_type else "")
+        ))
+    if len(sessions) > 1:
+        names = ", ".join(s["class_type_name"] for s in sessions)
+        return _err("record_workout_score", ValueError(
+            f"Ambiguous: {len(sessions)} sessions match. "
+            f"Pass class_type to disambiguate. Found: {names}"
+        ))
+    workout_uid = sessions[0]["workout_uid"]
+
+    # Parse the score.
+    s = score.strip().lower()
+    score_type: str
+    score_seconds: int | None = None
+    score_int: int | None = None
+    score_kg: float | None = None
+    score_text: str | None = None
+
+    import re
+    if re.fullmatch(r"\d+:\d{1,2}", s):  # time format
+        m, sec = s.split(":")
+        score_seconds = int(m) * 60 + int(sec)
+        score_type = "time"
+    elif re.fullmatch(r"\d+\+\d+", s):  # rounds+reps
+        score_text = s
+        score_type = "rounds_reps"
+    elif m := re.fullmatch(r"(\d+(?:\.\d+)?)\s*kg", s):
+        score_kg = float(m.group(1))
+        score_type = "total_weight"
+    elif m := re.fullmatch(r"(\d+(?:\.\d+)?)\s*lb", s):
+        score_kg = round(float(m.group(1)) * 0.4536, 2)
+        score_type = "total_weight"
+    elif m := re.fullmatch(r"(\d+)\s*m", s):
+        score_int = int(m.group(1))
+        score_type = "distance"
+    elif m := re.fullmatch(r"(\d+)\s*reps?", s):
+        score_int = int(m.group(1))
+        score_type = "total_reps"
+    elif s.isdigit():
+        # Bare integer — assume reps for metcons.
+        score_int = int(s)
+        score_type = "total_reps"
+    else:
+        return _err("record_workout_score", ValueError(
+            f"Couldn't parse score {score!r}. "
+            "Use 'M:SS' for time, 'X+Y' for rounds+reps, '<n> reps', "
+            "'<kg> kg' / '<lb> lb', or '<m> m'."
+        ))
+
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO pushpress_workout_score
+              (workout_uid, class_date, division, score_type,
+               score_value_seconds, score_value_int, score_value_kg,
+               score_value_text, rx, notes, source, recorded_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'manual', now())
+            ON CONFLICT (workout_uid, division) DO UPDATE SET
+              score_type = EXCLUDED.score_type,
+              score_value_seconds = EXCLUDED.score_value_seconds,
+              score_value_int = EXCLUDED.score_value_int,
+              score_value_kg = EXCLUDED.score_value_kg,
+              score_value_text = EXCLUDED.score_value_text,
+              rx = EXCLUDED.rx,
+              notes = EXCLUDED.notes,
+              recorded_at = now()
+            RETURNING id
+            """,
+            [workout_uid, target_date, division, score_type,
+             score_seconds, score_int, score_kg, score_text, rx, notes],
+        )
+        score_id = cur.fetchone()["id"]
+        c.commit()
+
+    return _ok(
+        "record_workout_score",
+        [{
+            "score_id": score_id,
+            "workout_uid": workout_uid,
+            "class_date": target_date.isoformat(),
+            "class_type": sessions[0]["class_type_name"],
+            "division": division,
+            "score_type": score_type,
+            "score": score,
+            "rx": rx,
+        }],
+    )
+
+
+def get_workout_scores(
+    start_date: date,
+    end_date: date,
+    class_type: str | None = None,
+) -> dict:
+    """Recorded scores in [start_date, end_date]. Pair with
+    get_strength_workouts for programmed-vs-performed analysis."""
+    where = ["sc.class_date BETWEEN %s AND %s"]
+    params: list = [start_date, end_date]
+    if class_type:
+        where.append("s.class_type_name ILIKE %s")
+        params.append(f"%{class_type}%")
+    q = f"""
+        SELECT sc.id, sc.class_date, s.class_type_name, sc.division,
+               sc.score_type, sc.score_value_seconds, sc.score_value_int,
+               sc.score_value_kg, sc.score_value_text, sc.rx, sc.notes,
+               sc.recorded_at,
+               s.workout_format, s.title AS session_title
+          FROM pushpress_workout_score sc
+          JOIN fact_pushpress_session s ON s.workout_uid = sc.workout_uid
+         WHERE {" AND ".join(where)}
+         ORDER BY sc.class_date DESC
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, params)
+        return _ok("get_workout_scores", _serialize(cur.fetchall()))
+
+
+def override_coach_movement(
+    movement_id: int,
+    exercise_template_id: str,
+    learn_alias: bool = True,
+) -> dict:
+    """Manually override the exercise mapping for one parsed movement.
+    Use when the parser/normalizer picked the wrong Hevy template — common
+    for CrossFit-specific movements where Hevy's catalog is incomplete.
+
+    Updates pushpress_part_movement to point at the new template, clears
+    the novel/analog flags, re-runs the load recommender so the
+    recommendation reflects YOUR history at the right exercise, and (by
+    default) writes an alias so future parses of the same raw_text land
+    correctly.
+
+    To find movement_ids, call get_coach_plan() — each row has an `id`."""
+    from coach.normalizer import normalize_pattern
+    from coach.recommend import recommend as _recommend
+
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, raw_text, class_date,
+                   prescribed_reps, prescribed_load_kg, prescribed_load_pct
+              FROM pushpress_part_movement
+             WHERE id = %s
+            """,
+            [movement_id],
+        )
+        m = cur.fetchone()
+        if m is None:
+            return _err("override_coach_movement",
+                        ValueError(f"movement_id {movement_id} not found"))
+
+        cur.execute(
+            "SELECT title FROM dim_hevy_exercise WHERE exercise_template_id = %s",
+            [exercise_template_id],
+        )
+        tpl = cur.fetchone()
+        if tpl is None:
+            return _err("override_coach_movement", ValueError(
+                f"exercise_template_id {exercise_template_id!r} not in catalog. "
+                "Use find_exercise_templates to discover valid ids."
+            ))
+
+        # Re-run the recommender with the corrected template_id.
+        rec = _recommend(
+            template_id=exercise_template_id,
+            analog_template_id=None,
+            prescribed_load_kg=(
+                float(m["prescribed_load_kg"])
+                if m["prescribed_load_kg"] is not None else None
+            ),
+            prescribed_load_pct=(
+                float(m["prescribed_load_pct"])
+                if m["prescribed_load_pct"] is not None else None
+            ),
+            prescribed_reps=m["prescribed_reps"],
+            class_date=m["class_date"],
+        )
+        cur.execute(
+            """
+            UPDATE pushpress_part_movement
+               SET exercise_template_id = %s,
+                   novel_exercise = FALSE,
+                   analog_exercise_template_id = NULL,
+                   recommended_load_kg = %s,
+                   recommendation_reasoning = %s,
+                   recommendation_confidence = %s,
+                   computed_at = now()
+             WHERE id = %s
+            """,
+            [exercise_template_id, rec.recommended_load_kg, rec.reasoning,
+             rec.confidence, movement_id],
+        )
+
+        # Auto-resolve any open review row for this movement.
+        cur.execute(
+            """
+            UPDATE pushpress_movement_review
+               SET resolved_template_id = %s, resolved_at = now()
+             WHERE movement_id = %s AND resolved_at IS NULL
+            """,
+            [exercise_template_id, movement_id],
+        )
+
+        # Auto-learn the alias so future parses of the same raw_text
+        # bypass the LLM tier and land directly on this template.
+        if learn_alias:
+            pattern = normalize_pattern(m["raw_text"])
+            if pattern:
+                cur.execute(
+                    """
+                    INSERT INTO pushpress_movement_alias
+                      (pattern, exercise_template_id, source, hit_count, last_seen_at)
+                    VALUES (%s, %s, 'manual', 1, now())
+                    ON CONFLICT (pattern) DO UPDATE SET
+                      exercise_template_id = EXCLUDED.exercise_template_id,
+                      source = 'manual',
+                      hit_count = pushpress_movement_alias.hit_count + 1,
+                      last_seen_at = now()
+                    """,
+                    [pattern, exercise_template_id],
+                )
+        c.commit()
+
+    return _ok(
+        "override_coach_movement",
+        [{
+            "movement_id": movement_id,
+            "raw_text": m["raw_text"],
+            "exercise_template_id": exercise_template_id,
+            "exercise_title": tpl["title"],
+            "recommended_load_kg": rec.recommended_load_kg,
+            "recommendation_reasoning": rec.reasoning,
+            "alias_learned": learn_alias,
+        }],
+    )
+
+
+def resolve_coach_review(
+    review_id: int,
+    exercise_template_id: str,
+    notes: str | None = None,
+) -> dict:
+    """Mark a review row resolved with the user-chosen exercise. Also
+    propagates the choice into pushpress_part_movement (so future Hevy
+    syncs use the corrected exercise) and writes an alias so the same
+    raw_text lands directly next time."""
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT movement_id, raw_text FROM pushpress_movement_review WHERE id = %s",
+            [review_id],
+        )
+        row = cur.fetchone()
+        if row is None:
+            return _err("resolve_coach_review", ValueError(
+                f"review_id {review_id} not found"
+            ))
+        movement_id = row["movement_id"]
+        raw_text = row["raw_text"]
+        cur.execute(
+            """
+            UPDATE pushpress_movement_review
+               SET resolved_template_id = %s,
+                   resolved_at = now(),
+                   notes = %s
+             WHERE id = %s
+            """,
+            [exercise_template_id, notes, review_id],
+        )
+        cur.execute(
+            """
+            UPDATE pushpress_part_movement
+               SET exercise_template_id = %s,
+                   novel_exercise = FALSE,
+                   analog_exercise_template_id = NULL,
+                   computed_at = now()
+             WHERE id = %s
+            """,
+            [exercise_template_id, movement_id],
+        )
+        c.commit()
+
+    # Auto-learn the alias so re-encounters short-circuit. Lazy import —
+    # don't pull anthropic into the MCP tool path unless we need it (we
+    # don't here; alias write is pure DB).
+    from coach.normalizer import normalize_pattern
+    pattern = normalize_pattern(raw_text)
+    if pattern:
+        with conn() as c, c.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO pushpress_movement_alias
+                  (pattern, exercise_template_id, source, hit_count, last_seen_at)
+                VALUES (%s, %s, 'manual', 1, now())
+                ON CONFLICT (pattern) DO UPDATE SET
+                  exercise_template_id = EXCLUDED.exercise_template_id,
+                  source = 'manual',
+                  last_seen_at = now()
+                """,
+                [pattern, exercise_template_id],
+            )
+            c.commit()
+    return _ok("resolve_coach_review",
+               [{"review_id": review_id,
+                 "movement_id": movement_id,
+                 "exercise_template_id": exercise_template_id}])
+
+
 # ---- registry ---------------------------------------------------------------
 # Tool name → callable + JSON schema (input). Used by server.py to wire MCP.
 TOOLS: dict[str, dict] = {
@@ -1989,6 +2787,211 @@ TOOLS: dict[str, dict] = {
                 "max_rows": {"type": "integer", "default": ASK_SQL_DEFAULT_LIMIT, "minimum": 1, "maximum": 5000},
                 "timeout_ms": {"type": "integer", "minimum": 500, "maximum": 60000},
                 "explain": {"type": "boolean", "default": False},
+            },
+        },
+    },
+    "list_pushpress_class_types": {
+        "fn": list_pushpress_class_types,
+        "description": (
+            "List the gym's PushPress class types (programming tracks) — "
+            "e.g. 'CrossFit & HIIT', 'Barbell / Weightlifting Club', 'HYROX'. "
+            "Use the returned uuid (or any substring of name) to scope "
+            "get_pushpress_upcoming / get_pushpress_session / "
+            "get_pushpress_history to a specific track."
+        ),
+        "input": {"type": "object", "properties": {}},
+    },
+    "get_pushpress_upcoming": {
+        "fn": get_pushpress_upcoming,
+        "description": (
+            "Programmed gym workouts from today through `days_ahead` days "
+            "forward. Each row is one programmed session with its parts[] "
+            "inline (POSTERIOR, WORKOUT OF THE DAY, etc.) — each part has "
+            "title, prescribed lift, score type, and freeform description. "
+            "Optional class_type accepts a uuid or any substring of the "
+            "class name (case-insensitive)."
+        ),
+        "input": {
+            "type": "object",
+            "properties": {
+                "days_ahead": {"type": "integer", "default": 7, "minimum": 0, "maximum": 30},
+                "class_type": {"type": "string"},
+            },
+        },
+    },
+    "get_pushpress_session": {
+        "fn": get_pushpress_session,
+        "description": (
+            "One programmed session for a specific (class_date, class_type) "
+            "pair. Returns parts[] inline. class_type accepts a uuid or "
+            "substring of the class name — when the substring matches "
+            "multiple tracks, all matches are returned with a warning."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["class_date", "class_type"],
+            "properties": {
+                "class_date": {"type": "string", "format": "date"},
+                "class_type": {"type": "string"},
+            },
+        },
+    },
+    "get_pushpress_history": {
+        "fn": get_pushpress_history,
+        "description": (
+            "Range query over programmed gym sessions in [start_date, "
+            "end_date]. Pair with get_strength_workouts / get_workouts to "
+            "compare what was programmed against what you actually did. "
+            "Optional class_type filter (uuid or substring of name)."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["start_date", "end_date"],
+            "properties": {
+                "start_date": {"type": "string", "format": "date"},
+                "end_date":   {"type": "string", "format": "date"},
+                "class_type": {"type": "string"},
+            },
+        },
+    },
+    "get_coach_plan": {
+        "fn": get_coach_plan,
+        "description": (
+            "Today's recommended training plan: each programmed movement "
+            "with the matched Hevy exercise, recommended load (kg), the "
+            "reasoning behind that suggestion, and prescribed reps/sets "
+            "from the coach. Defaults to today; pass class_date for any "
+            "other day. Optional class_type filter to scope to one track. "
+            "If a session exists but isn't parsed yet, returns a warning "
+            "telling you to run refresh_data('coach')."
+        ),
+        "input": {
+            "type": "object",
+            "properties": {
+                "class_date": {"type": "string", "format": "date"},
+                "class_type": {"type": "string"},
+            },
+        },
+    },
+    "get_rep_maxes": {
+        "fn": get_rep_maxes,
+        "description": (
+            "Every rep-max the user has logged for one exercise — actual "
+            "1RM/3RM/5RM/8RM/10RM/12RM/15RM weights from fact_strength_set, "
+            "plus (default) the Epley-projected 1RM from each rep count. "
+            "Use this to ground load conversations: a 5RM = 100kg implies "
+            "1RM ≈ 117kg, which the recommender uses for percentage-based "
+            "prescriptions. exercise_search is ILIKE on dim_hevy_exercise.title."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["exercise_search"],
+            "properties": {
+                "exercise_search": {"type": "string"},
+                "include_estimated": {"type": "boolean", "default": True},
+            },
+        },
+    },
+    "record_workout_score": {
+        "fn": record_workout_score,
+        "description": (
+            "Record the metcon score for a session — the workout-level "
+            "result Hevy can't represent (Hevy logs atomic sets only). "
+            "Pass `score` as a human string and we infer the type: "
+            "'8:42' for time, '5+12' for rounds+reps, '250 reps' for "
+            "total reps, '120 kg' for total weight, '1500 m' for distance. "
+            "Defaults: class_date=today, class_type auto-detected when "
+            "there's only one parsed session that day. Use after the "
+            "workout (e.g. 'I just finished today's CrossFit, scored 9:14 RX')."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["score"],
+            "properties": {
+                "score": {"type": "string"},
+                "class_date": {"type": "string", "format": "date"},
+                "class_type": {"type": "string"},
+                "division": {"type": "string"},
+                "rx": {"type": "boolean"},
+                "notes": {"type": "string"},
+            },
+        },
+    },
+    "get_workout_scores": {
+        "fn": get_workout_scores,
+        "description": (
+            "Recorded metcon scores in [start_date, end_date]. Joins to "
+            "fact_pushpress_session for the workout context. Use to track "
+            "performance trends ('have my Fran times improved this month')."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["start_date", "end_date"],
+            "properties": {
+                "start_date": {"type": "string", "format": "date"},
+                "end_date": {"type": "string", "format": "date"},
+                "class_type": {"type": "string"},
+            },
+        },
+    },
+    "override_coach_movement": {
+        "fn": override_coach_movement,
+        "description": (
+            "Manually override the exercise mapping for one parsed movement "
+            "(use when the parser/normalizer picked the wrong Hevy template). "
+            "Updates the movement to point at the chosen template, re-runs "
+            "the load recommender (so the suggested kg reflects YOUR PRs at "
+            "the corrected exercise), and learns an alias so future parses "
+            "of the same raw text land directly on this template. After "
+            "overriding, run refresh_data('coach') (or wait for the next cron) "
+            "to push the corrected routine to Hevy. Find movement_ids via "
+            "get_coach_plan."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["movement_id", "exercise_template_id"],
+            "properties": {
+                "movement_id": {"type": "integer"},
+                "exercise_template_id": {"type": "string"},
+                "learn_alias": {"type": "boolean", "default": True},
+            },
+        },
+    },
+    "list_coach_review_queue": {
+        "fn": list_coach_review_queue,
+        "description": (
+            "Movements the parser flagged as novel (no confident exercise "
+            "match in the Hevy catalog). Each row carries the raw text the "
+            "coach wrote, the analog we picked, and the workout context. "
+            "Use resolve_coach_review to confirm or override — that also "
+            "auto-adds the alias so the same wording lands directly next "
+            "time. Routines still sync to Hevy using the analog while "
+            "rows stay unresolved."
+        ),
+        "input": {
+            "type": "object",
+            "properties": {
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200, "default": 50},
+            },
+        },
+    },
+    "resolve_coach_review": {
+        "fn": resolve_coach_review,
+        "description": (
+            "Resolve a coach-review row. Sets resolved_template_id, updates "
+            "the underlying pushpress_part_movement to point at the chosen "
+            "exercise, and writes an alias so future encounters short-"
+            "circuit to a direct match. After resolving, run "
+            "refresh_data('coach') (or wait for the next cron) to push the "
+            "corrected routine to Hevy."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["review_id", "exercise_template_id"],
+            "properties": {
+                "review_id": {"type": "integer"},
+                "exercise_template_id": {"type": "string"},
+                "notes": {"type": "string"},
             },
         },
     },

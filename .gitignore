@@ -48,6 +48,15 @@ whoop_refresh_token.txt
 *.flow
 proxyflow*
 
+# Personal screenshots (PR baseline imports etc.) — keep local only.
+IMG_*.PNG
+IMG_*.JPG
+IMG_*.HEIC
+*.heic
+
+# Claude Code local state
+.claude/
+
 # Docker
 .docker/
 copilot-money-cli/

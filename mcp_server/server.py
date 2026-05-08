@@ -39,7 +39,8 @@ mcp = FastMCP(
     instructions=(
         "Personal life-data tools for Santi: Whoop (recovery, sleep, "
         "workouts, journal, Advanced Labs biomarkers), Hevy (strength "
-        "training — per-set weight/reps/volume), Google Calendar, "
+        "training — per-set weight/reps/volume), PushPress (the gym's "
+        "programmed workout-of-the-day across class types), Google Calendar, "
         "Cronometer, and Copilot Money in a single warehouse. "
         "Always call get_schema_docs first when answering an analytical "
         "question. Prefer mart_daily for daily-grain queries. "
@@ -52,6 +53,15 @@ mcp = FastMCP(
         "specific-exercise questions use get_strength_workouts, "
         "get_exercise_progression, get_strength_volume_trend, or "
         "get_strength_sets — fact_workout (Whoop) only has HR/strain. "
+        "For 'what's tomorrow's workout' / 'what was programmed last "
+        "Friday' / programmed-vs-performed comparisons, use "
+        "get_pushpress_upcoming, get_pushpress_session, "
+        "get_pushpress_history (PushPress = the gym's published "
+        "programming, NOT what the user actually did). For 'what should I "
+        "load today' / 'why are you suggesting this weight', call "
+        "get_coach_plan — it returns the parsed movements with "
+        "recommended kg + the reasoning string explaining the math "
+        "(1RM × pct × recovery adjust × last-RPE adjust). "
         "Use ask_sql only when no semantic tool fits."
     ),
     # The streamable-HTTP route lives at the *root* of the inner ASGI app so
@@ -544,10 +554,104 @@ def ask_sql(
     "this at the START of a chat session if the user is asking about recent "
     "data so analysis isn't on stale numbers. Default source='all' refreshes "
     "Whoop, Calendar, Cronometer, Copilot, then mart. Pass a single source "
-    "name (whoop|calendar|cronometer|copilot|mart) to scope it."
+    "name (whoop|calendar|cronometer|copilot|hevy|pushpress|mart) to scope it."
 ))
 def refresh_data(source: str = "all") -> dict:
     return W.refresh_data(source)
+
+
+# ---- PushPress (programmed gym workouts) ----------------------------------
+@_tool(description=T.TOOLS["list_pushpress_class_types"]["description"])
+def list_pushpress_class_types() -> dict:
+    return T.list_pushpress_class_types()
+
+
+@_tool(description=T.TOOLS["get_pushpress_upcoming"]["description"])
+def get_pushpress_upcoming(
+    days_ahead: int = 7,
+    class_type: str | None = None,
+) -> dict:
+    return T.get_pushpress_upcoming(days_ahead=days_ahead, class_type=class_type)
+
+
+@_tool(description=T.TOOLS["get_pushpress_session"]["description"])
+def get_pushpress_session(class_date: date, class_type: str) -> dict:
+    return T.get_pushpress_session(class_date, class_type)
+
+
+@_tool(description=T.TOOLS["get_pushpress_history"]["description"])
+def get_pushpress_history(
+    start_date: date,
+    end_date: date,
+    class_type: str | None = None,
+) -> dict:
+    return T.get_pushpress_history(start_date, end_date, class_type=class_type)
+
+
+# ---- Coach (parsed plan + load recommendations) --------------------------
+@_tool(description=T.TOOLS["get_coach_plan"]["description"])
+def get_coach_plan(
+    class_date: date | None = None,
+    class_type: str | None = None,
+) -> dict:
+    return T.get_coach_plan(class_date=class_date, class_type=class_type)
+
+
+@_tool(description=T.TOOLS["get_rep_maxes"]["description"])
+def get_rep_maxes(
+    exercise_search: str,
+    include_estimated: bool = True,
+) -> dict:
+    return T.get_rep_maxes(exercise_search, include_estimated=include_estimated)
+
+
+@_tool(description=T.TOOLS["record_workout_score"]["description"])
+def record_workout_score(
+    score: str,
+    class_date: date | None = None,
+    class_type: str | None = None,
+    division: str | None = None,
+    rx: bool | None = None,
+    notes: str | None = None,
+) -> dict:
+    return T.record_workout_score(
+        score, class_date=class_date, class_type=class_type,
+        division=division, rx=rx, notes=notes,
+    )
+
+
+@_tool(description=T.TOOLS["get_workout_scores"]["description"])
+def get_workout_scores(
+    start_date: date,
+    end_date: date,
+    class_type: str | None = None,
+) -> dict:
+    return T.get_workout_scores(start_date, end_date, class_type=class_type)
+
+
+@_tool(description=T.TOOLS["override_coach_movement"]["description"])
+def override_coach_movement(
+    movement_id: int,
+    exercise_template_id: str,
+    learn_alias: bool = True,
+) -> dict:
+    return T.override_coach_movement(
+        movement_id, exercise_template_id, learn_alias=learn_alias,
+    )
+
+
+@_tool(description=T.TOOLS["list_coach_review_queue"]["description"])
+def list_coach_review_queue(limit: int = 50) -> dict:
+    return T.list_coach_review_queue(limit=limit)
+
+
+@_tool(description=T.TOOLS["resolve_coach_review"]["description"])
+def resolve_coach_review(
+    review_id: int,
+    exercise_template_id: str,
+    notes: str | None = None,
+) -> dict:
+    return T.resolve_coach_review(review_id, exercise_template_id, notes)
 
 
 @_tool(description=(

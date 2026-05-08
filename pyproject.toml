@@ -40,6 +40,8 @@ dependencies = [
     # Optional OTLP tracing (Langfuse / Grafana Cloud free tiers)
     "opentelemetry-sdk>=1.27",
     "opentelemetry-exporter-otlp-proto-http>=1.27",
+    # Coach: WOD parser + load recommender + Hevy routine writer.
+    "anthropic>=0.39",
 ]
 
 [project.optional-dependencies]
