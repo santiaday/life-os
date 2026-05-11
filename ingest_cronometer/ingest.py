@@ -187,6 +187,27 @@ def run_all(*, backfill_days: int | None = None) -> dict:
     return out
 
 
+def run_food_pipelines(*, backfill_days: int | None = None) -> dict:
+    """Just the food-log pipelines (servings + daily-nutrition). Used by the
+    MCP write tools to sync a freshly-logged entry into fact_food_log /
+    fact_food_daily without dragging biometrics/exercises along. Each
+    pipeline's default 2-day window is enough to capture writes made today.
+    Does NOT rebuild the mart — call refresh_data('mart') if mart_daily
+    columns need to be fresh too."""
+    out: dict[str, int | str] = {}
+    pipelines: list[tuple[str, Callable[..., int]]] = [
+        ("servings", ingest_servings),
+        ("daily-nutrition", ingest_daily_nutrition),
+    ]
+    for name, fn in pipelines:
+        try:
+            out[name] = fn(backfill_days=backfill_days)
+        except Exception as e:  # noqa: BLE001
+            log.exception("cronometer.food_pipeline.failed", pipeline=name)
+            out[name] = f"FAILED: {type(e).__name__}: {e}"
+    return out
+
+
 # ---- helpers ---------------------------------------------------------------
 def _with_updated(r: dict) -> dict:
     r = dict(r)

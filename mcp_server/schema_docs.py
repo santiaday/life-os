@@ -409,6 +409,17 @@ SCHEMA_DOCS: dict = {
                 "meal_group": "Cronometer label: Breakfast | Lunch | Dinner | Snack 1/2/3 | Uncategorized.",
                 "micros": "JSONB of every micronutrient Cronometer reported (vitamins, minerals, amino acids).",
             },
+            "gotchas": (
+                "Two paths feed this table: (1) the nightly Go-binary GWT "
+                "pipeline (servings + daily-nutrition CSV → fact_food_log / "
+                "fact_food_daily) and (2) the MCP write tools (log_food / "
+                "delete_food_entry) which hit mobile.cronometer.com to write "
+                "to Cronometer's diary, then immediately auto-trigger path "
+                "(1) so the new row lands here within seconds. mart_daily "
+                "rollups are NOT auto-refreshed — call refresh_data('mart') "
+                "if you need today's totals reflected. Batch flows can pass "
+                "sync=False on each write and sync once at the end."
+            ),
         },
         "fact_transaction": {
             "purpose": "Every Copilot Money transaction.",
@@ -483,6 +494,32 @@ SCHEMA_DOCS: dict = {
             "3) For each matching transaction: `tag_transaction(transaction_id, "
             "[trip_tag_id, ...other_tag_ids])` — REPLACES the tag set, so "
             "include any tags you want to keep."
+        ),
+        "log_food_to_cronometer": (
+            "User asks to log a food / meal to Cronometer. "
+            "1) `search_foods(query)` — pick the best match (database foods "
+            "have brand + source; user's own custom foods appear too). Note "
+            "the food_id, measure_id, and translation_id. "
+            "2a) If found: `log_food(food_id, grams, measure_id, "
+            "translation_id, meal_window='breakfast|lunch|dinner|snacks', "
+            "eaten_at='YYYY-MM-DD' or ISO datetime)`. For 'X servings' "
+            "multiply X by the serving gram weight (visible in search "
+            "results' measure_display). log_food auto-resolves "
+            "defaultMeasureId if measure_id is omitted. "
+            "2b) If NOT found (restaurant meal, recipe, etc.): "
+            "`create_custom_food(name, serving_size_g, calories, protein_g, "
+            "fat_g, carbs_g, ...)` then call `log_food` with the returned "
+            "food_id + measure_id. Macros for custom foods are PER SERVING. "
+            "3) Tool returns entry_id; keep it for delete_food_entry. "
+            "4) log_food and delete_food_entry both auto-sync fact_food_log "
+            "and fact_food_daily after each write (Go binary subprocess, "
+            "~5-15s). So a subsequent get_food_log in the same conversation "
+            "WILL see the new entry. mart_daily columns are NOT refreshed "
+            "automatically — run refresh_data('mart') if a daily-grain query "
+            "needs the updated total. "
+            "5) For batch logging (e.g. logging an entire day's food at "
+            "once), pass sync=False on each call except the last to avoid "
+            "running the Go binary N times."
         ),
         "couples_split": (
             "User shares finances with partner. Three tags carry meaning: "

@@ -1,12 +1,27 @@
 # mcp_server image. Long-running, exposed via Caddy. Built from repo root.
 
+# Stage 1: build the cronometer-export Go binary. The MCP server's
+# refresh_data('cronometer') tool and the auto-sync inside log_food /
+# delete_food_entry both shell out to this binary, so it has to live inside
+# the mcp container (not just the ingest_cronometer / scheduler images).
+FROM golang:1.22-alpine AS cron_builder
+RUN apk add --no-cache git ca-certificates
+WORKDIR /src
+RUN git clone --depth=1 https://github.com/jrmycanady/cronometer-export.git . \
+ && CGO_ENABLED=0 go build -o /out/cronometer-export .
+
+# Stage 2: Python runtime.
 FROM python:3.12-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    CRONOMETER_EXPORT_BINARY=/usr/local/bin/cronometer-export
 
 WORKDIR /app
+
+COPY --from=cron_builder /out/cronometer-export /usr/local/bin/cronometer-export
+RUN chmod +x /usr/local/bin/cronometer-export
 
 COPY pyproject.toml ./
 RUN pip install --upgrade pip \

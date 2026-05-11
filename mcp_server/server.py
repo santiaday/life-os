@@ -22,6 +22,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from lifeos_core.db import close_pools, conn
 from lifeos_core.logging import configure_logging, get_logger
 from lifeos_core.settings import settings
+from mcp_server import cronometer_write_tools as CW
 from mcp_server import hevy_write_tools as HW
 from mcp_server import tools as T
 from mcp_server import write_tools as W
@@ -387,6 +388,104 @@ def get_meal_summary(
     meal_window: str | None = None,
 ) -> dict:
     return T.get_meal_summary(start_date, end_date, meal_window)
+
+
+# ---- Cronometer write tools (mobile REST API) -----------------------------
+@_tool(description=(
+    "Search Cronometer's food database by name. CALL THIS FIRST whenever the "
+    "user wants to log a food — log_food requires Cronometer's numeric "
+    "food_id and a measure_id, both of which come from the search result. "
+    "Returns ranked matches with food_id, measure_id, translation_id, brand, "
+    "source. Hits mobile.cronometer.com directly (not the GWT export "
+    "pipeline)."
+))
+def search_foods(query: str, limit: int = 25) -> dict:
+    return CW.search_foods(query, limit)
+
+
+@_tool(description=(
+    "Log a food serving to the Cronometer diary via POST /api/v2/add_serving "
+    "AND immediately re-run the food ingest pipelines so fact_food_log / "
+    "fact_food_daily are fresh (adds ~5-15s). "
+    "Inputs: food_id (int, from search_foods), grams (Cronometer is "
+    "gram-native; for 'X servings' multiply by the serving gram weight). "
+    "Optional: measure_id (from search_foods; auto-resolved to "
+    "defaultMeasureId if omitted), meal_window (breakfast|lunch|dinner|"
+    "snacks|auto), eaten_at (ISO date or datetime to backdate), "
+    "translation_id (pass through from search results; usually 0), sync "
+    "(default True; pass False to skip the post-write ingest when batching). "
+    "Returns the new entry_id. mart_daily columns still require "
+    "refresh_data('mart') to update."
+))
+def log_food(
+    food_id: int,
+    grams: float,
+    measure_id: int | None = None,
+    meal_window: str | None = None,
+    eaten_at: str | None = None,
+    translation_id: int = 0,
+    sync: bool = True,
+) -> dict:
+    return CW.log_food(
+        food_id=food_id,
+        grams=grams,
+        measure_id=measure_id,
+        meal_window=meal_window,
+        eaten_at=eaten_at,
+        translation_id=translation_id,
+        sync=sync,
+    )
+
+
+@_tool(description=(
+    "Create a custom food in Cronometer for restaurant meals, recipes, or "
+    "home-cooked items not in the DB. Macros are PER SERVING (tool "
+    "re-normalizes to Cronometer's per-100g storage). Required: name, "
+    "serving_size_g, calories, protein_g, fat_g, carbs_g. Optional: fiber_g, "
+    "sugar_g, sodium_mg, serving_name. Returns food_id + measure_id ready to "
+    "pass to log_food."
+))
+def create_custom_food(
+    name: str,
+    serving_size_g: float,
+    calories: float,
+    protein_g: float,
+    fat_g: float,
+    carbs_g: float,
+    fiber_g: float = 0,
+    sugar_g: float = 0,
+    sodium_mg: float = 0,
+    serving_name: str = "1 serving",
+) -> dict:
+    return CW.create_custom_food(
+        name=name,
+        serving_size_g=serving_size_g,
+        calories=calories,
+        protein_g=protein_g,
+        fat_g=fat_g,
+        carbs_g=carbs_g,
+        fiber_g=fiber_g,
+        sugar_g=sugar_g,
+        sodium_mg=sodium_mg,
+        serving_name=serving_name,
+    )
+
+
+@_tool(description=(
+    "Delete one or more diary entries by serving id (the entry_id returned "
+    "by log_food). `day` defaults to today; pass YYYY-MM-DD for past entries "
+    "— Cronometer's v3 DELETE needs the full serving object, which we fetch "
+    "via get_diary(day) and match by servingId. Entries not found are "
+    "returned in `missing` rather than erroring. After a successful delete, "
+    "re-runs the food ingest pipelines so fact_food_log reflects the removal "
+    "(set sync=False to skip when batching)."
+))
+def delete_food_entry(
+    entry_ids: list[int | str] | int | str,
+    day: str | None = None,
+    sync: bool = True,
+) -> dict:
+    return CW.delete_food_entry(entry_ids, day, sync=sync)
 
 
 @_tool(description=T.TOOLS["get_calendar_load"]["description"])
