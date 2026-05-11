@@ -46,6 +46,32 @@ def run_subprocess(module: str, *args: str, chain_mart: bool = True) -> None:
             pass
 
 
+def run_pushpress_coach_pipeline() -> None:
+    """Single-shot end-to-end refresh: ingest_pushpress → coach run.
+
+    Used by the daily 4 AM trigger and the Sunday afternoon triple-fire (1/3/5
+    PM ET), which exists for the case where the gym publishes the next week's
+    programming on Sunday afternoon and we want it parsed + in Hevy before
+    the user wakes up Monday. The 4 AM Monday cron would catch it too, but
+    the Sunday triple-fire shortens the lag and lets the user preview next
+    week's loads on Sunday night."""
+    log.info("scheduler.coach_pipeline.start")
+    rc = subprocess.run(
+        [sys.executable, "-m", "ingest_pushpress", "ingest"], check=False,
+    )
+    if rc.returncode != 0:
+        log.error("scheduler.coach_pipeline.pushpress_failed", returncode=rc.returncode)
+        return
+    rc = subprocess.run(
+        [sys.executable, "-m", "coach", "run"], check=False,
+    )
+    log.info(
+        "scheduler.coach_pipeline.end",
+        coach_rc=rc.returncode,
+        status="success" if rc.returncode == 0 else "failure",
+    )
+
+
 def build() -> BlockingScheduler:
     sched = BlockingScheduler(timezone=settings.LOCAL_TZ)
 
@@ -215,6 +241,22 @@ def build() -> BlockingScheduler:
         max_instances=1,
         coalesce=True,
     )
+    # Sunday afternoon triple-fire (1 PM / 3 PM / 5 PM ET). Gym typically
+    # publishes the next week's programming on Sunday afternoon; firing at
+    # multiple slots minimizes the lag between "coach published" and
+    # "user sees recommended loads in Hevy". Each fire is the full chain:
+    # ingest_pushpress (pull fresh) → coach run (parse + recompute + Hevy push).
+    # max_instances=1 + coalesce=True means an in-flight run won't get
+    # stomped if the previous slot hasn't finished.
+    for hour in (13, 15, 17):
+        sched.add_job(
+            run_pushpress_coach_pipeline,
+            CronTrigger(day_of_week="sun", hour=hour, minute=0),
+            id=f"pushpress_coach_sunday_{hour:02d}",
+            name=f"PushPress + coach pipeline (Sunday {hour:02d}:00 ET)",
+            max_instances=1,
+            coalesce=True,
+        )
 
     # ---- Copilot (Phase 7) ------------------------------------------------
     sched.add_job(
