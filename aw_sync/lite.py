@@ -250,21 +250,22 @@ def write_heartbeat(host: str, source: str, *, blocks: int, raw_aw: int) -> None
 
 
 # ---- ActivityWatch ----------------------------------------------------------
-# We query the WINDOW watcher (not the afk watcher) as the source of truth
-# for "user was at the computer." Rationale:
-#   - aw-watcher-afk fires AFK after 180s of no keyboard/mouse input. For
-#     knowledge work (meetings, reading, thinking) that's far too tight —
-#     observed: 11.5h of real app focus rendered as 1.7h of "not-afk".
-#   - aw-watcher-window emits an event whenever a window is in focus. When
-#     macOS auto-locks the screen the focused app becomes "loginwindow"
-#     (or "ScreenSaverEngine"), so we exclude those — that captures the
-#     "actually away from the computer" signal cleanly without needing
-#     the afk heuristic at all.
+# Hands-on activity = aw-watcher-afk's not-afk events, merged in Python
+# with a generous gap (IDLE_GAP_S=1800s = 30 min). Two earlier approaches
+# were both wrong:
+#   - merge_events_by_keys on the AW side summed durations into a single
+#     event with future-projected end times.
+#   - Switching to aw-watcher-window (any focused app) over-counted: it
+#     credited 12h of "work" on a day when the laptop sat open and
+#     unused for most of it.
+# Raw not-afk events captures actual keyboard/mouse interaction with
+# AW's standard 180s timeout. The 30-min Python merge folds reading /
+# listening pauses (with periodic clicks) into a single working block,
+# while a real absence (>30 min with no input) still splits the day.
 AW_QUERY = (
-    'window_bucket = find_bucket("aw-watcher-window_");'
-    'events = query_bucket(window_bucket);'
-    'RETURN = exclude_keyvals(events, "app", '
-    '["loginwindow", "ScreenSaverEngine", "LockScreen"]);'
+    'afk_bucket = find_bucket("aw-watcher-afk_");'
+    'events = query_bucket(afk_bucket);'
+    'RETURN = filter_keyvals(events, "status", ["not-afk"]);'
 )
 
 

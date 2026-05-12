@@ -43,15 +43,14 @@ DEFAULT_MIN_BLOCK_S = 300        # drop blocks shorter than 5min
 DEFAULT_LOOKBACK_HOURS = 1       # first run reaches back this far
 DEFAULT_MAX_BLOCK_S = 24 * 3600  # sanity cap
 
-# Source of truth: aw-watcher-window. The afk watcher's 180s timeout
-# missed ~85% of real computer time (meetings, reading, thinking).
-# Window watcher emits an event per focused window; "loginwindow" /
-# "ScreenSaverEngine" mark lockscreen and serve as the away signal.
+# Hands-on activity = aw-watcher-afk's not-afk events, merged with a
+# generous gap in Python (idle_gap_s=1800 = 30 min). Captures keyboard /
+# mouse interaction while tolerating reading and meeting pauses, but
+# splits on real absences (>30 min). See lite.py for full rationale.
 AW_QUERY = (
-    'window_bucket = find_bucket("aw-watcher-window_");'
-    'events = query_bucket(window_bucket);'
-    'RETURN = exclude_keyvals(events, "app", '
-    '["loginwindow", "ScreenSaverEngine", "LockScreen"]);'
+    'afk_bucket = find_bucket("aw-watcher-afk_");'
+    'events = query_bucket(afk_bucket);'
+    'RETURN = filter_keyvals(events, "status", ["not-afk"]);'
 )
 
 
