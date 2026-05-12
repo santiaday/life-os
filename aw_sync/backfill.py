@@ -76,10 +76,13 @@ print(f"backfill window: {start.isoformat()} -> {end.isoformat()}")
 print(f"host={HOSTNAME}  source={SOURCE}  category={CATEGORY!r}")
 
 body = {
+    # Window watcher = ground truth for "user was at the computer";
+    # exclude the lock-screen pseudo-windows. See lite.py for rationale.
     "query": [
-        'afk_bucket = find_bucket("aw-watcher-afk_");'
-        'afk_events = query_bucket(afk_bucket);'
-        'RETURN = filter_keyvals(afk_events, "status", ["not-afk"]);'
+        'window_bucket = find_bucket("aw-watcher-window_");'
+        'events = query_bucket(window_bucket);'
+        'RETURN = exclude_keyvals(events, "app", '
+        '["loginwindow", "ScreenSaverEngine", "LockScreen"]);'
     ],
     "timeperiods": [f"{start.isoformat()}/{end.isoformat()}"],
 }

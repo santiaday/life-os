@@ -102,20 +102,69 @@ def _send_slack(title: str, message: str) -> bool:
         return False
 
 
-def check_and_alert() -> dict:
-    """Survey ingest freshness. Send an alert if anything is stale.
-    Returns the survey result for logging/debugging."""
-    stale = _stale_sources()
-    if not stale:
-        return {"ok": True, "stale": []}
+def _stale_hosts(now: datetime | None = None, max_minutes: int = 45) -> list[dict]:
+    """Hosts whose aw_sync daemon hasn't checked in recently.
 
-    title = f"life-os: {len(stale)} stale source(s)"
-    body_lines = [
-        f"- {s['label']}: "
-        + (f"never succeeded" if s['last_success'] is None
-           else f"last success {s['last_success']} ({s['hours_stale']}h ago, threshold {s['threshold_hours']}h)")
-        for s in stale
-    ]
+    The daemon ticks every 5 min and writes a heartbeat regardless of
+    whether AW reported activity. So a >45 min gap means the daemon
+    crashed, the laptop is offline, or AW is down. False positives:
+    laptop genuinely off (overnight, weekend, travel) — these stay in
+    the alert until the laptop comes back, which is the right behavior
+    if you care about losing tracking time."""
+    now = now or datetime.now(timezone.utc)
+    out: list[dict] = []
+    with tx() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT host, source, last_tick_at, last_blocks, raw_aw_events
+            FROM host_heartbeats
+            ORDER BY last_tick_at
+            """
+        )
+        for row in cur.fetchall():
+            last = row["last_tick_at"]
+            if last.tzinfo is None:
+                last = last.replace(tzinfo=timezone.utc)
+            minutes = (now - last).total_seconds() / 60.0
+            if minutes > max_minutes:
+                out.append({
+                    "host": row["host"],
+                    "source": row["source"],
+                    "last_tick_at": last.isoformat(),
+                    "minutes_stale": round(minutes, 0),
+                    "threshold_minutes": max_minutes,
+                })
+    return out
+
+
+def check_and_alert() -> dict:
+    """Survey ingest + host freshness. Send an alert if anything is stale.
+    Returns the survey result for logging/debugging."""
+    stale_sources = _stale_sources()
+    stale_hosts = _stale_hosts()
+    if not stale_sources and not stale_hosts:
+        return {"ok": True, "stale_sources": [], "stale_hosts": []}
+
+    parts = []
+    if stale_sources:
+        parts.append(f"{len(stale_sources)} stale source(s)")
+    if stale_hosts:
+        parts.append(f"{len(stale_hosts)} silent host(s)")
+    title = "life-os: " + ", ".join(parts)
+
+    body_lines = []
+    for s in stale_sources:
+        body_lines.append(
+            f"- {s['label']}: "
+            + (f"never succeeded" if s['last_success'] is None
+               else f"last success {s['last_success']} "
+                    f"({s['hours_stale']}h ago, threshold {s['threshold_hours']}h)")
+        )
+    for h in stale_hosts:
+        body_lines.append(
+            f"- {h['host']} ({h['source']}): silent {h['minutes_stale']:.0f} min"
+            f" (last tick {h['last_tick_at']})"
+        )
     message = "\n".join(body_lines)
 
     delivered = False
@@ -126,4 +175,9 @@ def check_and_alert() -> dict:
     if not delivered:
         log.warning("alerts.stale_no_channel", title=title, body=message)
 
-    return {"ok": False, "stale": stale, "delivered": delivered}
+    return {
+        "ok": False,
+        "stale_sources": stale_sources,
+        "stale_hosts": stale_hosts,
+        "delivered": delivered,
+    }

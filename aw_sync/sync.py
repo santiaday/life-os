@@ -43,13 +43,15 @@ DEFAULT_MIN_BLOCK_S = 300        # drop blocks shorter than 5min
 DEFAULT_LOOKBACK_HOURS = 1       # first run reaches back this far
 DEFAULT_MAX_BLOCK_S = 24 * 3600  # sanity cap
 
-# AWQL query — returns merged not-afk events. We use only AFK status
-# (not window titles); categorization is by hostname only per spec.
+# Source of truth: aw-watcher-window. The afk watcher's 180s timeout
+# missed ~85% of real computer time (meetings, reading, thinking).
+# Window watcher emits an event per focused window; "loginwindow" /
+# "ScreenSaverEngine" mark lockscreen and serve as the away signal.
 AW_QUERY = (
-    'afk_bucket = find_bucket("aw-watcher-afk_");'
-    'afk_events = query_bucket(afk_bucket);'
-    'not_afk = filter_keyvals(afk_events, "status", ["not-afk"]);'
-    'RETURN = merge_events_by_keys(not_afk, ["status"]);'
+    'window_bucket = find_bucket("aw-watcher-window_");'
+    'events = query_bucket(window_bucket);'
+    'RETURN = exclude_keyvals(events, "app", '
+    '["loginwindow", "ScreenSaverEngine", "LockScreen"]);'
 )
 
 

@@ -224,12 +224,47 @@ def upsert_events(rows: list[dict]) -> int:
     return len(rows)
 
 
+def write_heartbeat(host: str, source: str, *, blocks: int, raw_aw: int) -> None:
+    """Record that this daemon ran. Used by the VPS-side alert job to
+    detect silent failures: a healthy daemon ticks every 5 min whether
+    or not the user was active, so a heartbeat older than ~30 min means
+    the daemon crashed or the laptop is offline."""
+    url = (
+        f"{SUPABASE_URL}/rest/v1/host_heartbeats"
+        f"?on_conflict=host"
+    )
+    body = [{
+        "host": host, "source": source,
+        "last_tick_at": datetime.now(timezone.utc).isoformat(),
+        "last_blocks": blocks, "raw_aw_events": raw_aw,
+    }]
+    headers = {
+        **_sb_headers(),
+        "Prefer": "resolution=merge-duplicates,return=minimal",
+    }
+    code, resp = _request("POST", url, headers=headers, body=body)
+    if code >= 300:
+        # Don't crash the daemon — heartbeats are best-effort.
+        log("aw_sync.heartbeat_failed", code=code,
+            body=resp[:300].decode("utf-8", "replace"))
+
+
 # ---- ActivityWatch ----------------------------------------------------------
+# We query the WINDOW watcher (not the afk watcher) as the source of truth
+# for "user was at the computer." Rationale:
+#   - aw-watcher-afk fires AFK after 180s of no keyboard/mouse input. For
+#     knowledge work (meetings, reading, thinking) that's far too tight —
+#     observed: 11.5h of real app focus rendered as 1.7h of "not-afk".
+#   - aw-watcher-window emits an event whenever a window is in focus. When
+#     macOS auto-locks the screen the focused app becomes "loginwindow"
+#     (or "ScreenSaverEngine"), so we exclude those — that captures the
+#     "actually away from the computer" signal cleanly without needing
+#     the afk heuristic at all.
 AW_QUERY = (
-    'afk_bucket = find_bucket("aw-watcher-afk_");'
-    'afk_events = query_bucket(afk_bucket);'
-    'not_afk = filter_keyvals(afk_events, "status", ["not-afk"]);'
-    'RETURN = merge_events_by_keys(not_afk, ["status"]);'
+    'window_bucket = find_bucket("aw-watcher-window_");'
+    'events = query_bucket(window_bucket);'
+    'RETURN = exclude_keyvals(events, "app", '
+    '["loginwindow", "ScreenSaverEngine", "LockScreen"]);'
 )
 
 
@@ -359,6 +394,7 @@ def main() -> int:
         })
 
     written = upsert_events(rows)
+    write_heartbeat(host, source, blocks=len(rows), raw_aw=len(aw_events))
     log("aw_sync.done", host=host, raw_aw=len(aw_events),
         blocks=len(rows), written=written)
     print(json.dumps({
