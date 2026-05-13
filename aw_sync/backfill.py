@@ -130,6 +130,9 @@ for s, e in blocks:
         "source": SOURCE, "source_event_id": sid, "event_type": "work_block",
         "category": CATEGORY, "title": CATEGORY,
         "started_at": s.isoformat(), "ended_at": e.isoformat(),
+        # Bump updated_at so calendar_sync re-PATCHes the calendar entry.
+        # See lite.py for full rationale.
+        "updated_at": datetime.now(timezone.utc).isoformat(),
         "metadata": {
             "hostname": HOSTNAME,
             "duration_seconds": int((e - s).total_seconds()),

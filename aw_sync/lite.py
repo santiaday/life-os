@@ -388,6 +388,13 @@ def main() -> int:
             "title": category,
             "started_at": s.isoformat(),
             "ended_at": e.isoformat(),
+            # Force-set updated_at on every upsert. Required so that
+            # calendar_sync (VPS-side) detects extended blocks via its
+            # `updated_at > synced_at` clause and PATCHes the calendar
+            # event. Without this, PostgREST's ON CONFLICT update leaves
+            # the original updated_at intact and the calendar never gets
+            # the latest ended_at, even though the DB row is correct.
+            "updated_at": datetime.now(timezone.utc).isoformat(),
             "metadata": {
                 "hostname": host,
                 "duration_seconds": int((e - s).total_seconds()),
