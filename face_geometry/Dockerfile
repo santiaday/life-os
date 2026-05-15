@@ -11,11 +11,16 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
-# OpenCV headless still needs a couple of native libs. curl is used
-# once below to fetch the FaceLandmarker model. Keep this list minimal
-# — full OpenCV (non-headless) pulls in X11.
+# Native libs:
+#   libglib2.0-0, libgl1 — OpenCV-headless's own deps.
+#   libgles2, libegl1   — MediaPipe Tasks dlopens libGLESv2.so.2 at
+#                         import time even though we never render. The
+#                         legacy `mp.solutions` API didn't need these;
+#                         the new Tasks API (0.10+) does.
+#   curl                — one-shot, used below to fetch the model file.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends libglib2.0-0 libgl1 curl \
+ && apt-get install -y --no-install-recommends \
+      libglib2.0-0 libgl1 libgles2 libegl1 curl \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
