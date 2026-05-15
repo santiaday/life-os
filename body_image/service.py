@@ -229,24 +229,19 @@ def fetch_trends(user_id: str, days: int = 90) -> TrendResponse:
     """Day-grain rollup of per-feature scores across LLM raters, plus the
     raw geometry series. ~150 rows max even at daily cadence."""
     with tx() as c, c.cursor(row_factory=dict_row) as cur:
-        # LLM trends — average per-feature score across claude+gpt4v,
-        # then per day.
+        # LLM trends — one row per rating. Python loop below aggregates
+        # per-day across claude+gpt4v (averaging feature scores out of
+        # the JSONB dimensions column, which can't be done in SQL).
         cur.execute(
             """
-            WITH llm AS (
-              SELECT date_trunc('day', r.rated_at)::date AS day,
-                     r.dimensions,
-                     r.overall
-                FROM body_image_rating r
-                JOIN body_image_photo p ON p.id = r.photo_id
-               WHERE p.user_id = %s
-                 AND r.source IN ('claude', 'gpt4v')
-                 AND r.rated_at > now() - (%s::int || ' days')::interval
-            )
-            SELECT day,
-                   AVG(overall) FILTER (WHERE overall IS NOT NULL) AS overall_avg,
-                   dimensions
-              FROM llm
+            SELECT date_trunc('day', r.rated_at)::date AS day,
+                   r.dimensions,
+                   r.overall AS overall_avg
+              FROM body_image_rating r
+              JOIN body_image_photo p ON p.id = r.photo_id
+             WHERE p.user_id = %s
+               AND r.source IN ('claude', 'gpt4v')
+               AND r.rated_at > now() - (%s::int || ' days')::interval
              ORDER BY day
             """,
             [user_id, days],
