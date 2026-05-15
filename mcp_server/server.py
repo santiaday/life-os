@@ -1114,6 +1114,15 @@ def build_app() -> FastAPI:
     except ImportError as e:  # pragma: no cover
         log.warning("mcp.lifelog_router_unavailable", error=str(e))
 
+    # Body-image rating surface. Shares the LIFELOG_API_TOKEN bearer.
+    # /body-image/* is in PUBLIC_PREFIXES so the path-secret middleware
+    # leaves the Authorization header alone. See body_image/RUNBOOK.md.
+    try:
+        from body_image.routes import router as body_image_router
+        app.include_router(body_image_router)
+    except ImportError as e:  # pragma: no cover
+        log.warning("mcp.body_image_router_unavailable", error=str(e))
+
     # Whoop journal token-refresh callback. Sits under /lifelog/whoop/* so it
     # inherits the path-secret exemption, but uses its own X-Shared-Secret
     # auth (independent of LIFELOG_API_TOKEN). See refresh_webhook.py.

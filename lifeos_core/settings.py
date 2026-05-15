@@ -104,6 +104,19 @@ class Settings(BaseSettings):
     PUSHPRESS_USERNAME: str | None = None
     PUSHPRESS_PASSWORD: str | None = None
 
+    # ---- Body-image rating pipeline ----------------------------------------
+    # iOS Shortcut posts a daily headshot → Claude + GPT-4o vision + a
+    # MediaPipe geometry sidecar score it. See body_image/RUNBOOK.md.
+    # OPENAI_API_KEY is the only new dep — ANTHROPIC_API_KEY below is
+    # already used by coach.
+    OPENAI_API_KEY: str | None = None
+    # Supabase project URL + service-role JWT (Supabase dashboard →
+    # Settings → API). Required only for body_image storage uploads;
+    # the rest of LifeOS reaches Postgres directly via SUPABASE_DB_URL.
+    SUPABASE_URL: str | None = None
+    SUPABASE_SERVICE_KEY: str | None = None
+    BODY_IMAGE_BUCKET: str = "body-image"
+
     # ---- Coach (WOD parser + load recommender) ----------------------------
     # The coach service uses Anthropic API directly (Sonnet 4.5 for parsing
     # plaintext WOD descriptions, Haiku for movement-name fuzzy matching).

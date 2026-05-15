@@ -128,6 +128,18 @@ services:
     env_file: .env
     profiles: ["manual"]
 
+  # ---- Body-image rating sidecar ----
+  # MediaPipe + OpenCV is ~600MB of native deps — kept out of mcp_server.
+  # Internal only (no host port); mcp reaches it via the compose network
+  # at http://face-geometry:8000/analyze. See body_image/RUNBOOK.md.
+  face-geometry:
+    image: ghcr.io/santi/life-os-face-geometry:latest
+    build:
+      context: .
+      dockerfile: face_geometry/Dockerfile
+    restart: unless-stopped
+    expose: ["8000"]
+
   # ---- Phase 4 ----
   # mart_refresh:
   #   image: ghcr.io/santi/life-os-mart-refresh:latest

@@ -45,13 +45,17 @@ RUN pip install --upgrade pip \
       'google-auth>=2.34' \
       'boto3>=1.35' \
       'opentelemetry-sdk>=1.27' \
-      'opentelemetry-exporter-otlp-proto-http>=1.27'
+      'opentelemetry-exporter-otlp-proto-http>=1.27' \
+      'openai>=1.50' \
+      'pillow>=10.4' \
+      'python-multipart>=0.0.9'
 
 # MCP server now exposes write/refresh tools that call into every ingester
 # and the mart refresher, so all packages must be present in the image.
 COPY lifeos_core ./lifeos_core
 COPY mcp_server ./mcp_server
 COPY lifelog_api ./lifelog_api
+COPY body_image ./body_image
 COPY ingest_whoop ./ingest_whoop
 COPY ingest_calendar ./ingest_calendar
 COPY ingest_cronometer ./ingest_cronometer

@@ -17,6 +17,13 @@ lifeos.ledion.io {
 		reverse_proxy mcp:8080
 	}
 
+	# Body-image rating surface. Same bearer auth as /lifelog/*; the daily
+	# iOS Shortcut POSTs a headshot to /body-image/upload. Dashboard lives
+	# at /body-image/dashboard?token=<LIFELOG_API_TOKEN>.
+	handle /body-image/* {
+		reverse_proxy mcp:8080
+	}
+
 	# Everything else is the MCP HTTP server. Auth is enforced inside the app
 	# via the Authorization: Bearer <MCP_API_KEY> header.
 	handle {

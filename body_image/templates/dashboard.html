@@ -1,0 +1,274 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>body-image · lifeos</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #181b22;
+    --border: #262a33;
+    --text: #e6e8ee;
+    --muted: #8a93a6;
+    --accent: #8ab4ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px;
+    background: var(--bg); color: var(--text);
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  }
+  h1 { font-size: 22px; margin: 0 0 4px; font-weight: 600; }
+  .sub { color: var(--muted); margin-bottom: 24px; }
+  .grid {
+    display: grid;
+    grid-template-columns: minmax(280px, 360px) 1fr;
+    gap: 20px;
+  }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px;
+  }
+  .panel h2 {
+    font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--muted); margin: 0 0 12px; font-weight: 600;
+  }
+  .latest img {
+    width: 100%; border-radius: 8px; display: block;
+    background: #000; aspect-ratio: 1; object-fit: cover;
+  }
+  .score-row {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding: 6px 0; border-bottom: 1px solid var(--border);
+  }
+  .score-row:last-child { border-bottom: none; }
+  .score-row .src { color: var(--muted); font-size: 12px; text-transform: uppercase; }
+  .score-row .val { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .empty { color: var(--muted); font-style: italic; padding: 12px 0; }
+  .chart-wrap { position: relative; height: 320px; margin-top: 8px; }
+  .controls { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  .controls button {
+    background: transparent; border: 1px solid var(--border); color: var(--text);
+    padding: 5px 11px; border-radius: 999px; cursor: pointer; font-size: 12px;
+  }
+  .controls button.active { background: var(--accent); color: #0b1020; border-color: var(--accent); }
+  .legend { margin-top: 8px; color: var(--muted); font-size: 12px; }
+  details { margin-top: 12px; }
+  details summary { cursor: pointer; color: var(--muted); }
+  pre { white-space: pre-wrap; font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<h1>body-image</h1>
+<div class="sub" id="meta">loading…</div>
+
+<div class="grid">
+  <div class="panel latest">
+    <h2>Latest photo</h2>
+    <div id="latest-img-wrap"></div>
+    <div id="latest-scores" style="margin-top: 12px;"></div>
+    <details>
+      <summary>Raw dimensions (latest)</summary>
+      <pre id="latest-raw"></pre>
+    </details>
+  </div>
+
+  <div class="panel">
+    <h2>Per-feature trend (Claude + GPT-4o average)</h2>
+    <div class="controls" id="feature-buttons"></div>
+    <div class="chart-wrap"><canvas id="feature-chart"></canvas></div>
+    <div class="legend">Pick a feature to chart. 0-100 scale.</div>
+  </div>
+</div>
+
+<div class="panel" style="margin-top: 20px;">
+  <h2>Overall score (Claude + GPT-4o averaged per day)</h2>
+  <div class="chart-wrap"><canvas id="overall-chart"></canvas></div>
+</div>
+
+<div class="panel" style="margin-top: 20px;">
+  <h2>Geometry (MediaPipe — same photo, same numbers)</h2>
+  <div class="chart-wrap"><canvas id="geometry-chart"></canvas></div>
+  <div class="legend">
+    Symmetry: 0-100 (higher = more symmetric).
+    Gonial angle: degrees (lower = squarer jaw).
+    Jaw / cheekbone: ratio (lower = more tapered face).
+  </div>
+</div>
+
+<script>
+const TOKEN = "__LIFELOG_TOKEN__";
+
+async function get(url) {
+  const r = await fetch(url, { headers: { Authorization: "Bearer " + TOKEN } });
+  if (!r.ok) throw new Error(url + " -> " + r.status);
+  return r.json();
+}
+
+function el(tag, attrs, text) {
+  const node = document.createElement(tag);
+  if (attrs) for (const k in attrs) node.setAttribute(k, attrs[k]);
+  if (text != null) node.textContent = text;
+  return node;
+}
+
+function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+function makeLineChart(canvasId, datasets, yMin, yMax) {
+  return new Chart(document.getElementById(canvasId), {
+    type: "line",
+    data: { datasets },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      parsing: { xAxisKey: "day", yAxisKey: "v" },
+      scales: {
+        x: { type: "time", time: { unit: "day" },
+             ticks: { color: "#8a93a6" }, grid: { color: "#262a33" } },
+        y: { min: yMin, max: yMax,
+             ticks: { color: "#8a93a6" }, grid: { color: "#262a33" } },
+      },
+      plugins: {
+        legend: { labels: { color: "#e6e8ee" } },
+        tooltip: { mode: "index", intersect: false },
+      },
+      elements: { point: { radius: 2 } },
+    },
+  });
+}
+
+async function fetchImageBlob(id) {
+  const r = await fetch("/body-image/api/photos/" + encodeURIComponent(id) + "/image", {
+    headers: { Authorization: "Bearer " + TOKEN },
+    redirect: "follow",
+  });
+  if (!r.ok) throw new Error("image fetch failed: " + r.status);
+  return URL.createObjectURL(await r.blob());
+}
+
+async function loadLatest() {
+  const latest = await get("/body-image/api/latest");
+  const meta = document.getElementById("meta");
+  const wrap = document.getElementById("latest-img-wrap");
+  const scoresBox = document.getElementById("latest-scores");
+  clear(wrap); clear(scoresBox);
+
+  if (!latest) {
+    meta.textContent = "0 photos";
+    wrap.appendChild(el("div", { class: "empty" }, "No photos yet."));
+    return;
+  }
+
+  let metaText = "Latest " + new Date(latest.created_at).toLocaleString();
+  if (latest.caption) metaText += " · " + latest.caption;
+  meta.textContent = metaText;
+
+  const img = el("img", { alt: "latest" });
+  wrap.appendChild(img);
+  try {
+    img.src = await fetchImageBlob(latest.id);
+  } catch (e) { console.error(e); }
+
+  if (!latest.ratings || !latest.ratings.length) {
+    scoresBox.appendChild(el("div", { class: "empty" }, "No ratings yet."));
+  } else {
+    for (const r of latest.ratings) {
+      const row = el("div", { class: "score-row" });
+      row.appendChild(el("span", { class: "src" }, String(r.source)));
+      row.appendChild(el("span", { class: "val" },
+        r.overall == null ? "—" : String(Math.round(r.overall))));
+      scoresBox.appendChild(row);
+    }
+  }
+  document.getElementById("latest-raw").textContent =
+    JSON.stringify(latest.ratings, null, 2);
+}
+
+let activeFeature = "facial_harmony";
+let featureChart, overallChart, geometryChart;
+
+async function loadTrends() {
+  const t = await get("/body-image/api/trends?days=180");
+
+  const btnsBox = document.getElementById("feature-buttons");
+  clear(btnsBox);
+  for (const k of t.feature_keys) {
+    const b = el("button", null, String(k).replace(/_/g, " "));
+    b.dataset.key = k;
+    if (k === activeFeature) b.classList.add("active");
+    b.onclick = () => {
+      activeFeature = k;
+      for (const sib of btnsBox.querySelectorAll("button")) {
+        sib.classList.toggle("active", sib.dataset.key === activeFeature);
+      }
+      drawFeatureChart(t);
+    };
+    btnsBox.appendChild(b);
+  }
+  drawFeatureChart(t);
+
+  const overallData = t.points.map(p => ({ day: p.day, v: p.overall_avg }));
+  if (overallChart) overallChart.destroy();
+  overallChart = makeLineChart("overall-chart", [{
+    label: "Overall (Claude + GPT-4o avg)",
+    data: overallData,
+    borderColor: "#8ab4ff", backgroundColor: "#8ab4ff",
+    spanGaps: true, tension: 0.25,
+  }], 0, 100);
+
+  const g = t.geometry || [];
+  if (geometryChart) geometryChart.destroy();
+  geometryChart = makeLineChart("geometry-chart", [
+    {
+      label: "Symmetry (0-100)",
+      data: g.map(r => ({ day: r.day, v: r.symmetry_score ?? null })),
+      borderColor: "#9ee493", backgroundColor: "#9ee493",
+      spanGaps: true, tension: 0.25,
+    },
+    {
+      label: "Gonial angle (°)",
+      data: g.map(r => ({ day: r.day, v: r.gonial_angle_deg ?? null })),
+      borderColor: "#f4a261", backgroundColor: "#f4a261",
+      spanGaps: true, tension: 0.25,
+    },
+    {
+      label: "Jaw / cheekbone × 100",
+      data: g.map(r => ({
+        day: r.day,
+        v: r.bigonial_bizygomatic_ratio != null
+          ? r.bigonial_bizygomatic_ratio * 100 : null,
+      })),
+      borderColor: "#e76f51", backgroundColor: "#e76f51",
+      spanGaps: true, tension: 0.25,
+    },
+  ], 0, 160);
+}
+
+function drawFeatureChart(t) {
+  const data = t.points.map(p => ({
+    day: p.day, v: p.dimensions[activeFeature] ?? null,
+  }));
+  if (featureChart) featureChart.destroy();
+  featureChart = makeLineChart("feature-chart", [{
+    label: String(activeFeature).replace(/_/g, " "),
+    data, borderColor: "#8ab4ff", backgroundColor: "#8ab4ff",
+    spanGaps: true, tension: 0.25,
+  }], 0, 100);
+}
+
+(async () => {
+  await new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js";
+    s.onload = resolve; s.onerror = reject;
+    document.head.appendChild(s);
+  });
+  try { await loadLatest(); } catch (e) { console.error(e); }
+  try { await loadTrends(); } catch (e) { console.error(e); }
+})();
+</script>
+</body>
+</html>

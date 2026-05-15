@@ -42,6 +42,12 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-http>=1.27",
     # Coach: WOD parser + load recommender + Hevy routine writer.
     "anthropic>=0.39",
+    # body_image: GPT-4o vision rater + photo normalization before LLM calls.
+    "openai>=1.50",
+    "pillow>=10.4",
+    # Form-data parsing for the body_image upload route (FastAPI's
+    # UploadFile is multipart, which python-multipart handles).
+    "python-multipart>=0.0.9",
 ]
 
 [project.optional-dependencies]

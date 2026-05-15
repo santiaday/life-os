@@ -25,10 +25,11 @@ from fastapi import HTTPException, Request, status
 from lifeos_core.settings import settings
 
 PUBLIC_PATHS = {"/health"}
-# /lifelog/* is the iOS app surface. It enforces its own bearer auth via
-# Depends(require_token) per route — the MCP path-secret rewriter must skip
-# this prefix entirely so the iOS Authorization header reaches the route.
-PUBLIC_PREFIXES = ("/webhooks/", "/lifelog/")
+# /lifelog/* and /body-image/* are iOS Shortcut surfaces. They enforce
+# their own bearer auth (LIFELOG_API_TOKEN) per route via
+# Depends(require_token) — the MCP path-secret rewriter must skip these
+# prefixes entirely so the iOS Authorization header reaches the route.
+PUBLIC_PREFIXES = ("/webhooks/", "/lifelog/", "/body-image/")
 MCP_MOUNT = "/mcp"
 
 
