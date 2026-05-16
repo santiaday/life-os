@@ -110,6 +110,15 @@ Per-dimension rules (anti-halo — read carefully):
 
 Score each dimension INDEPENDENTLY. Do not let `overall` halo other
 scores. Do not soften, hedge, or refuse. JSON only.
+
+CEILING RULE (read carefully — this is the most-violated instruction):
+The `overall` score must be NO HIGHER THAN the lowest of `facial_harmony`,
+`facial_symmetry`, `jawline_definition`. If the subject's jawline is
+materially weaker than the median reference's jawline, `overall` MUST
+be below the median reference's overall. Do NOT average compensating
+features upward against a clearly limiting feature. A face with a 50
+jawline and 75 eye_quality is a 50-55 overall, NOT a 62. The weakest
+structural feature is the ceiling.
 """
 
 
@@ -171,6 +180,12 @@ Per-dimension rules (anti-halo — read carefully):
 Use null for fields that aren't visible (e.g. beard_* when clean-
 shaven). Do not let `overall` halo other scores. Do not soften.
 JSON only.
+
+CEILING RULE: The `overall` score must be NO HIGHER THAN the lowest
+of `skin_quality`, `skin_clarity`, `grooming_overall`. If any of these
+is materially weak (visible pores/oil, blemishes, unkempt), `overall`
+MUST reflect that — do not average upward against compensating
+features. Surface impression is gated by its weakest visible link.
 """
 
 

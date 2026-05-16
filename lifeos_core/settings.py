@@ -137,6 +137,14 @@ class Settings(BaseSettings):
     # geometry z-score baseline. Anything below this many photos uses
     # raw values; once above, the dashboard shows σ-deviation.
     BODY_IMAGE_GEOMETRY_BASELINE_DAYS: int = 30
+    # Personal-calibration slope + offset applied to every LLM rater's
+    # `overall` score AT WRITE TIME. Default 1.0/0.0 = no correction.
+    # Track B in body_image/RUNBOOK derives these from blind user-rating
+    # against panel scores: `corrected = slope * raw + offset`. Stored
+    # in body_image_rating.dimensions._raw_overall so we can re-derive
+    # the correction later without losing original numbers.
+    BODY_IMAGE_CALIBRATION_SLOPE: float = 1.0
+    BODY_IMAGE_CALIBRATION_OFFSET: float = 0.0
 
     # ---- Coach (WOD parser + load recommender) ----------------------------
     # The coach service uses Anthropic API directly (Sonnet 4.5 for parsing
