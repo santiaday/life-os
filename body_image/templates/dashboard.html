@@ -59,6 +59,56 @@
   details { margin-top: 12px; }
   details summary { cursor: pointer; color: var(--muted); }
   pre { white-space: pre-wrap; font-size: 12px; color: var(--muted); }
+
+  /* Qualitative critique blocks */
+  .critique h3 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--muted); margin: 16px 0 6px; font-weight: 600;
+  }
+  .critique ul { margin: 0; padding-left: 18px; }
+  .critique li { margin: 4px 0; line-height: 1.45; }
+  .critique .neg li { color: #f4a261; }
+  .critique .roi li { color: #9ee493; }
+
+  /* History list */
+  .history-item {
+    display: grid; grid-template-columns: 80px 1fr auto; gap: 12px;
+    align-items: center; padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .history-item:last-child { border-bottom: none; }
+  .history-item img {
+    width: 80px; height: 80px; border-radius: 6px;
+    object-fit: cover; background: #000;
+  }
+  .history-item .when { color: var(--muted); font-size: 12px; }
+  .history-item .caption { margin-top: 2px; font-size: 13px; }
+  .history-item .score {
+    font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums;
+    color: var(--accent);
+  }
+  .history-item .score.empty { color: var(--muted); font-size: 14px; }
+  .history-item .toggle {
+    background: transparent; border: 1px solid var(--border);
+    color: var(--text); cursor: pointer; padding: 4px 10px;
+    border-radius: 6px; font-size: 12px;
+  }
+  .history-detail {
+    padding: 8px 0 16px 92px;  /* aligns with thumbnail right edge */
+    border-bottom: 1px solid var(--border);
+    display: none;
+  }
+  .history-detail.open { display: block; }
+  .feature-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 4px 16px; margin-top: 4px;
+  }
+  .feature-grid .row {
+    display: flex; justify-content: space-between; font-size: 12px;
+    border-bottom: 1px dotted var(--border); padding: 2px 0;
+  }
+  .feature-grid .row .k { color: var(--muted); }
+  .feature-grid .row .v { font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
@@ -71,6 +121,7 @@
     <h2>Latest photo</h2>
     <div id="latest-img-wrap"></div>
     <div id="latest-scores" style="margin-top: 12px;"></div>
+    <div class="critique" id="latest-critique"></div>
     <details>
       <summary>Raw dimensions (latest)</summary>
       <pre id="latest-raw"></pre>
@@ -98,6 +149,11 @@
     Gonial angle: degrees (lower = squarer jaw).
     Jaw / cheekbone: ratio (lower = more tapered face).
   </div>
+</div>
+
+<div class="panel" style="margin-top: 20px;">
+  <h2>Recent photos</h2>
+  <div id="history-list"></div>
 </div>
 
 <script>
@@ -183,8 +239,30 @@ async function loadLatest() {
       scoresBox.appendChild(row);
     }
   }
+  renderCritique(document.getElementById("latest-critique"), latest.ratings);
   document.getElementById("latest-raw").textContent =
     JSON.stringify(latest.ratings, null, 2);
+}
+
+// Pull qualitative arrays out of each LLM rating's `dimensions` and
+// render them as readable bullet lists. Geometry has no qualitative
+// output, so we skip it.
+function renderCritique(host, ratings) {
+  clear(host);
+  for (const r of ratings) {
+    const d = r.dimensions || {};
+    const negs = Array.isArray(d.three_biggest_negatives) ? d.three_biggest_negatives : [];
+    const rois = Array.isArray(d.three_highest_roi_changes) ? d.three_highest_roi_changes : [];
+    if (negs.length === 0 && rois.length === 0) continue;
+    host.appendChild(el("h3", null, `${r.source} — what's holding the score down`));
+    const negUl = el("ul", { class: "neg" });
+    for (const n of negs) negUl.appendChild(el("li", null, String(n)));
+    host.appendChild(negUl);
+    host.appendChild(el("h3", null, `${r.source} — highest-ROI changes`));
+    const roiUl = el("ul", { class: "roi" });
+    for (const r2 of rois) roiUl.appendChild(el("li", null, String(r2)));
+    host.appendChild(roiUl);
+  }
 }
 
 let activeFeature = "facial_harmony";
@@ -247,6 +325,90 @@ async function loadTrends() {
   ], 0, 160);
 }
 
+// Numeric feature keys to render as a 2-column score grid inside each
+// expanded history row. Excludes the qualitative arrays (handled
+// separately) and overall (already shown).
+const HISTORY_NUMERIC_KEYS = [
+  "facial_harmony", "facial_symmetry", "jawline_definition", "chin_projection",
+  "skin_quality", "skin_clarity", "under_eye_quality",
+  "eye_quality", "eyebrow_quality", "nose_harmony",
+  "lip_quality", "smile_quality", "teeth_quality",
+  "hair_quality", "hair_style_fit", "hairline_quality",
+  "beard_quality", "beard_density",
+  "grooming_overall", "posture_neck",
+  "photo_quality_isolated", "expression_appeal",
+];
+
+async function loadHistory() {
+  const host = document.getElementById("history-list");
+  clear(host);
+  let photos;
+  try { photos = await get("/body-image/api/history?limit=50"); }
+  catch (e) { host.appendChild(el("div", { class: "empty" }, "Failed to load history.")); return; }
+  if (!photos.length) {
+    host.appendChild(el("div", { class: "empty" }, "No photos yet."));
+    return;
+  }
+  for (const p of photos) {
+    const item = el("div", { class: "history-item" });
+    const img = el("img", { alt: "" });
+    item.appendChild(img);
+    fetchImageBlob(p.id).then(u => { img.src = u; }).catch(() => {});
+
+    const meta = el("div");
+    meta.appendChild(el("div", { class: "when" },
+      new Date(p.created_at).toLocaleString()));
+    if (p.caption) meta.appendChild(el("div", { class: "caption" }, p.caption));
+    item.appendChild(meta);
+
+    const claude = (p.ratings || []).find(r => r.source === "claude");
+    const score = el("div", null);
+    if (claude && claude.overall != null) {
+      score.className = "score";
+      score.textContent = String(Math.round(claude.overall));
+    } else {
+      score.className = "score empty";
+      score.textContent = "—";
+    }
+    item.appendChild(score);
+
+    const toggle = el("button", { class: "toggle" }, "details");
+    item.appendChild(toggle);
+    host.appendChild(item);
+
+    const detail = el("div", { class: "history-detail" });
+    renderCritique(detail, p.ratings || []);
+    const grid = el("div", { class: "feature-grid" });
+    if (claude) {
+      for (const k of HISTORY_NUMERIC_KEYS) {
+        const v = claude.dimensions ? claude.dimensions[k] : null;
+        if (v == null) continue;
+        const row = el("div", { class: "row" });
+        row.appendChild(el("span", { class: "k" }, k.replace(/_/g, " ")));
+        row.appendChild(el("span", { class: "v" }, String(Math.round(v))));
+        grid.appendChild(row);
+      }
+    }
+    if (grid.firstChild) {
+      detail.appendChild(el("h3", null, "claude — all features"));
+      detail.appendChild(grid);
+    }
+    const geom = (p.ratings || []).find(r => r.source === "geometry");
+    if (geom && geom.dimensions) {
+      detail.appendChild(el("h3", null, "geometry"));
+      const gpre = el("pre");
+      gpre.textContent = JSON.stringify(geom.dimensions, null, 2);
+      detail.appendChild(gpre);
+    }
+    host.appendChild(detail);
+
+    toggle.onclick = () => {
+      const open = detail.classList.toggle("open");
+      toggle.textContent = open ? "hide" : "details";
+    };
+  }
+}
+
 function drawFeatureChart(t) {
   const data = t.points.map(p => ({
     day: p.day, v: p.dimensions[activeFeature] ?? null,
@@ -268,6 +430,7 @@ function drawFeatureChart(t) {
   });
   try { await loadLatest(); } catch (e) { console.error(e); }
   try { await loadTrends(); } catch (e) { console.error(e); }
+  try { await loadHistory(); } catch (e) { console.error(e); }
 })();
 </script>
 </body>

@@ -104,6 +104,18 @@ def api_latest(user_id: str = Depends(current_user_id)) -> PhotoRow | None:
 
 
 @router.get(
+    "/api/history",
+    response_model=list[PhotoRow],
+    dependencies=[Depends(require_token)],
+)
+def api_history(
+    limit: int = Query(default=50, ge=1, le=200),
+    user_id: str = Depends(current_user_id),
+) -> list[PhotoRow]:
+    return service.fetch_history(user_id, limit=limit)
+
+
+@router.get(
     "/api/trends",
     response_model=TrendResponse,
     dependencies=[Depends(require_token)],

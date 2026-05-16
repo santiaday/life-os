@@ -161,6 +161,59 @@ def process_upload(
 # ─── reads (for the dashboard) ────────────────────────────────────────────
 
 
+def fetch_history(user_id: str, limit: int = 50) -> list[PhotoRow]:
+    """Recent photos with all their ratings, newest first.
+
+    One round-trip for photos, one for ratings (grouped client-side). Avoids
+    N+1 even at limit=200."""
+    with tx() as c, c.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT id, storage_path, caption, created_at
+              FROM body_image_photo
+             WHERE user_id = %s
+             ORDER BY created_at DESC
+             LIMIT %s
+            """,
+            [user_id, max(1, min(limit, 200))],
+        )
+        photos = cur.fetchall()
+        if not photos:
+            return []
+        ids = [str(p["id"]) for p in photos]
+        cur.execute(
+            """
+            SELECT photo_id, source, overall, dimensions, rated_at
+              FROM body_image_rating
+             WHERE photo_id = ANY(%s::uuid[])
+             ORDER BY source
+            """,
+            [ids],
+        )
+        by_photo: dict[str, list[dict]] = {}
+        for r in cur.fetchall():
+            by_photo.setdefault(str(r["photo_id"]), []).append(r)
+
+    return [
+        PhotoRow(
+            id=p["id"],
+            storage_path=p["storage_path"],
+            caption=p["caption"],
+            created_at=p["created_at"],
+            ratings=[
+                RatingRow(
+                    source=r["source"],
+                    overall=float(r["overall"]) if r["overall"] is not None else None,
+                    dimensions=r["dimensions"] or {},
+                    rated_at=r["rated_at"],
+                )
+                for r in by_photo.get(str(p["id"]), [])
+            ],
+        )
+        for p in photos
+    ]
+
+
 def fetch_latest(user_id: str) -> PhotoRow | None:
     """Most recent photo + all its ratings."""
     with tx() as c, c.cursor(row_factory=dict_row) as cur:
