@@ -1,18 +1,112 @@
-"""Parallel rater implementations. Each rater returns a dict shaped like:
+"""Rater orchestration.
 
-    {"source": str, "overall": float | None, "dimensions": dict}
+Exposes:
+  * Per-rater specialist functions (rate_claude_structure, rate_claude_surface,
+    rate_gpt4v_structure, rate_gpt4v_surface, rate_gemini_structure,
+    rate_gemini_surface, rate_geometry).
+  * `available_llm_raters()` — which models are configured (have API key set).
+  * `run_llm_raters_once(jpeg_bytes)` — single-pass helper used by
+    body_image.validation; no DB writes, no run_index iteration.
+  * Calibration anchor loading via `load_anchors()`.
 
-…or raises on failure. The service layer fans them out on a thread pool
-so one rater failing never blocks the others — we record the failure
-and save what succeeded.
-
-GPT-4o is shipped but not wired into the default fan-out (no
-OPENAI_API_KEY today). Drop it into service._run_raters_parallel when
-you want a second opinion.
+`body_image.service._run_raters_parallel` is the production fan-out and
+lives in service.py (it needs DB + threads + per-run wiring).
 """
 
-from .claude import rate_claude
-from .geometry import rate_geometry
-from .gpt4v import rate_gpt4v  # available but not enabled by default
+from __future__ import annotations
 
-__all__ = ["rate_claude", "rate_geometry", "rate_gpt4v"]
+from typing import Any, Callable
+
+from lifeos_core.logging import get_logger
+from lifeos_core.settings import settings
+
+from .. import calibration
+from .claude import rate_claude_structure, rate_claude_surface
+from .geometry import rate_geometry
+from .gemini import rate_gemini_structure, rate_gemini_surface
+from .gpt4v import rate_gpt4v_structure, rate_gpt4v_surface
+
+log = get_logger(__name__)
+
+
+# ── Anchor loading ───────────────────────────────────────────────────
+
+
+def load_anchors() -> tuple[list[bytes], dict[str, int]]:
+    """Return ([anchor_low_jpg, anchor_mid_jpg, anchor_high_jpg], {scores})
+    when calibration is enabled and all files exist; otherwise ([], {})."""
+    if not settings.BODY_IMAGE_USE_CALIBRATION_ANCHORS:
+        return [], {}
+    if not calibration.anchors_available():
+        log.warning("body_image.anchors.requested_but_missing")
+        return [], {}
+    images = [
+        calibration.anchor_bytes("low"),
+        calibration.anchor_bytes("mid"),
+        calibration.anchor_bytes("high"),
+    ]
+    if any(b is None for b in images):
+        return [], {}
+    scores = {
+        "overall_low":  calibration.anchor_score("low") or 0,
+        "overall_mid":  calibration.anchor_score("mid") or 0,
+        "overall_high": calibration.anchor_score("high") or 0,
+    }
+    return [b for b in images if b is not None], scores
+
+
+# ── Available raters ─────────────────────────────────────────────────
+
+RaterFn = Callable[..., dict[str, Any]]
+
+
+def available_llm_raters() -> list[tuple[str, RaterFn, RaterFn]]:
+    """Return [(name, structure_fn, surface_fn), ...] for every LLM
+    rater whose API key is set. Order is stable (claude first, then
+    gpt4v, then gemini). geometry is handled separately (it's a single
+    sidecar call, not a structure/surface split)."""
+    out: list[tuple[str, RaterFn, RaterFn]] = []
+    if settings.ANTHROPIC_API_KEY:
+        out.append(("claude", rate_claude_structure, rate_claude_surface))
+    if settings.OPENAI_API_KEY:
+        out.append(("gpt4v", rate_gpt4v_structure, rate_gpt4v_surface))
+    if settings.GEMINI_API_KEY:
+        out.append(("gemini", rate_gemini_structure, rate_gemini_surface))
+    return out
+
+
+# ── Single-pass helper for validation ────────────────────────────────
+
+
+def run_llm_raters_once(jpeg_bytes: bytes) -> list[dict[str, Any]]:
+    """No-DB sequential pass for the weekly validation cron. Returns
+    every rater's per-specialist result (or fewer if some fail). Does
+    NOT iterate run_index — validation only needs one sample per ref."""
+    anchors, anchor_scores = load_anchors()
+    results: list[dict[str, Any]] = []
+    for name, struct_fn, surf_fn in available_llm_raters():
+        for label, fn in (("structure", struct_fn), ("surface", surf_fn)):
+            try:
+                results.append(fn(jpeg_bytes, anchors, anchor_scores))
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "body_image.validation.rater_failed",
+                    rater=name, specialist=label, error=str(e),
+                )
+    # Geometry too — same shape (only one call, no specialist split).
+    try:
+        results.append(rate_geometry(jpeg_bytes))
+    except Exception as e:  # noqa: BLE001
+        log.warning("body_image.validation.geometry_failed", error=str(e))
+    return results
+
+
+__all__ = [
+    "available_llm_raters",
+    "load_anchors",
+    "rate_claude_structure", "rate_claude_surface",
+    "rate_geometry",
+    "rate_gemini_structure", "rate_gemini_surface",
+    "rate_gpt4v_structure",  "rate_gpt4v_surface",
+    "run_llm_raters_once",
+]

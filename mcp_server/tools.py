@@ -52,6 +52,17 @@ CORRELATE_ALLOWLIST = {
     "dining_out_txn_count", "dining_out_txn_max",
     "weight_kg", "body_fat_pct",
     "strength_total_volume_kg", "strength_total_sets", "strength_unique_exercises",
+    # body_image rollup (populated by mart_refresh.refresh_mart_body_image_daily).
+    # Useful targets for lagged correlations: alcohol_g → body_image_skin_clarity,
+    # sleep_consistency_pct → body_image_under_eye, etc.
+    "body_image_overall",
+    "body_image_skin_quality",
+    "body_image_skin_clarity",
+    "body_image_under_eye",
+    "body_image_jawline",
+    "body_image_hair_quality",
+    "body_image_symmetry",
+    "body_image_photo_quality",
 }
 
 

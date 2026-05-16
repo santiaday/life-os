@@ -1,0 +1,6 @@
+{
+  "_comment": "Published scores for the three anchor photos. Edit when you replace the JPEGs. 0-100 scale, same as the rater rubric. See ../calibration/README.md.",
+  "overall_low": 38,
+  "overall_mid": 55,
+  "overall_high": 78
+}

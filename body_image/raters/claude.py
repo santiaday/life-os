@@ -1,10 +1,19 @@
-"""Claude vision rater. Uses Sonnet 4.6 — costs ~$0.015 per image."""
+"""Claude vision rater. Sonnet 4.6, temp=0, two specialist calls
+(Structure + Surface).
+
+Anthropic's Messages API doesn't expose a `seed` parameter, so "N runs
+with rotated seed" is a no-op for Claude — at temp=0 successive calls
+are near-identical (modulo GPU non-determinism). The runs still get
+saved as separate body_image_rating rows so the variance across them
+is your true model-internal floor.
+
+When BODY_IMAGE_USE_CALIBRATION_ANCHORS is true, three anchor images
+with known scores are prepended to every call.
+"""
 
 from __future__ import annotations
 
 import base64
-import json
-import re
 from typing import Any
 
 from anthropic import Anthropic
@@ -12,59 +21,54 @@ from anthropic import Anthropic
 from lifeos_core.logging import get_logger
 from lifeos_core.settings import settings
 
-from ._rubric import RUBRIC
+from . import _common
+from . import _rubric
+from ._parse import parse_json_lenient
 
 log = get_logger(__name__)
 
-# Sonnet (mid-tier) is the right cost/quality tradeoff for this — Opus is
-# overkill for a calibrated rubric, Haiku is too noisy.
 MODEL = "claude-sonnet-4-6"
 
 
-def rate_claude(jpeg_bytes: bytes) -> dict[str, Any]:
+def _client() -> Anthropic:
     if not settings.ANTHROPIC_API_KEY:
         raise RuntimeError("ANTHROPIC_API_KEY is not set.")
-    client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-    resp = client.messages.create(
+    return Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+
+
+def _image_block(jpeg: bytes) -> dict[str, Any]:
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/jpeg",
+            "data": base64.b64encode(jpeg).decode("ascii"),
+        },
+    }
+
+
+def _call(prompt_text: str, target_jpeg: bytes, anchors: list[bytes]) -> dict[str, Any]:
+    content: list[dict[str, Any]] = [_image_block(a) for a in anchors]
+    content.append(_image_block(target_jpeg))
+    content.append({"type": "text", "text": prompt_text})
+
+    resp = _client().messages.create(
         model=MODEL,
         max_tokens=1500,
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/jpeg",
-                            "data": base64.b64encode(jpeg_bytes).decode("ascii"),
-                        },
-                    },
-                    {"type": "text", "text": RUBRIC},
-                ],
-            }
-        ],
+        temperature=settings.BODY_IMAGE_RATING_TEMPERATURE,
+        messages=[{"role": "user", "content": content}],
     )
     text = resp.content[0].text  # type: ignore[union-attr]
-    dims = _parse_json(text)
-    overall = dims.get("overall")
-    if not isinstance(overall, (int, float)):
-        overall = None
-    return {"source": "claude", "overall": overall, "dimensions": dims}
+    return parse_json_lenient(text, source="claude")
 
 
-_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)\s*```", re.DOTALL)
+def rate_claude_structure(jpeg_bytes: bytes, anchors: list[bytes], anchor_scores: dict[str, int]) -> dict[str, Any]:
+    prompt = _rubric.structure_prompt(**_common.anchor_kwargs(anchor_scores))
+    dims = _call(prompt, jpeg_bytes, anchors)
+    return _common.shape_result("claude_structure", dims)
 
 
-def _parse_json(text: str) -> dict[str, Any]:
-    """Tolerate ```json fences and leading/trailing whitespace. Re-raise
-    with the offending text on failure so logs are actionable."""
-    stripped = text.strip()
-    m = _FENCE_RE.search(stripped)
-    if m:
-        stripped = m.group(1).strip()
-    try:
-        return json.loads(stripped)
-    except json.JSONDecodeError as e:
-        log.error("body_image.claude_parse_failed", text=text[:400])
-        raise RuntimeError(f"Claude returned non-JSON: {e}") from e
+def rate_claude_surface(jpeg_bytes: bytes, anchors: list[bytes], anchor_scores: dict[str, int]) -> dict[str, Any]:
+    prompt = _rubric.surface_prompt(**_common.anchor_kwargs(anchor_scores))
+    dims = _call(prompt, jpeg_bytes, anchors)
+    return _common.shape_result("claude_surface", dims)

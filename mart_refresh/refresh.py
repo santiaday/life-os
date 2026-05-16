@@ -18,12 +18,15 @@ from lifeos_core.logging import get_logger
 from lifeos_core.runs import ingestion_run
 from lifeos_core.settings import settings
 from mart_refresh.sql import (
+    INSERT_MART_BODY_IMAGE_DAILY,
     INSERT_MART_DAILY,
     INSERT_MART_MEAL,
     INSERT_MART_WEEKLY,
+    TRUNCATE_MART_BODY_IMAGE_DAILY,
     TRUNCATE_MART_DAILY,
     TRUNCATE_MART_MEAL,
     TRUNCATE_MART_WEEKLY,
+    UPDATE_MART_DAILY_BODY_IMAGE,
 )
 
 log = get_logger(__name__)
@@ -53,6 +56,22 @@ def refresh_mart_weekly() -> int:
         return int(cur.fetchone()["n"])
 
 
+def refresh_mart_body_image_daily() -> int:
+    """Rebuild the per-day body-image rollup AND patch the body_image_*
+    columns onto mart_daily. Lives in its own transaction so a body-image
+    table being empty (early days) can't roll back the main mart refresh."""
+    with tx() as c, c.cursor() as cur:
+        cur.execute(TRUNCATE_MART_BODY_IMAGE_DAILY)
+        cur.execute(INSERT_MART_BODY_IMAGE_DAILY)
+        cur.execute("SELECT COUNT(*) AS n FROM mart_body_image_daily")
+        n = int(cur.fetchone()["n"])
+        # Patch the mirror columns on mart_daily so correlate_metrics
+        # can see body-image data. UPDATE must come after mart_daily is
+        # rebuilt — refresh_all sequences this correctly.
+        cur.execute(UPDATE_MART_DAILY_BODY_IMAGE)
+        return n
+
+
 def refresh_all() -> dict:
     """Returns per-table rowcounts and timings."""
     out: dict = {}
@@ -60,6 +79,9 @@ def refresh_all() -> dict:
         for name, fn in [
             ("mart_daily", refresh_mart_daily),
             ("mart_meal", refresh_mart_meal),
+            # mart_body_image_daily must come AFTER mart_daily so the
+            # UPDATE step patches a freshly-rebuilt mart_daily row set.
+            ("mart_body_image_daily", refresh_mart_body_image_daily),
             ("mart_weekly", refresh_mart_weekly),
         ]:
             t0 = time.perf_counter()

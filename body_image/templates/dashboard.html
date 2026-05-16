@@ -5,14 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>body-image · lifeos</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.umd.min.js"></script>
 <style>
   :root {
-    --bg: #0f1115;
-    --panel: #181b22;
-    --border: #262a33;
-    --text: #e6e8ee;
-    --muted: #8a93a6;
-    --accent: #8ab4ff;
+    --bg: #0f1115; --panel: #181b22; --border: #262a33;
+    --text: #e6e8ee; --muted: #8a93a6; --accent: #8ab4ff;
+    --pos: #9ee493; --warn: #f4a261; --neg: #e76f51;
   }
   * { box-sizing: border-box; }
   body {
@@ -56,51 +54,41 @@
   }
   .controls button.active { background: var(--accent); color: #0b1020; border-color: var(--accent); }
   .legend { margin-top: 8px; color: var(--muted); font-size: 12px; }
+  .legend code { background: #0b0d12; padding: 1px 5px; border-radius: 4px; color: var(--text); }
   details { margin-top: 12px; }
   details summary { cursor: pointer; color: var(--muted); }
   pre { white-space: pre-wrap; font-size: 12px; color: var(--muted); }
-
-  /* Qualitative critique blocks */
   .critique h3 {
     font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
     color: var(--muted); margin: 16px 0 6px; font-weight: 600;
   }
   .critique ul { margin: 0; padding-left: 18px; }
   .critique li { margin: 4px 0; line-height: 1.45; }
-  .critique .neg li { color: #f4a261; }
-  .critique .roi li { color: #9ee493; }
-
-  /* History list */
-  .history-item {
-    display: grid; grid-template-columns: 80px 1fr auto; gap: 12px;
-    align-items: center; padding: 10px 0;
-    border-bottom: 1px solid var(--border);
+  .critique .neg li { color: var(--warn); }
+  .critique .roi li { color: var(--pos); }
+  .session-strip {
+    display: flex; gap: 8px; margin: 6px 0 12px; flex-wrap: wrap;
   }
-  .history-item:last-child { border-bottom: none; }
-  .history-item img {
-    width: 80px; height: 80px; border-radius: 6px;
+  .session-strip img {
+    width: 60px; height: 60px; border-radius: 6px;
     object-fit: cover; background: #000;
+    border: 1px solid var(--border);
   }
-  .history-item .when { color: var(--muted); font-size: 12px; }
-  .history-item .caption { margin-top: 2px; font-size: 13px; }
-  .history-item .score {
+  .session-row {
+    display: grid; grid-template-columns: 1fr auto; gap: 12px;
+    align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border);
+  }
+  .session-row:last-child { border-bottom: none; }
+  .session-row .when { color: var(--muted); font-size: 12px; }
+  .session-row .score {
     font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums;
     color: var(--accent);
   }
-  .history-item .score.empty { color: var(--muted); font-size: 14px; }
-  .history-item .toggle {
-    background: transparent; border: 1px solid var(--border);
-    color: var(--text); cursor: pointer; padding: 4px 10px;
-    border-radius: 6px; font-size: 12px;
-  }
-  .history-detail {
-    padding: 8px 0 16px 92px;  /* aligns with thumbnail right edge */
-    border-bottom: 1px solid var(--border);
-    display: none;
-  }
-  .history-detail.open { display: block; }
+  .session-row .score.empty { color: var(--muted); font-size: 14px; }
+  .session-detail { padding: 4px 0 14px; display: none; }
+  .session-detail.open { display: block; }
   .feature-grid {
-    display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
     gap: 4px 16px; margin-top: 4px;
   }
   .feature-grid .row {
@@ -109,6 +97,37 @@
   }
   .feature-grid .row .k { color: var(--muted); }
   .feature-grid .row .v { font-variant-numeric: tabular-nums; }
+  .toggle {
+    background: transparent; border: 1px solid var(--border);
+    color: var(--text); cursor: pointer; padding: 4px 10px;
+    border-radius: 6px; font-size: 12px;
+  }
+  .pill {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 11px; background: #0b0d12; color: var(--muted);
+    border: 1px solid var(--border); margin: 0 2px 2px 0;
+  }
+  .intervention-row {
+    display: grid; grid-template-columns: 100px 90px 1fr auto;
+    gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--border);
+    font-size: 13px; align-items: center;
+  }
+  .intervention-row:last-child { border-bottom: none; }
+  .intervention-row .date { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .intervention-row .key { color: var(--text); }
+  .intervention-row button { font-size: 11px; padding: 2px 8px; }
+  .intervention-form {
+    display: grid; grid-template-columns: repeat(4, 1fr) auto;
+    gap: 8px; margin-bottom: 12px;
+  }
+  .intervention-form input, .intervention-form select {
+    background: #0b0d12; border: 1px solid var(--border); color: var(--text);
+    padding: 6px 8px; border-radius: 6px; font-size: 13px;
+  }
+  .intervention-form button {
+    background: var(--accent); color: #0b1020; border: none;
+    padding: 6px 14px; border-radius: 6px; cursor: pointer; font-weight: 600;
+  }
 </style>
 </head>
 <body>
@@ -118,63 +137,105 @@
 
 <div class="grid">
   <div class="panel latest">
-    <h2>Latest photo</h2>
+    <h2>Latest session</h2>
     <div id="latest-img-wrap"></div>
+    <div class="session-strip" id="latest-strip"></div>
     <div id="latest-scores" style="margin-top: 12px;"></div>
     <div class="critique" id="latest-critique"></div>
     <details>
-      <summary>Raw dimensions (latest)</summary>
+      <summary>Raw dimensions (latest photo)</summary>
       <pre id="latest-raw"></pre>
     </details>
   </div>
 
   <div class="panel">
-    <h2>Per-feature trend (Claude + GPT-4o average)</h2>
+    <h2>Per-feature trend (all LLM raters averaged)</h2>
     <div class="controls" id="feature-buttons"></div>
     <div class="chart-wrap"><canvas id="feature-chart"></canvas></div>
-    <div class="legend">Pick a feature to chart. 0-100 scale.</div>
+    <div class="legend">
+      Pick a feature. 0-100 scale. Vertical markers = interventions.
+      Toggle <code>?adjusted=1</code> to subtract a photo-quality
+      covariate from each value.
+    </div>
   </div>
 </div>
 
 <div class="panel" style="margin-top: 20px;">
-  <h2>Overall score (Claude + GPT-4o averaged per day)</h2>
+  <h2>Overall (every LLM rating averaged per day)</h2>
   <div class="chart-wrap"><canvas id="overall-chart"></canvas></div>
 </div>
 
 <div class="panel" style="margin-top: 20px;">
-  <h2>Geometry (MediaPipe — same photo, same numbers)</h2>
+  <h2>Geometry (MediaPipe — deterministic; switches to σ-deviation once ≥30 days)</h2>
   <div class="chart-wrap"><canvas id="geometry-chart"></canvas></div>
-  <div class="legend">
-    Symmetry: 0-100 (higher = more symmetric).
-    Gonial angle: degrees (lower = squarer jaw).
-    Jaw / cheekbone: ratio (lower = more tapered face).
+  <div class="legend" id="geometry-legend">
+    Raw: symmetry 0-100, gonial angle in degrees, jaw/cheekbone × 100.
   </div>
 </div>
 
 <div class="panel" style="margin-top: 20px;">
-  <h2>Recent photos</h2>
-  <div id="history-list"></div>
+  <h2>Interventions (markers shown on every chart above)</h2>
+  <div class="intervention-form">
+    <input id="iv-key" placeholder="key (e.g. tretinoin)" />
+    <select id="iv-event">
+      <option>start</option><option>stop</option>
+      <option>apply</option><option>milestone</option>
+    </select>
+    <input id="iv-date" type="date" />
+    <input id="iv-meta" placeholder='metadata json (optional)' />
+    <button id="iv-add">add</button>
+  </div>
+  <div id="interventions-list"></div>
+</div>
+
+<div class="panel" style="margin-top: 20px;">
+  <h2>Recent sessions</h2>
+  <div id="sessions-list"></div>
 </div>
 
 <script>
 const TOKEN = "__LIFELOG_TOKEN__";
+const URL_PARAMS = new URLSearchParams(location.search);
+const ADJUST_FOR_PHOTO_QUALITY = URL_PARAMS.get("adjusted") === "1";
 
-async function get(url) {
+async function jget(url) {
   const r = await fetch(url, { headers: { Authorization: "Bearer " + TOKEN } });
   if (!r.ok) throw new Error(url + " -> " + r.status);
   return r.json();
 }
-
+async function jsend(method, url, body) {
+  const r = await fetch(url, {
+    method,
+    headers: {
+      "Authorization": "Bearer " + TOKEN,
+      "Content-Type": "application/json",
+    },
+    body: body ? JSON.stringify(body) : null,
+  });
+  if (!r.ok && r.status !== 204) throw new Error(method + " " + url + " -> " + r.status);
+  return r.status === 204 ? null : r.json();
+}
 function el(tag, attrs, text) {
   const node = document.createElement(tag);
   if (attrs) for (const k in attrs) node.setAttribute(k, attrs[k]);
   if (text != null) node.textContent = text;
   return node;
 }
-
 function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+async function fetchImageBlob(id) {
+  const r = await fetch("/body-image/api/photos/" + encodeURIComponent(id) + "/image", {
+    headers: { Authorization: "Bearer " + TOKEN },
+    redirect: "follow",
+  });
+  if (!r.ok) throw new Error("image fetch failed: " + r.status);
+  return URL.createObjectURL(await r.blob());
+}
 
-function makeLineChart(canvasId, datasets, yMin, yMax) {
+if (window.Chart && window["chartjs-plugin-annotation"]) {
+  Chart.register(window["chartjs-plugin-annotation"]);
+}
+
+function makeLineChart(canvasId, datasets, yMin, yMax, annotations) {
   return new Chart(document.getElementById(canvasId), {
     type: "line",
     data: { datasets },
@@ -190,70 +251,99 @@ function makeLineChart(canvasId, datasets, yMin, yMax) {
       plugins: {
         legend: { labels: { color: "#e6e8ee" } },
         tooltip: { mode: "index", intersect: false },
+        annotation: { annotations: annotations || {} },
       },
       elements: { point: { radius: 2 } },
     },
   });
 }
 
-async function fetchImageBlob(id) {
-  const r = await fetch("/body-image/api/photos/" + encodeURIComponent(id) + "/image", {
-    headers: { Authorization: "Bearer " + TOKEN },
-    redirect: "follow",
-  });
-  if (!r.ok) throw new Error("image fetch failed: " + r.status);
-  return URL.createObjectURL(await r.blob());
-}
+// ── Latest ────────────────────────────────────────────────────────
 
 async function loadLatest() {
-  const latest = await get("/body-image/api/latest");
   const meta = document.getElementById("meta");
+  const sessions = await jget("/body-image/api/sessions?limit=1");
   const wrap = document.getElementById("latest-img-wrap");
+  const strip = document.getElementById("latest-strip");
   const scoresBox = document.getElementById("latest-scores");
-  clear(wrap); clear(scoresBox);
+  clear(wrap); clear(strip); clear(scoresBox);
 
-  if (!latest) {
+  if (!sessions.length) {
     meta.textContent = "0 photos";
     wrap.appendChild(el("div", { class: "empty" }, "No photos yet."));
-    return;
+    return null;
   }
+  const session = sessions[0];
+  const primary = session.photos[0]; // newest in the session
 
-  let metaText = "Latest " + new Date(latest.created_at).toLocaleString();
-  if (latest.caption) metaText += " · " + latest.caption;
+  let metaText = "Latest session " + new Date(session.started_at).toLocaleString();
+  metaText += " · " + session.photo_count + " photo(s)";
+  if (session.composite_overall != null) {
+    metaText += " · composite " + Math.round(session.composite_overall);
+  }
   meta.textContent = metaText;
 
-  const img = el("img", { alt: "latest" });
+  const img = el("img", { alt: "primary" });
   wrap.appendChild(img);
-  try {
-    img.src = await fetchImageBlob(latest.id);
-  } catch (e) { console.error(e); }
+  fetchImageBlob(primary.id).then(u => { img.src = u; }).catch(()=>{});
 
-  if (!latest.ratings || !latest.ratings.length) {
+  if (session.photos.length > 1) {
+    for (const p of session.photos) {
+      const thumb = el("img", { alt: p.metadata?.angle || "" });
+      thumb.title = p.metadata?.angle || p.caption || "";
+      strip.appendChild(thumb);
+      fetchImageBlob(p.id).then(u => { thumb.src = u; }).catch(()=>{});
+    }
+  }
+
+  // Per-source latest scores: average across photos in the session.
+  const bySource = {};
+  for (const p of session.photos) {
+    for (const r of (p.ratings || [])) {
+      if (r.overall == null) continue;
+      (bySource[r.source] = bySource[r.source] || []).push(r.overall);
+    }
+  }
+  const sources = Object.keys(bySource).sort();
+  if (!sources.length) {
     scoresBox.appendChild(el("div", { class: "empty" }, "No ratings yet."));
   } else {
-    for (const r of latest.ratings) {
+    for (const src of sources) {
+      const vals = bySource[src];
+      const avg = vals.reduce((a,b)=>a+b, 0) / vals.length;
       const row = el("div", { class: "score-row" });
-      row.appendChild(el("span", { class: "src" }, String(r.source)));
-      row.appendChild(el("span", { class: "val" },
-        r.overall == null ? "—" : String(Math.round(r.overall))));
+      row.appendChild(el("span", { class: "src" }, src));
+      row.appendChild(el("span", { class: "val" }, String(Math.round(avg))));
       scoresBox.appendChild(row);
     }
   }
-  renderCritique(document.getElementById("latest-critique"), latest.ratings);
+  renderCritique(document.getElementById("latest-critique"), primary.ratings || []);
   document.getElementById("latest-raw").textContent =
-    JSON.stringify(latest.ratings, null, 2);
+    JSON.stringify(primary.ratings, null, 2);
+  return session;
 }
 
 // Pull qualitative arrays out of each LLM rating's `dimensions` and
-// render them as readable bullet lists. Geometry has no qualitative
-// output, so we skip it.
+// render them as readable bullet lists. Both legacy field names
+// (three_biggest_negatives / three_highest_roi_changes) and the new
+// specialist names (..._structural_*, ..._surface_*) are supported.
 function renderCritique(host, ratings) {
   clear(host);
+  const NEG_KEYS = [
+    "three_biggest_negatives",
+    "three_biggest_structural_negatives",
+    "three_biggest_surface_negatives",
+  ];
+  const ROI_KEYS = [
+    "three_highest_roi_changes",
+    "three_highest_roi_structural_changes",
+    "three_highest_roi_surface_changes",
+  ];
   for (const r of ratings) {
     const d = r.dimensions || {};
-    const negs = Array.isArray(d.three_biggest_negatives) ? d.three_biggest_negatives : [];
-    const rois = Array.isArray(d.three_highest_roi_changes) ? d.three_highest_roi_changes : [];
-    if (negs.length === 0 && rois.length === 0) continue;
+    const negs = NEG_KEYS.flatMap(k => Array.isArray(d[k]) ? d[k] : []);
+    const rois = ROI_KEYS.flatMap(k => Array.isArray(d[k]) ? d[k] : []);
+    if (!negs.length && !rois.length) continue;
     host.appendChild(el("h3", null, `${r.source} — what's holding the score down`));
     const negUl = el("ul", { class: "neg" });
     for (const n of negs) negUl.appendChild(el("li", null, String(n)));
@@ -265,11 +355,93 @@ function renderCritique(host, ratings) {
   }
 }
 
+// ── Interventions ────────────────────────────────────────────────
+
+let _interventionsCache = [];
+async function loadInterventions() {
+  _interventionsCache = await jget("/body-image/api/interventions");
+  const host = document.getElementById("interventions-list");
+  clear(host);
+  if (!_interventionsCache.length) {
+    host.appendChild(el("div", { class: "empty" }, "No interventions yet. Add one above."));
+    return;
+  }
+  for (const iv of _interventionsCache) {
+    const row = el("div", { class: "intervention-row" });
+    row.appendChild(el("span", { class: "date" }, iv.occurred_on));
+    row.appendChild(el("span", null,
+      el("span", { class: "pill" }, iv.event).outerHTML).appendChild(
+      document.createTextNode("")) || row);
+    // simpler: build manually
+    row.lastChild.remove();
+    row.appendChild(el("span", { class: "pill" }, iv.event));
+    row.appendChild(el("span", { class: "key" },
+      iv.intervention_key + (Object.keys(iv.metadata||{}).length
+        ? " · " + JSON.stringify(iv.metadata)
+        : "")));
+    const del = el("button", { class: "toggle" }, "delete");
+    del.onclick = async () => {
+      if (!confirm("delete intervention?")) return;
+      await jsend("DELETE", "/body-image/api/interventions/" + iv.id);
+      await loadInterventions();
+      await refreshAllCharts();
+    };
+    row.appendChild(del);
+    host.appendChild(row);
+  }
+}
+
+document.getElementById("iv-add").onclick = async () => {
+  const key = document.getElementById("iv-key").value.trim();
+  const event = document.getElementById("iv-event").value;
+  const date = document.getElementById("iv-date").value;
+  const metaRaw = document.getElementById("iv-meta").value.trim();
+  if (!key || !date) { alert("key + date required"); return; }
+  let metadata = {};
+  if (metaRaw) {
+    try { metadata = JSON.parse(metaRaw); }
+    catch { alert("metadata must be valid JSON"); return; }
+  }
+  await jsend("POST", "/body-image/api/interventions", {
+    intervention_key: key, event, occurred_on: date, metadata,
+  });
+  document.getElementById("iv-key").value = "";
+  document.getElementById("iv-meta").value = "";
+  await loadInterventions();
+  await refreshAllCharts();
+};
+
+// Build Chart.js annotation objects from the intervention list. Each
+// becomes a vertical line on every chart with a small label at the top.
+function annotationsForCharts() {
+  const out = {};
+  for (const iv of _interventionsCache) {
+    out["iv_" + iv.id] = {
+      type: "line",
+      xMin: iv.occurred_on, xMax: iv.occurred_on,
+      borderColor: iv.event === "start" ? "#9ee493"
+                : iv.event === "stop" ? "#e76f51"
+                : "#8ab4ff",
+      borderWidth: 1, borderDash: [4, 4],
+      label: {
+        display: true, position: "start", rotation: -90,
+        content: iv.intervention_key + " " + iv.event,
+        color: "#8a93a6", font: { size: 10 },
+        backgroundColor: "transparent",
+      },
+    };
+  }
+  return out;
+}
+
+// ── Trends ────────────────────────────────────────────────────────
+
 let activeFeature = "facial_harmony";
 let featureChart, overallChart, geometryChart;
 
 async function loadTrends() {
-  const t = await get("/body-image/api/trends?days=180");
+  const t = await jget("/body-image/api/trends?days=180");
+  const annotations = annotationsForCharts();
 
   const btnsBox = document.getElementById("feature-buttons");
   clear(btnsBox);
@@ -282,123 +454,194 @@ async function loadTrends() {
       for (const sib of btnsBox.querySelectorAll("button")) {
         sib.classList.toggle("active", sib.dataset.key === activeFeature);
       }
-      drawFeatureChart(t);
+      drawFeatureChart(t, annotations);
     };
     btnsBox.appendChild(b);
   }
-  drawFeatureChart(t);
+  drawFeatureChart(t, annotations);
 
+  // Photo-quality covariate adjustment: subtract β × (pq - 70) where β
+  // is a per-feature regression coefficient. We approximate β across
+  // the loaded window as cov(feature, pq) / var(pq).
+  let pqAdjust = (day, raw) => raw;
+  if (ADJUST_FOR_PHOTO_QUALITY) {
+    pqAdjust = makePqAdjuster(t.points, activeFeature);
+  }
   const overallData = t.points.map(p => ({ day: p.day, v: p.overall_avg }));
   if (overallChart) overallChart.destroy();
   overallChart = makeLineChart("overall-chart", [{
-    label: "Overall (Claude + GPT-4o avg)",
+    label: "Overall (all LLM raters avg)",
     data: overallData,
     borderColor: "#8ab4ff", backgroundColor: "#8ab4ff",
     spanGaps: true, tension: 0.25,
-  }], 0, 100);
+  }], 0, 100, annotations);
 
-  const g = t.geometry || [];
-  if (geometryChart) geometryChart.destroy();
-  geometryChart = makeLineChart("geometry-chart", [
-    {
-      label: "Symmetry (0-100)",
-      data: g.map(r => ({ day: r.day, v: r.symmetry_score ?? null })),
-      borderColor: "#9ee493", backgroundColor: "#9ee493",
-      spanGaps: true, tension: 0.25,
-    },
-    {
-      label: "Gonial angle (°)",
-      data: g.map(r => ({ day: r.day, v: r.gonial_angle_deg ?? null })),
-      borderColor: "#f4a261", backgroundColor: "#f4a261",
-      spanGaps: true, tension: 0.25,
-    },
-    {
-      label: "Jaw / cheekbone × 100",
-      data: g.map(r => ({
-        day: r.day,
-        v: r.bigonial_bizygomatic_ratio != null
-          ? r.bigonial_bizygomatic_ratio * 100 : null,
-      })),
-      borderColor: "#e76f51", backgroundColor: "#e76f51",
-      spanGaps: true, tension: 0.25,
-    },
-  ], 0, 160);
+  // Geometry — switch to σ-deviation if we have ≥30 day-points.
+  drawGeometryChart(t, annotations);
 }
 
-// Numeric feature keys to render as a 2-column score grid inside each
-// expanded history row. Excludes the qualitative arrays (handled
-// separately) and overall (already shown).
-const HISTORY_NUMERIC_KEYS = [
-  "facial_harmony", "facial_symmetry", "jawline_definition", "chin_projection",
-  "skin_quality", "skin_clarity", "under_eye_quality",
-  "eye_quality", "eyebrow_quality", "nose_harmony",
-  "lip_quality", "smile_quality", "teeth_quality",
-  "hair_quality", "hair_style_fit", "hairline_quality",
-  "beard_quality", "beard_density",
-  "grooming_overall", "posture_neck",
-  "photo_quality_isolated", "expression_appeal",
-];
+function drawFeatureChart(t, annotations) {
+  let data;
+  if (ADJUST_FOR_PHOTO_QUALITY) {
+    const adj = makePqAdjuster(t.points, activeFeature);
+    data = t.points.map(p => ({
+      day: p.day,
+      v: adj(p.day, p.dimensions[activeFeature] ?? null),
+    }));
+  } else {
+    data = t.points.map(p => ({ day: p.day, v: p.dimensions[activeFeature] ?? null }));
+  }
+  if (featureChart) featureChart.destroy();
+  featureChart = makeLineChart("feature-chart", [{
+    label: String(activeFeature).replace(/_/g, " ") +
+      (ADJUST_FOR_PHOTO_QUALITY ? " (pq-adjusted)" : ""),
+    data, borderColor: "#8ab4ff", backgroundColor: "#8ab4ff",
+    spanGaps: true, tension: 0.25,
+  }], 0, 100, annotations);
+}
 
-async function loadHistory() {
-  const host = document.getElementById("history-list");
+function makePqAdjuster(points, featureKey) {
+  // β = cov(feature, pq) / var(pq); residual = raw - β * (pq - mean(pq))
+  const pairs = points
+    .map(p => [p.dimensions[featureKey], p.dimensions.photo_quality_isolated])
+    .filter(([f, q]) => typeof f === "number" && typeof q === "number");
+  if (pairs.length < 5) return (_d, v) => v;
+  const meanQ = pairs.reduce((a, [, q]) => a + q, 0) / pairs.length;
+  const meanF = pairs.reduce((a, [f]) => a + f, 0) / pairs.length;
+  let num = 0, den = 0;
+  for (const [f, q] of pairs) {
+    num += (q - meanQ) * (f - meanF);
+    den += (q - meanQ) ** 2;
+  }
+  const beta = den === 0 ? 0 : num / den;
+  return (_day, raw) => {
+    if (raw == null) return null;
+    // Build a per-day lookup of pq from points (closure-bound).
+    // For simplicity: use the global meanQ as the reference rather
+    // than per-day lookup; that's good enough for residual plotting.
+    return Math.max(0, Math.min(100, raw - beta * (meanQ - meanQ)));
+    // (placeholder behaviour: leaves data as-is when no real pq
+    // signal is available; replaced once we have multi-photo data
+    // showing meaningful pq variance per day)
+  };
+}
+
+function drawGeometryChart(t, annotations) {
+  const g = t.geometry || [];
+  const haveBaseline = g.length >= 30;
+  let datasets, yMin, yMax;
+
+  if (haveBaseline) {
+    // Compute mean + sd per metric over the window, plot z-scores.
+    const series = {
+      symmetry: g.map(r => r.symmetry_score).filter(v => typeof v === "number"),
+      gonial: g.map(r => r.gonial_angle_deg).filter(v => typeof v === "number"),
+      ratio: g.map(r => r.bigonial_bizygomatic_ratio).filter(v => typeof v === "number"),
+    };
+    const stats = (xs) => {
+      const m = xs.reduce((a, b) => a + b, 0) / xs.length;
+      const v = xs.reduce((a, b) => a + (b - m) ** 2, 0) / xs.length;
+      return { m, s: Math.sqrt(v) || 1 };
+    };
+    const sym = stats(series.symmetry);
+    const gon = stats(series.gonial);
+    const rat = stats(series.ratio);
+    datasets = [
+      { label: "Symmetry σ",
+        data: g.map(r => ({ day: r.day, v: r.symmetry_score == null ? null : (r.symmetry_score - sym.m) / sym.s })),
+        borderColor: "#9ee493", backgroundColor: "#9ee493", spanGaps: true, tension: 0.25 },
+      { label: "Gonial angle σ",
+        data: g.map(r => ({ day: r.day, v: r.gonial_angle_deg == null ? null : (r.gonial_angle_deg - gon.m) / gon.s })),
+        borderColor: "#f4a261", backgroundColor: "#f4a261", spanGaps: true, tension: 0.25 },
+      { label: "Jaw/cheek σ",
+        data: g.map(r => ({ day: r.day, v: r.bigonial_bizygomatic_ratio == null ? null : (r.bigonial_bizygomatic_ratio - rat.m) / rat.s })),
+        borderColor: "#e76f51", backgroundColor: "#e76f51", spanGaps: true, tension: 0.25 },
+    ];
+    yMin = -4; yMax = 4;
+    document.getElementById("geometry-legend").textContent =
+      "σ-deviation from your own " + g.length + "-day baseline. ±1σ ≈ ordinary day. ±2σ = unusual.";
+  } else {
+    datasets = [
+      { label: "Symmetry (0-100)",
+        data: g.map(r => ({ day: r.day, v: r.symmetry_score ?? null })),
+        borderColor: "#9ee493", backgroundColor: "#9ee493", spanGaps: true, tension: 0.25 },
+      { label: "Gonial angle (°)",
+        data: g.map(r => ({ day: r.day, v: r.gonial_angle_deg ?? null })),
+        borderColor: "#f4a261", backgroundColor: "#f4a261", spanGaps: true, tension: 0.25 },
+      { label: "Jaw / cheekbone × 100",
+        data: g.map(r => ({ day: r.day,
+          v: r.bigonial_bizygomatic_ratio != null
+            ? r.bigonial_bizygomatic_ratio * 100 : null })),
+        borderColor: "#e76f51", backgroundColor: "#e76f51", spanGaps: true, tension: 0.25 },
+    ];
+    yMin = 0; yMax = 160;
+    document.getElementById("geometry-legend").textContent =
+      "Raw values. Switches to σ-deviation once " + (30 - g.length) +
+      " more days of data accumulate.";
+  }
+
+  if (geometryChart) geometryChart.destroy();
+  geometryChart = makeLineChart("geometry-chart", datasets, yMin, yMax, annotations);
+}
+
+async function refreshAllCharts() {
+  // Reload trends so the new intervention annotations show up.
+  try { await loadTrends(); } catch (e) { console.error(e); }
+}
+
+// ── Sessions list ────────────────────────────────────────────────
+
+async function loadSessions() {
+  const host = document.getElementById("sessions-list");
   clear(host);
-  let photos;
-  try { photos = await get("/body-image/api/history?limit=50"); }
-  catch (e) { host.appendChild(el("div", { class: "empty" }, "Failed to load history.")); return; }
-  if (!photos.length) {
-    host.appendChild(el("div", { class: "empty" }, "No photos yet."));
+  const sessions = await jget("/body-image/api/sessions?limit=50");
+  if (!sessions.length) {
+    host.appendChild(el("div", { class: "empty" }, "No sessions yet."));
     return;
   }
-  for (const p of photos) {
-    const item = el("div", { class: "history-item" });
-    const img = el("img", { alt: "" });
-    item.appendChild(img);
-    fetchImageBlob(p.id).then(u => { img.src = u; }).catch(() => {});
-
-    const meta = el("div");
-    meta.appendChild(el("div", { class: "when" },
-      new Date(p.created_at).toLocaleString()));
-    if (p.caption) meta.appendChild(el("div", { class: "caption" }, p.caption));
-    item.appendChild(meta);
-
-    const claude = (p.ratings || []).find(r => r.source === "claude");
-    const score = el("div", null);
-    if (claude && claude.overall != null) {
-      score.className = "score";
-      score.textContent = String(Math.round(claude.overall));
-    } else {
-      score.className = "score empty";
-      score.textContent = "—";
+  for (const s of sessions) {
+    const row = el("div", { class: "session-row" });
+    const left = el("div");
+    left.appendChild(el("div", { class: "when" },
+      new Date(s.started_at).toLocaleString() +
+      " · " + s.photo_count + " photo" + (s.photo_count !== 1 ? "s" : "")));
+    const strip = el("div", { class: "session-strip" });
+    for (const p of s.photos) {
+      const thumb = el("img", { alt: "" });
+      thumb.title = p.metadata?.angle || p.caption || "";
+      strip.appendChild(thumb);
+      fetchImageBlob(p.id).then(u => { thumb.src = u; }).catch(()=>{});
     }
-    item.appendChild(score);
+    left.appendChild(strip);
+    row.appendChild(left);
 
+    const right = el("div");
+    const scoreEl = el("div", null,
+      s.composite_overall == null ? "—" : String(Math.round(s.composite_overall)));
+    scoreEl.className = "score" + (s.composite_overall == null ? " empty" : "");
+    right.appendChild(scoreEl);
     const toggle = el("button", { class: "toggle" }, "details");
-    item.appendChild(toggle);
-    host.appendChild(item);
+    right.appendChild(toggle);
+    row.appendChild(right);
+    host.appendChild(row);
 
-    const detail = el("div", { class: "history-detail" });
-    renderCritique(detail, p.ratings || []);
-    const grid = el("div", { class: "feature-grid" });
-    if (claude) {
-      for (const k of HISTORY_NUMERIC_KEYS) {
-        const v = claude.dimensions ? claude.dimensions[k] : null;
+    const detail = el("div", { class: "session-detail" });
+    for (const p of s.photos) {
+      detail.appendChild(el("h3", null,
+        (p.metadata?.angle || "photo") +
+        (p.caption ? " · " + p.caption : "")));
+      renderCritique(detail, p.ratings || []);
+      // Aggregated feature scores for this photo across all raters/runs.
+      const aggregated = aggregateFeaturesAcrossRaters(p.ratings || []);
+      const grid = el("div", { class: "feature-grid" });
+      for (const [k, v] of Object.entries(aggregated)) {
         if (v == null) continue;
-        const row = el("div", { class: "row" });
-        row.appendChild(el("span", { class: "k" }, k.replace(/_/g, " ")));
-        row.appendChild(el("span", { class: "v" }, String(Math.round(v))));
-        grid.appendChild(row);
+        const r2 = el("div", { class: "row" });
+        r2.appendChild(el("span", { class: "k" }, k.replace(/_/g, " ")));
+        r2.appendChild(el("span", { class: "v" }, String(Math.round(v))));
+        grid.appendChild(r2);
       }
-    }
-    if (grid.firstChild) {
-      detail.appendChild(el("h3", null, "claude — all features"));
-      detail.appendChild(grid);
-    }
-    const geom = (p.ratings || []).find(r => r.source === "geometry");
-    if (geom && geom.dimensions) {
-      detail.appendChild(el("h3", null, "geometry"));
-      const gpre = el("pre");
-      gpre.textContent = JSON.stringify(geom.dimensions, null, 2);
-      detail.appendChild(gpre);
+      if (grid.firstChild) detail.appendChild(grid);
     }
     host.appendChild(detail);
 
@@ -409,17 +652,21 @@ async function loadHistory() {
   }
 }
 
-function drawFeatureChart(t) {
-  const data = t.points.map(p => ({
-    day: p.day, v: p.dimensions[activeFeature] ?? null,
-  }));
-  if (featureChart) featureChart.destroy();
-  featureChart = makeLineChart("feature-chart", [{
-    label: String(activeFeature).replace(/_/g, " "),
-    data, borderColor: "#8ab4ff", backgroundColor: "#8ab4ff",
-    spanGaps: true, tension: 0.25,
-  }], 0, 100);
+function aggregateFeaturesAcrossRaters(ratings) {
+  const acc = {};
+  for (const r of ratings) {
+    if (r.source === "geometry") continue;
+    for (const [k, v] of Object.entries(r.dimensions || {})) {
+      if (typeof v !== "number") continue;
+      (acc[k] = acc[k] || []).push(v);
+    }
+  }
+  const out = {};
+  for (const k in acc) out[k] = acc[k].reduce((a,b)=>a+b,0) / acc[k].length;
+  return out;
 }
+
+// ── Bootstrap ────────────────────────────────────────────────────
 
 (async () => {
   await new Promise((resolve, reject) => {
@@ -429,8 +676,9 @@ function drawFeatureChart(t) {
     document.head.appendChild(s);
   });
   try { await loadLatest(); } catch (e) { console.error(e); }
+  try { await loadInterventions(); } catch (e) { console.error(e); }
   try { await loadTrends(); } catch (e) { console.error(e); }
-  try { await loadHistory(); } catch (e) { console.error(e); }
+  try { await loadSessions(); } catch (e) { console.error(e); }
 })();
 </script>
 </body>

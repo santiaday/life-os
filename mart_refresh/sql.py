@@ -417,3 +417,81 @@ SELECT
 FROM mart_daily
 GROUP BY date_trunc('week', day);
 """
+
+
+# ---- mart_body_image_daily -------------------------------------------------
+# One row per day per user with per-feature averages across every LLM
+# rater / specialist / run, plus the deterministic geometry metrics.
+# The body_image_rating.dimensions JSONB stores feature names verbatim
+# from each rater (e.g. "skin_quality" lives inside surface specialists),
+# so we look them up across all rows for the day.
+
+TRUNCATE_MART_BODY_IMAGE_DAILY = "TRUNCATE mart_body_image_daily"
+
+INSERT_MART_BODY_IMAGE_DAILY = """
+INSERT INTO mart_body_image_daily (
+  day, user_id,
+  body_image_overall,
+  body_image_skin_quality, body_image_skin_clarity, body_image_under_eye,
+  body_image_jawline, body_image_chin,
+  body_image_eye_quality, body_image_nose_harmony, body_image_lip_quality,
+  body_image_hair_quality, body_image_hairline,
+  body_image_beard_density, body_image_grooming,
+  body_image_expression, body_image_photo_quality,
+  body_image_symmetry, body_image_gonial_angle, body_image_jaw_ratio,
+  body_image_photo_count, body_image_rating_count,
+  refreshed_at
+)
+WITH per_day AS (
+  SELECT
+    date_trunc('day', p.created_at)::date AS day,
+    p.user_id,
+    r.source, r.dimensions, r.overall
+  FROM body_image_photo p
+  JOIN body_image_rating r ON r.photo_id = p.id
+)
+SELECT
+  d.day, d.user_id,
+  AVG(d.overall) FILTER (WHERE d.source NOT IN ('geometry') AND d.overall IS NOT NULL)::numeric AS body_image_overall,
+  AVG((d.dimensions->>'skin_quality')::numeric)        FILTER (WHERE d.source NOT IN ('geometry')) AS body_image_skin_quality,
+  AVG((d.dimensions->>'skin_clarity')::numeric)        FILTER (WHERE d.source NOT IN ('geometry')) AS body_image_skin_clarity,
+  AVG((d.dimensions->>'under_eye_quality')::numeric)   FILTER (WHERE d.source NOT IN ('geometry')) AS body_image_under_eye,
+  AVG((d.dimensions->>'jawline_definition')::numeric)  FILTER (WHERE d.source NOT IN ('geometry')) AS body_image_jawline,
+  AVG((d.dimensions->>'chin_projection')::numeric)     FILTER (WHERE d.source NOT IN ('geometry')) AS body_image_chin,
+  AVG((d.dimensions->>'eye_quality')::numeric)         FILTER (WHERE d.source NOT IN ('geometry')) AS body_image_eye_quality,
+  AVG((d.dimensions->>'nose_harmony')::numeric)        FILTER (WHERE d.source NOT IN ('geometry')) AS body_image_nose_harmony,
+  AVG((d.dimensions->>'lip_quality')::numeric)         FILTER (WHERE d.source NOT IN ('geometry')) AS body_image_lip_quality,
+  AVG((d.dimensions->>'hair_quality')::numeric)        FILTER (WHERE d.source NOT IN ('geometry')) AS body_image_hair_quality,
+  AVG((d.dimensions->>'hairline_quality')::numeric)    FILTER (WHERE d.source NOT IN ('geometry')) AS body_image_hairline,
+  AVG((d.dimensions->>'beard_density')::numeric)       FILTER (WHERE d.source NOT IN ('geometry')) AS body_image_beard_density,
+  AVG((d.dimensions->>'grooming_overall')::numeric)    FILTER (WHERE d.source NOT IN ('geometry')) AS body_image_grooming,
+  AVG((d.dimensions->>'expression_appeal')::numeric)   FILTER (WHERE d.source NOT IN ('geometry')) AS body_image_expression,
+  AVG((d.dimensions->>'photo_quality_isolated')::numeric) FILTER (WHERE d.source NOT IN ('geometry')) AS body_image_photo_quality,
+  AVG((d.dimensions->>'symmetry_score')::numeric)        FILTER (WHERE d.source = 'geometry') AS body_image_symmetry,
+  AVG((d.dimensions->>'gonial_angle_deg')::numeric)      FILTER (WHERE d.source = 'geometry') AS body_image_gonial_angle,
+  AVG((d.dimensions->>'bigonial_bizygomatic_ratio')::numeric) FILTER (WHERE d.source = 'geometry') AS body_image_jaw_ratio,
+  COUNT(DISTINCT (d.day, d.user_id)) FILTER (WHERE d.source NOT IN ('geometry'))::int AS body_image_photo_count,
+  COUNT(*)::int AS body_image_rating_count,
+  now()
+FROM per_day d
+GROUP BY d.day, d.user_id;
+"""
+
+
+# Mirror the subset onto mart_daily so the existing correlate_metrics
+# MCP tool (which queries mart_daily) sees body-image columns without
+# schema awareness of the new tables.
+UPDATE_MART_DAILY_BODY_IMAGE = """
+UPDATE mart_daily md
+   SET body_image_overall       = m.body_image_overall,
+       body_image_skin_quality  = m.body_image_skin_quality,
+       body_image_skin_clarity  = m.body_image_skin_clarity,
+       body_image_under_eye     = m.body_image_under_eye,
+       body_image_jawline       = m.body_image_jawline,
+       body_image_hair_quality  = m.body_image_hair_quality,
+       body_image_symmetry      = m.body_image_symmetry,
+       body_image_photo_quality = m.body_image_photo_quality
+  FROM mart_body_image_daily m
+ WHERE md.day = m.day;
+"""
+

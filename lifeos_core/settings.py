@@ -105,17 +105,38 @@ class Settings(BaseSettings):
     PUSHPRESS_PASSWORD: str | None = None
 
     # ---- Body-image rating pipeline ----------------------------------------
-    # iOS Shortcut posts a daily headshot → Claude + GPT-4o vision + a
-    # MediaPipe geometry sidecar score it. See body_image/RUNBOOK.md.
-    # OPENAI_API_KEY is the only new dep — ANTHROPIC_API_KEY below is
-    # already used by coach.
+    # iOS Shortcut posts a session of headshots → Claude + GPT-4o + Gemini
+    # vision (each split into Structure + Surface specialist calls) + a
+    # MediaPipe geometry sidecar score them. See body_image/RUNBOOK.md.
     OPENAI_API_KEY: str | None = None
+    GEMINI_API_KEY: str | None = None
     # Supabase project URL + service-role JWT (Supabase dashboard →
     # Settings → API). Required only for body_image storage uploads;
     # the rest of LifeOS reaches Postgres directly via SUPABASE_DB_URL.
     SUPABASE_URL: str | None = None
     SUPABASE_SERVICE_KEY: str | None = None
     BODY_IMAGE_BUCKET: str = "body-image"
+
+    # Tier 1.2 — temperature=0 for stability; the model still has its
+    # own internal non-determinism, but this is the floor we can set.
+    BODY_IMAGE_RATING_TEMPERATURE: float = 0.0
+    # Tier 1.2 — N runs per rater, seeds rotated. Each run becomes a
+    # separate body_image_rating row keyed by (photo, source, run_index).
+    # The variance across runs is your model-internal noise floor. Keep
+    # at 1 for daily-photo cadence (cheap); bump to 3 to quantify floor.
+    BODY_IMAGE_RUNS_PER_RATER: int = 1
+    # Tier 2.6 — split each rater into Structure (bone/proportion) and
+    # Surface (skin/hair/grooming) specialist calls. ~70% of the
+    # per-dimension benefit at 2× cost. Disable for cost savings.
+    BODY_IMAGE_USE_SPECIALIST_CALLS: bool = True
+    # Tier 2.4 — prepend three anchor photos with known crowd-rated
+    # scores. Requires body_image/calibration/anchor_{low,mid,high}.jpg
+    # + anchor_scores.json. See body_image/calibration/README.md.
+    BODY_IMAGE_USE_CALIBRATION_ANCHORS: bool = False
+    # Number of recent body_image_photo rows that contribute to the
+    # geometry z-score baseline. Anything below this many photos uses
+    # raw values; once above, the dashboard shows σ-deviation.
+    BODY_IMAGE_GEOMETRY_BASELINE_DAYS: int = 30
 
     # ---- Coach (WOD parser + load recommender) ----------------------------
     # The coach service uses Anthropic API directly (Sonnet 4.5 for parsing

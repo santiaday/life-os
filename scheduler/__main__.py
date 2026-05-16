@@ -314,6 +314,21 @@ def build() -> BlockingScheduler:
         coalesce=True,
     )
 
+    # ---- Body-image weekly reference validation ---------------------------
+    # Runs every reference photo in body_image/calibration/validation/
+    # through the live rating pipeline and checks Pearson r against
+    # expected scores. Alerts via Pushover if r < 0.7. Skips silently
+    # when the validation directory is empty so the cron can land on
+    # the droplet before reference photos are sourced.
+    sched.add_job(
+        _body_image_validation,
+        CronTrigger(day_of_week="sun", hour=5, minute=0),
+        id="body_image_validation_weekly",
+        name="Body-image weekly reference validation",
+        max_instances=1,
+        coalesce=True,
+    )
+
     return sched
 
 
@@ -337,6 +352,22 @@ def _lifelog_stale_close() -> None:
         log.warning("scheduler.lifelog_stale_close", closed=closed)
     else:
         log.info("scheduler.lifelog_stale_close", closed=0)
+
+
+def _body_image_validation() -> None:
+    """In-process: weekly Pearson-r check on body-image reference photos.
+    Subprocess avoided — body_image.validation already handles its own
+    logging + alerting, and we want the result to land in the scheduler's
+    structured log stream rather than a child process's stdout."""
+    try:
+        from body_image.validation import run_weekly_validation
+    except ImportError:  # pragma: no cover - module optional
+        return
+    try:
+        result = run_weekly_validation()
+        log.info("scheduler.body_image_validation", **result)
+    except Exception:
+        log.exception("scheduler.body_image_validation_failed")
 
 
 def main() -> int:

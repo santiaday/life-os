@@ -1,21 +1,21 @@
-"""Body-image orchestration: photo save + parallel rater fan-out + DB write.
+"""Body-image orchestration.
 
-The whole point of this module is `process_upload`. Everything else is
-helpers for the dashboard.
+Fans out every configured LLM rater × specialist × run_index plus the
+geometry sidecar in parallel. Saves one body_image_rating row per
+(photo, source, run_index). Aggregates per-photo and per-day stats for
+the dashboard.
 
-Failure isolation:
-  - Storage upload must succeed (otherwise we have no photo to rate).
-  - Photo row insert must succeed.
-  - Rater calls are independent. Each is run on a thread (so the three
-    blocking HTTP/SDK calls happen concurrently); failures are captured
-    individually and the route still returns a 200 with the success list.
+Session bundling: the iOS Shortcut takes 3 photos (front, ¾ left, ¾
+right) in <30 seconds. Each POST can carry a `session_id` field; if
+omitted, we auto-bundle by reusing the most recent session_id from the
+same user within SESSION_BUNDLE_WINDOW_MINUTES.
 """
 
 from __future__ import annotations
 
 import io
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -25,27 +25,41 @@ from psycopg.types.json import Jsonb
 
 from lifeos_core.db import tx
 from lifeos_core.logging import get_logger
+from lifeos_core.settings import settings
 
 from . import storage
-from .raters import rate_claude, rate_geometry
-from .schemas import PhotoRow, RatingRow, TrendPoint, TrendResponse, UploadResponse
+from .raters import (
+    available_llm_raters,
+    load_anchors,
+    rate_geometry,
+)
+from .raters._rubric import (
+    ALL_LLM_FEATURES,
+    STRUCTURE_FEATURES,
+    SURFACE_FEATURES,
+)
+from .schemas import (
+    PhotoRow, RatingRow, SessionRow, TrendPoint, TrendResponse, UploadResponse,
+)
 
 log = get_logger(__name__)
 
-# Resize cap before sending to LLM raters. Cuts API cost and per-call
-# latency; LLM vision models down-sample aggressively anyway. Keep wide
-# enough that fine features (skin texture, hairline) remain legible.
+# Resize cap before LLM calls (vision models down-sample aggressively
+# anyway). Once-per-upload so every rater sees identical bytes.
 MAX_LLM_DIMENSION = 1568
+
+# Auto-bundle window. If a new photo arrives within this many minutes
+# of the most recent one for this user AND no explicit session_id was
+# sent, attach to that session.
+SESSION_BUNDLE_WINDOW_MINUTES = 10
+
+
+# ─── normalization ──────────────────────────────────────────────────
 
 
 def _normalize_for_llm(raw: bytes) -> bytes:
-    """Apply EXIF rotation and downscale to <= MAX_LLM_DIMENSION on the
-    long edge. Re-encode as JPEG quality 90.
-
-    Done once per upload (not per rater) so all three LLM calls see the
-    exact same bytes — keeps ratings comparable."""
     img = Image.open(io.BytesIO(raw))
-    img = ImageOps.exif_transpose(img)  # honor iPhone orientation tags
+    img = ImageOps.exif_transpose(img)
     if img.mode != "RGB":
         img = img.convert("RGB")
     w, h = img.size
@@ -58,27 +72,66 @@ def _normalize_for_llm(raw: bytes) -> bytes:
     return buf.getvalue()
 
 
-def _run_raters_parallel(jpeg_bytes: bytes) -> tuple[list[dict[str, Any]], list[str]]:
-    """Run raters concurrently on a thread pool.
+# ─── fan-out ────────────────────────────────────────────────────────
 
-    Why threads (not asyncio): the Anthropic SDK is sync and geometry
-    is a blocking httpx.post. Threads cost nothing here (all I/O-bound)
-    and keep the rater code flat — no async client setup, no event-loop
-    juggling.
-    """
-    raters = [
-        ("claude", lambda: rate_claude(jpeg_bytes)),
-        ("geometry", lambda: rate_geometry(jpeg_bytes)),
-        # gpt4v intentionally omitted — re-enable here when OPENAI_API_KEY
-        # is set. Rater module stays imported in raters/__init__.py.
-    ]
+
+def _build_job_list(jpeg_bytes: bytes) -> list[tuple[str, Any]]:
+    """Build a list of (job_name, callable) for every rater × specialist
+    × run_index. Geometry runs once (deterministic). Each callable
+    returns the rater's dict shape; the name is just for logging."""
+    anchors, anchor_scores = load_anchors()
+    use_specialist = settings.BODY_IMAGE_USE_SPECIALIST_CALLS
+    runs = max(1, settings.BODY_IMAGE_RUNS_PER_RATER)
+
+    jobs: list[tuple[str, Any]] = []
+    for name, struct_fn, surf_fn in available_llm_raters():
+        for run_index in range(1, runs + 1):
+            # Closure capture: bind run_index now, not at call time.
+            def _wrap(fn, idx=run_index, label=name):
+                def _go():
+                    # gpt4v accepts a seed kwarg for variance estimation;
+                    # claude doesn't (Anthropic API has no seed param);
+                    # gemini also ignores. Just call and let signature
+                    # mismatches surface as TypeErrors caught upstream.
+                    if label == "gpt4v":
+                        result = fn(jpeg_bytes, anchors, anchor_scores, seed=idx)
+                    else:
+                        result = fn(jpeg_bytes, anchors, anchor_scores)
+                    result["run_index"] = idx
+                    return result
+                return _go
+            if use_specialist:
+                jobs.append((f"{name}_structure_run{run_index}", _wrap(struct_fn)))
+                jobs.append((f"{name}_surface_run{run_index}", _wrap(surf_fn)))
+            else:
+                # When specialist calls are disabled, use the structure
+                # function only (it returns the full holistic JSON in
+                # that mode by convention). The rubric for structure is
+                # still narrower than the original combined rubric, so
+                # this is mostly a cost-saving fallback.
+                jobs.append((f"{name}_run{run_index}", _wrap(struct_fn)))
+
+    # Geometry — deterministic, single call, no run_index.
+    def _geom():
+        r = rate_geometry(jpeg_bytes)
+        r["run_index"] = 1
+        return r
+    jobs.append(("geometry", _geom))
+
+    return jobs
+
+
+def _run_raters_parallel(jpeg_bytes: bytes) -> tuple[list[dict[str, Any]], list[str]]:
+    jobs = _build_job_list(jpeg_bytes)
     successes: list[dict[str, Any]] = []
     failures: list[str] = []
-    with ThreadPoolExecutor(max_workers=len(raters)) as pool:
-        futures = {pool.submit(fn): name for name, fn in raters}
+    if not jobs:
+        return successes, failures
+    with ThreadPoolExecutor(max_workers=min(len(jobs), 16)) as pool:
+        futures = {pool.submit(fn): name for name, fn in jobs}
         for fut, name in futures.items():
             try:
-                result = fut.result(timeout=60)
+                result = fut.result(timeout=120)
                 if result is None:
                     failures.append(f"{name}: returned None")
                     continue
@@ -89,54 +142,86 @@ def _run_raters_parallel(jpeg_bytes: bytes) -> tuple[list[dict[str, Any]], list[
     return successes, failures
 
 
+# ─── session helpers ────────────────────────────────────────────────
+
+
+def _resolve_session_id(user_id: str, explicit_session_id: UUID | None) -> UUID:
+    if explicit_session_id is not None:
+        return explicit_session_id
+    # Auto-bundle: reuse the most recent session if within the window.
+    cutoff = datetime.now(UTC) - timedelta(minutes=SESSION_BUNDLE_WINDOW_MINUTES)
+    with tx() as c, c.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT session_id
+              FROM body_image_photo
+             WHERE user_id = %s
+               AND session_id IS NOT NULL
+               AND created_at >= %s
+             ORDER BY created_at DESC
+             LIMIT 1
+            """,
+            [user_id, cutoff],
+        )
+        row = cur.fetchone()
+    if row and row.get("session_id"):
+        return row["session_id"]
+    return uuid4()
+
+
+# ─── main entry point ──────────────────────────────────────────────
+
+
 def process_upload(
     user_id: str,
     *,
     photo_bytes: bytes,
     caption: str | None,
     device: str | None,
+    session_id: UUID | None = None,
+    angle: str | None = None,
 ) -> UploadResponse:
-    """End-to-end: normalize → upload to Storage → insert photo →
-    fan-out raters → insert ratings.
-
-    Storage failure short-circuits (no photo, no point in rating).
-    Rater failures are collected and returned to the caller.
-    """
     normalized = _normalize_for_llm(photo_bytes)
     photo_id = uuid4()
+    resolved_session = _resolve_session_id(user_id, session_id)
     day = datetime.now(UTC).date().isoformat()
     storage_path = f"raw/{day}/{photo_id}.jpg"
 
-    # 1. Upload — must succeed or we abort.
+    # 1. Upload — must succeed.
     storage.upload(storage_path, normalized, content_type="image/jpeg")
 
     # 2. Photo row.
     metadata: dict[str, Any] = {}
     if device:
         metadata["device"] = device
+    if angle:
+        metadata["angle"] = angle  # 'front' | 'three_quarter_left' | 'three_quarter_right'
     with tx() as c, c.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO body_image_photo (id, user_id, storage_path, caption, metadata)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO body_image_photo
+              (id, user_id, storage_path, caption, metadata, session_id)
+            VALUES (%s, %s, %s, %s, %s, %s)
             """,
-            [str(photo_id), user_id, storage_path, caption, Jsonb(metadata)],
+            [
+                str(photo_id), user_id, storage_path, caption,
+                Jsonb(metadata), str(resolved_session),
+            ],
         )
 
     # 3. Rater fan-out.
     successes, failures = _run_raters_parallel(normalized)
 
-    # 4. Insert ratings.
+    # 4. Insert ratings (idempotent on (photo, source, run_index)).
     if successes:
         with tx() as c, c.cursor() as cur:
             for r in successes:
-                overall = r.get("overall")
                 cur.execute(
                     """
                     INSERT INTO body_image_rating
-                      (photo_id, source, overall, dimensions)
-                    VALUES (%s, %s, %s, %s)
-                    ON CONFLICT (photo_id, source) DO UPDATE
+                      (photo_id, source, overall, dimensions, run_index)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (photo_id, source, run_index) DO UPDATE
                       SET overall    = EXCLUDED.overall,
                           dimensions = EXCLUDED.dimensions,
                           rated_at   = now()
@@ -144,32 +229,79 @@ def process_upload(
                     [
                         str(photo_id),
                         r["source"],
-                        overall,
+                        r.get("overall"),
                         Jsonb(r.get("dimensions") or {}),
+                        int(r.get("run_index", 1)),
                     ],
                 )
 
     return UploadResponse(
         photo_id=photo_id,
+        session_id=resolved_session,
         storage_path=storage_path,
         ratings_saved=len(successes),
-        sources=[r["source"] for r in successes],
+        sources=sorted({r["source"] for r in successes}),
         failures=failures,
     )
 
 
-# ─── reads (for the dashboard) ────────────────────────────────────────────
+# ─── reads ──────────────────────────────────────────────────────────
 
 
-def fetch_history(user_id: str, limit: int = 50) -> list[PhotoRow]:
-    """Recent photos with all their ratings, newest first.
+def _row_to_rating(r: dict) -> RatingRow:
+    return RatingRow(
+        source=r["source"],
+        run_index=int(r.get("run_index") or 1),
+        overall=float(r["overall"]) if r["overall"] is not None else None,
+        dimensions=r["dimensions"] or {},
+        rated_at=r["rated_at"],
+    )
 
-    One round-trip for photos, one for ratings (grouped client-side). Avoids
-    N+1 even at limit=200."""
+
+def _row_to_photo(p: dict, ratings: list[dict]) -> PhotoRow:
+    return PhotoRow(
+        id=p["id"],
+        session_id=p.get("session_id"),
+        storage_path=p["storage_path"],
+        caption=p["caption"],
+        created_at=p["created_at"],
+        metadata=p.get("metadata") or {},
+        ratings=[_row_to_rating(r) for r in ratings],
+    )
+
+
+def fetch_latest(user_id: str) -> PhotoRow | None:
     with tx() as c, c.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
-            SELECT id, storage_path, caption, created_at
+            SELECT id, session_id, storage_path, caption, created_at, metadata
+              FROM body_image_photo
+             WHERE user_id = %s
+             ORDER BY created_at DESC LIMIT 1
+            """,
+            [user_id],
+        )
+        photo = cur.fetchone()
+        if photo is None:
+            return None
+        cur.execute(
+            """
+            SELECT source, run_index, overall, dimensions, rated_at
+              FROM body_image_rating
+             WHERE photo_id = %s
+             ORDER BY source, run_index
+            """,
+            [str(photo["id"])],
+        )
+        ratings = cur.fetchall()
+    return _row_to_photo(photo, ratings)
+
+
+def fetch_history(user_id: str, limit: int = 50) -> list[PhotoRow]:
+    with tx() as c, c.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT id, session_id, storage_path, caption, created_at, metadata
               FROM body_image_photo
              WHERE user_id = %s
              ORDER BY created_at DESC
@@ -183,124 +315,77 @@ def fetch_history(user_id: str, limit: int = 50) -> list[PhotoRow]:
         ids = [str(p["id"]) for p in photos]
         cur.execute(
             """
-            SELECT photo_id, source, overall, dimensions, rated_at
+            SELECT photo_id, source, run_index, overall, dimensions, rated_at
               FROM body_image_rating
              WHERE photo_id = ANY(%s::uuid[])
-             ORDER BY source
+             ORDER BY source, run_index
             """,
             [ids],
         )
         by_photo: dict[str, list[dict]] = {}
         for r in cur.fetchall():
             by_photo.setdefault(str(r["photo_id"]), []).append(r)
-
-    return [
-        PhotoRow(
-            id=p["id"],
-            storage_path=p["storage_path"],
-            caption=p["caption"],
-            created_at=p["created_at"],
-            ratings=[
-                RatingRow(
-                    source=r["source"],
-                    overall=float(r["overall"]) if r["overall"] is not None else None,
-                    dimensions=r["dimensions"] or {},
-                    rated_at=r["rated_at"],
-                )
-                for r in by_photo.get(str(p["id"]), [])
-            ],
-        )
-        for p in photos
-    ]
+    return [_row_to_photo(p, by_photo.get(str(p["id"]), [])) for p in photos]
 
 
-def fetch_latest(user_id: str) -> PhotoRow | None:
-    """Most recent photo + all its ratings."""
-    with tx() as c, c.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            """
-            SELECT id, storage_path, caption, created_at
-              FROM body_image_photo
-             WHERE user_id = %s
-             ORDER BY created_at DESC
-             LIMIT 1
-            """,
-            [user_id],
-        )
-        photo = cur.fetchone()
-        if photo is None:
-            return None
-        cur.execute(
-            """
-            SELECT source, overall, dimensions, rated_at
-              FROM body_image_rating
-             WHERE photo_id = %s
-             ORDER BY source
-            """,
-            [str(photo["id"])],
-        )
-        ratings = cur.fetchall()
-    return PhotoRow(
-        id=photo["id"],
-        storage_path=photo["storage_path"],
-        caption=photo["caption"],
-        created_at=photo["created_at"],
-        ratings=[
-            RatingRow(
-                source=r["source"],
-                overall=float(r["overall"]) if r["overall"] is not None else None,
-                dimensions=r["dimensions"] or {},
-                rated_at=r["rated_at"],
-            )
-            for r in ratings
-        ],
-    )
+def fetch_sessions(user_id: str, limit: int = 25) -> list[SessionRow]:
+    """Group photos by session_id; for each session report all photos
+    + composite overall. Used by the dashboard's "Recent sessions"
+    panel so 3-photo Shortcut runs render as one row."""
+    photos = fetch_history(user_id, limit=limit * 5)
+    sessions: dict[UUID, list[PhotoRow]] = {}
+    order: list[UUID] = []
+    for p in photos:
+        sid = p.session_id or p.id  # solo photos: each gets its own session
+        if sid not in sessions:
+            sessions[sid] = []
+            order.append(sid)
+        sessions[sid].append(p)
+        if len(sessions) >= limit:
+            break
+    out: list[SessionRow] = []
+    for sid in order[:limit]:
+        plist = sessions[sid]
+        all_overalls: list[float] = []
+        for p in plist:
+            for r in p.ratings:
+                if r.overall is not None and r.source != "geometry":
+                    all_overalls.append(r.overall)
+        composite = sum(all_overalls) / len(all_overalls) if all_overalls else None
+        out.append(SessionRow(
+            session_id=sid,
+            started_at=min(p.created_at for p in plist),
+            photo_count=len(plist),
+            composite_overall=composite,
+            photos=plist,
+        ))
+    return out
 
 
-# Feature keys the dashboard charts. Kept in code (not derived from
-# the JSONB) so the chart legend is stable even when a rater omits a
-# field. Must match the rubric in raters/_rubric.py.
-DASHBOARD_FEATURES: list[str] = [
-    "facial_harmony",
-    "facial_symmetry",
-    "jawline_definition",
-    "chin_projection",
-    "skin_quality",
-    "skin_clarity",
-    "under_eye_quality",
-    "eye_quality",
-    "nose_harmony",
-    "lip_quality",
-    "hair_quality",
-    "hairline_quality",
-    "grooming_overall",
-    "expression_appeal",
-]
+# ── trends ─────────────────────────────────────────────────────────
+
+
+DASHBOARD_FEATURES: list[str] = ALL_LLM_FEATURES
 
 
 def fetch_trends(user_id: str, days: int = 90) -> TrendResponse:
-    """Day-grain rollup of per-feature scores across LLM raters, plus the
-    raw geometry series. ~150 rows max even at daily cadence."""
+    """Daily per-feature averages across every LLM rater, every
+    specialist, every run. Geometry series is separate."""
     with tx() as c, c.cursor(row_factory=dict_row) as cur:
-        # LLM trends — one row per rating. Python loop below aggregates
-        # per-day across claude+gpt4v (averaging feature scores out of
-        # the JSONB dimensions column, which can't be done in SQL).
         cur.execute(
             """
             SELECT date_trunc('day', r.rated_at)::date AS day,
-                   r.dimensions,
-                   r.overall AS overall_avg
+                   r.source, r.dimensions, r.overall
               FROM body_image_rating r
               JOIN body_image_photo p ON p.id = r.photo_id
              WHERE p.user_id = %s
-               AND r.source IN ('claude', 'gpt4v')
+               AND r.source NOT IN ('geometry')
                AND r.rated_at > now() - (%s::int || ' days')::interval
              ORDER BY day
             """,
             [user_id, days],
         )
         rows = cur.fetchall()
-
         cur.execute(
             """
             SELECT date_trunc('day', r.rated_at)::date AS day,
@@ -316,38 +401,33 @@ def fetch_trends(user_id: str, days: int = 90) -> TrendResponse:
         )
         geom_rows = cur.fetchall()
 
-    # Aggregate per-feature averages per day. Done in Python because the
-    # SQL above only groups by day on the outer SELECT — features live
-    # inside the JSONB column, so we pivot here.
-    by_day: dict[str, dict[str, list[float]]] = {}
+    by_day_features: dict[str, dict[str, list[float]]] = {}
     by_day_overall: dict[str, list[float]] = {}
     for r in rows:
         day = r["day"].isoformat()
         dims = r["dimensions"] or {}
-        bucket = by_day.setdefault(day, {})
+        bucket = by_day_features.setdefault(day, {})
         for key in DASHBOARD_FEATURES:
             v = dims.get(key)
             if isinstance(v, (int, float)):
                 bucket.setdefault(key, []).append(float(v))
-        if r["overall_avg"] is not None:
-            by_day_overall.setdefault(day, []).append(float(r["overall_avg"]))
+        if r["overall"] is not None:
+            by_day_overall.setdefault(day, []).append(float(r["overall"]))
 
     points = [
         TrendPoint(
             day=day,
             overall_avg=(
                 sum(by_day_overall[day]) / len(by_day_overall[day])
-                if by_day_overall.get(day)
-                else None
+                if by_day_overall.get(day) else None
             ),
             dimensions={
                 k: (sum(v) / len(v) if v else None)
-                for k, v in by_day.get(day, {}).items()
+                for k, v in by_day_features.get(day, {}).items()
             },
         )
-        for day in sorted(by_day.keys())
+        for day in sorted(by_day_features.keys())
     ]
-
     geometry = [
         {"day": r["day"].isoformat(), **(r["dimensions"] or {})}
         for r in geom_rows
@@ -357,16 +437,16 @@ def fetch_trends(user_id: str, days: int = 90) -> TrendResponse:
         points=points,
         geometry=geometry,
         feature_keys=DASHBOARD_FEATURES,
+        structure_keys=STRUCTURE_FEATURES,
+        surface_keys=SURFACE_FEATURES,
     )
 
 
 def get_photo(user_id: str, photo_id: UUID) -> PhotoRow | None:
-    """Lookup by photo_id. Scoped to user_id so a bearer can't read
-    another user's photos once we go multi-tenant."""
     with tx() as c, c.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
-            SELECT id, storage_path, caption, created_at
+            SELECT id, session_id, storage_path, caption, created_at, metadata
               FROM body_image_photo
              WHERE user_id = %s AND id = %s
             """,
@@ -377,26 +457,12 @@ def get_photo(user_id: str, photo_id: UUID) -> PhotoRow | None:
             return None
         cur.execute(
             """
-            SELECT source, overall, dimensions, rated_at
+            SELECT source, run_index, overall, dimensions, rated_at
               FROM body_image_rating
              WHERE photo_id = %s
-             ORDER BY source
+             ORDER BY source, run_index
             """,
             [str(photo_id)],
         )
         ratings = cur.fetchall()
-    return PhotoRow(
-        id=photo["id"],
-        storage_path=photo["storage_path"],
-        caption=photo["caption"],
-        created_at=photo["created_at"],
-        ratings=[
-            RatingRow(
-                source=r["source"],
-                overall=float(r["overall"]) if r["overall"] is not None else None,
-                dimensions=r["dimensions"] or {},
-                rated_at=r["rated_at"],
-            )
-            for r in ratings
-        ],
-    )
+    return _row_to_photo(photo, ratings)

@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any
+from datetime import date, datetime
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+
+# ── photos / ratings ───────────────────────────────────────────────
 
 
 class UploadResponse(BaseModel):
     photo_id: UUID
+    session_id: UUID
     storage_path: str
     ratings_saved: int
     sources: list[str]
@@ -18,32 +22,65 @@ class UploadResponse(BaseModel):
 
 
 class RatingRow(BaseModel):
-    source: str
-    overall: float | None
+    source: str            # 'claude_structure' | 'claude_surface' | 'gpt4v_*' | 'gemini_*' | 'geometry'
+    run_index: int = 1
+    overall: float | None  # specialist's holistic score for its subset, or None (geometry)
     dimensions: dict[str, Any]
     rated_at: datetime
 
 
 class PhotoRow(BaseModel):
     id: UUID
+    session_id: UUID | None
     storage_path: str
     caption: str | None
     created_at: datetime
+    metadata: dict[str, Any] = Field(default_factory=dict)
     ratings: list[RatingRow]
 
 
+class SessionRow(BaseModel):
+    session_id: UUID
+    started_at: datetime
+    photo_count: int
+    composite_overall: float | None
+    photos: list[PhotoRow]
+
+
+# ── trends ─────────────────────────────────────────────────────────
+
+
 class TrendPoint(BaseModel):
-    """One day of per-feature scores, averaged across LLM raters."""
     day: str  # ISO date
     overall_avg: float | None
     dimensions: dict[str, float | None]
 
 
 class TrendResponse(BaseModel):
-    # 90-day series of per-feature averages across Claude + GPT-4o.
     points: list[TrendPoint]
-    # Geometry series — raw measurements, one entry per photo.
     geometry: list[dict[str, Any]]
-    # Per-feature keys present in `points[].dimensions`. Useful for the
-    # dashboard to know which chart series to render.
     feature_keys: list[str]
+    structure_keys: list[str]
+    surface_keys: list[str]
+
+
+# ── interventions ──────────────────────────────────────────────────
+
+
+InterventionEvent = Literal["start", "stop", "apply", "milestone"]
+
+
+class InterventionCreate(BaseModel):
+    intervention_key: str = Field(min_length=1, max_length=80)
+    event: InterventionEvent
+    occurred_on: date
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class Intervention(BaseModel):
+    id: int
+    intervention_key: str
+    event: InterventionEvent
+    occurred_on: date
+    metadata: dict[str, Any]
+    created_at: datetime

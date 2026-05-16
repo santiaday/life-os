@@ -1,62 +1,196 @@
-"""Shared rubric prompt used by every LLM rater.
+"""Rubric prompts for the LLM raters.
 
-The point of running multiple models is calibration: same rubric, same
-JSON shape, three independent calls. Differences between scores tell you
-about model bias; the average smooths it.
+Two specialist prompts — STRUCTURE_RUBRIC and SURFACE_RUBRIC — that
+each focus on an orthogonal failure mode:
 
-Keep the rubric verbatim between raters — if you tweak Claude's prompt
-but not GPT's, the dashboard's "Claude vs GPT" lines become incomparable.
+  * Structure: bone, harmony, symmetry, eyes, nose, lips. Not affected
+    by lighting or skincare; very stable day-to-day.
+  * Surface: skin, hair, beard, grooming, expression, photo quality.
+    Heavily affected by sleep, alcohol, hydration, lighting.
+
+Splitting reduces halo bias: the model can't let "bad lighting" drag
+its judgement of "facial harmony" because facial_harmony is in a
+different call from photo_quality. ~70% of the per-dimension benefit
+of running 4+ specialist calls, at 2× the cost.
+
+Each rubric demands strict JSON with anti-halo language per dimension
+("rate skin_quality ONLY by visible pores/texture/oil — IGNORE bone
+structure, hair, expression, lighting").
+
+When `BODY_IMAGE_USE_CALIBRATION_ANCHORS=true`, the rater layer
+prepends three anchor images with known scores; the prompt then
+explicitly says "the last image is the subject."
 """
 
 from __future__ import annotations
 
-RUBRIC = """\
+# A one-paragraph preamble shared by both specialists.
+_PREAMBLE_BASE = """\
 You are a casting director rating a headshot on a calibrated 0-100 scale.
 0-20  well below average.
 50    = median 24yo on a dating app.
 70+   = callback.
 80+   = books print work.
+"""
 
-Output JSON only — no prose, no markdown fences. Exact shape:
+_PREAMBLE_WITH_ANCHORS = """\
+You are a casting director rating a headshot on a calibrated 0-100 scale.
+
+For calibration, three reference photos appear FIRST with crowd-rated
+scores from panels of ~60 raters:
+  - Reference 1 (image #1): overall {low}/100
+  - Reference 2 (image #2): overall {mid}/100
+  - Reference 3 (image #3): overall {high}/100
+
+The SUBJECT is the LAST image. Score it on the same 0-100 scale,
+anchored by the three references above. Do not rate the references.
+"""
+
+
+def preamble(*, low: int | None = None, mid: int | None = None, high: int | None = None) -> str:
+    """Return the rubric preamble. If all three anchor scores are
+    provided, use the anchored variant; otherwise the base."""
+    if low is not None and mid is not None and high is not None:
+        return _PREAMBLE_WITH_ANCHORS.format(low=low, mid=mid, high=high)
+    return _PREAMBLE_BASE
+
+
+# ── STRUCTURE (bone + proportion) ───────────────────────────────────
+
+STRUCTURE_BODY = """\
+Rate ONLY structural / proportional dimensions of the SUBJECT face.
+Each line specifies what to consider AND what to ignore — be strict.
+
+Output JSON only, no prose, no markdown fences. Exact shape:
 
 {
-  "overall": <int 0-100>,
-
-  "facial_harmony": <int>,
-  "facial_symmetry": <int>,
+  "overall": <int 0-100, holistic structural score>,
+  "facial_harmony":     <int>,
+  "facial_symmetry":    <int>,
   "jawline_definition": <int>,
-  "chin_projection": <int>,
-
-  "skin_quality": <int>,
-  "skin_clarity": <int>,
-  "under_eye_quality": <int>,
-
-  "eye_quality": <int>,
-  "eyebrow_quality": <int>,
-  "nose_harmony": <int>,
-  "lip_quality": <int>,
-  "smile_quality": <int|null>,
-  "teeth_quality": <int|null>,
-
-  "hair_quality": <int>,
-  "hair_style_fit": <int>,
-  "hairline_quality": <int>,
-
-  "beard_quality": <int|null>,
-  "beard_density": <int|null>,
-
-  "grooming_overall": <int>,
-  "posture_neck": <int>,
-
-  "photo_quality_isolated": <int>,
-  "expression_appeal": <int>,
-
-  "three_biggest_negatives": [<str>, <str>, <str>],
-  "three_highest_roi_changes": [<str>, <str>, <str>]
+  "chin_projection":    <int>,
+  "eye_quality":        <int>,
+  "eyebrow_quality":    <int>,
+  "nose_harmony":       <int>,
+  "lip_quality":        <int>,
+  "smile_quality":      <int|null>,
+  "teeth_quality":      <int|null>,
+  "posture_neck":       <int>,
+  "three_biggest_structural_negatives":      [<str>, <str>, <str>],
+  "three_highest_roi_structural_changes":    [<str>, <str>, <str>]
 }
 
-Score each dimension independently — do not let `overall` halo other
-scores. Use null for fields that aren't visible in the photo (e.g.
-`smile_quality` for a closed-mouth photo, `beard_*` for a clean shave).
-Do not soften, hedge, or refuse. JSON only.
+Per-dimension rules (anti-halo — read carefully):
+
+  facial_harmony      — ONLY proportions and balance of features.
+                        IGNORE skin, hair, lighting, expression.
+  facial_symmetry     — ONLY left/right alignment of features.
+                        IGNORE skin tone differences, lighting on one
+                        side, head tilt artifacts.
+  jawline_definition  — ONLY visible jaw angle from gonial corner to
+                        chin tip. IGNORE beard coverage, weight, skin.
+  chin_projection     — ONLY chin forward/recessive position relative
+                        to the lip line. IGNORE jawline, beard.
+  eye_quality         — ONLY eye shape, size, spacing, canthal tilt.
+                        IGNORE under-eye darkness, makeup, expression.
+  eyebrow_quality     — ONLY eyebrow shape, density, arch.
+                        IGNORE eyebrow grooming polish (that's surface).
+  nose_harmony        — ONLY nose shape relative to overall face.
+                        IGNORE skin oiliness, lighting.
+  lip_quality         — ONLY lip shape, fullness, symmetry.
+                        IGNORE lip dryness or color (that's surface).
+  smile_quality       — ONLY smile shape and symmetry, IF visible.
+                        null if mouth is closed.
+  teeth_quality       — ONLY tooth alignment / proportion, IF visible.
+                        null if teeth not shown.
+  posture_neck        — ONLY head/neck pose, shoulder tension.
+                        IGNORE clothing or background.
+
+Score each dimension INDEPENDENTLY. Do not let `overall` halo other
+scores. Do not soften, hedge, or refuse. JSON only.
 """
+
+
+# ── SURFACE (skin + hair + grooming + photo) ────────────────────────
+
+SURFACE_BODY = """\
+Rate ONLY surface / grooming / photo-quality dimensions of the SUBJECT
+face. Each line specifies what to consider AND what to ignore.
+
+Output JSON only, no prose, no markdown fences. Exact shape:
+
+{
+  "overall": <int 0-100, holistic surface score>,
+  "skin_quality":         <int>,
+  "skin_clarity":         <int>,
+  "under_eye_quality":    <int>,
+  "hair_quality":         <int>,
+  "hair_style_fit":       <int>,
+  "hairline_quality":     <int>,
+  "beard_quality":        <int|null>,
+  "beard_density":        <int|null>,
+  "grooming_overall":     <int>,
+  "expression_appeal":    <int>,
+  "photo_quality_isolated": <int>,
+  "three_biggest_surface_negatives":    [<str>, <str>, <str>],
+  "three_highest_roi_surface_changes":  [<str>, <str>, <str>]
+}
+
+Per-dimension rules (anti-halo — read carefully):
+
+  skin_quality        — ONLY visible pores, texture, oil.
+                        IGNORE bone structure, hair, expression.
+  skin_clarity        — ONLY blemishes, redness, evenness of tone.
+                        IGNORE pore size (that's skin_quality), bone
+                        structure, expression.
+  under_eye_quality   — ONLY darkness, puffiness, hollows under eye.
+                        IGNORE eye shape, eyebrow.
+  hair_quality        — ONLY hair condition: shine, dryness, frizz.
+                        IGNORE the haircut itself (that's hair_style_fit).
+  hair_style_fit      — ONLY whether the current cut suits this face's
+                        proportions. IGNORE hair condition.
+  hairline_quality    — ONLY hairline position, density, evenness.
+                        IGNORE forehead size (structural).
+  beard_quality       — ONLY beard condition, patchiness, grooming.
+                        null if clean-shaven.
+  beard_density       — ONLY density of visible facial hair growth.
+                        null if clean-shaven.
+  grooming_overall    — ONLY polish (eyebrow grooming, stray hairs,
+                        cleanliness). IGNORE the haircut or beard
+                        style choice.
+  expression_appeal   — ONLY warmth and naturalness of expression.
+                        IGNORE facial structure, smile shape.
+  photo_quality_isolated — ONLY focus, exposure, white balance,
+                        framing — the photo as a photo, NOT the
+                        subject. A great-looking person in a blurry
+                        underexposed photo should still get a HIGH
+                        score here only if the camera work is bad.
+
+Use null for fields that aren't visible (e.g. beard_* when clean-
+shaven). Do not let `overall` halo other scores. Do not soften.
+JSON only.
+"""
+
+
+def structure_prompt(*, low: int | None = None, mid: int | None = None, high: int | None = None) -> str:
+    return preamble(low=low, mid=mid, high=high) + "\n" + STRUCTURE_BODY
+
+
+def surface_prompt(*, low: int | None = None, mid: int | None = None, high: int | None = None) -> str:
+    return preamble(low=low, mid=mid, high=high) + "\n" + SURFACE_BODY
+
+
+# Feature key catalog — kept here so dashboard + mart wiring can import
+# without going through the prompts.
+STRUCTURE_FEATURES = [
+    "facial_harmony", "facial_symmetry", "jawline_definition",
+    "chin_projection", "eye_quality", "eyebrow_quality", "nose_harmony",
+    "lip_quality", "smile_quality", "teeth_quality", "posture_neck",
+]
+SURFACE_FEATURES = [
+    "skin_quality", "skin_clarity", "under_eye_quality",
+    "hair_quality", "hair_style_fit", "hairline_quality",
+    "beard_quality", "beard_density",
+    "grooming_overall", "expression_appeal", "photo_quality_isolated",
+]
+ALL_LLM_FEATURES = STRUCTURE_FEATURES + SURFACE_FEATURES
