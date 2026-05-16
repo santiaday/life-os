@@ -75,10 +75,18 @@ def _normalize_for_llm(raw: bytes) -> bytes:
 # ─── fan-out ────────────────────────────────────────────────────────
 
 
-def _build_job_list(jpeg_bytes: bytes) -> list[tuple[str, Any]]:
+def _build_job_list(
+    jpeg_bytes: bytes, *, angle: str | None = None
+) -> list[tuple[str, Any]]:
     """Build a list of (job_name, callable) for every rater × specialist
-    × run_index. Geometry runs once (deterministic). Each callable
-    returns the rater's dict shape; the name is just for logging."""
+    × run_index. Geometry runs once (deterministic) AND only on frontal
+    photos — the symmetry math assumes a frontal pose, so a ¾ angle
+    would return symmetry_score=0 garbage that pollutes trend lines.
+
+    `angle` comes from the iOS Shortcut's per-photo form field
+    ('front' | 'three_quarter_left' | 'three_quarter_right'). When
+    unset (legacy uploads predating session support), we assume frontal
+    and run geometry — pre-multi-angle photos were always frontal."""
     anchor_pairs = load_anchors()
     use_specialist = settings.BODY_IMAGE_USE_SPECIALIST_CALLS
     runs = max(1, settings.BODY_IMAGE_RUNS_PER_RATER)
@@ -109,18 +117,22 @@ def _build_job_list(jpeg_bytes: bytes) -> list[tuple[str, Any]]:
                 # this is mostly a cost-saving fallback.
                 jobs.append((f"{name}_run{run_index}", _wrap(struct_fn)))
 
-    # Geometry — deterministic, single call, no run_index.
-    def _geom():
-        r = rate_geometry(jpeg_bytes)
-        r["run_index"] = 1
-        return r
-    jobs.append(("geometry", _geom))
+    # Geometry — deterministic, single call, no run_index. Front-only:
+    # the MediaPipe symmetry math is meaningless on ¾ poses.
+    if angle is None or angle == "front":
+        def _geom():
+            r = rate_geometry(jpeg_bytes)
+            r["run_index"] = 1
+            return r
+        jobs.append(("geometry", _geom))
 
     return jobs
 
 
-def _run_raters_parallel(jpeg_bytes: bytes) -> tuple[list[dict[str, Any]], list[str]]:
-    jobs = _build_job_list(jpeg_bytes)
+def _run_raters_parallel(
+    jpeg_bytes: bytes, *, angle: str | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    jobs = _build_job_list(jpeg_bytes, angle=angle)
     successes: list[dict[str, Any]] = []
     failures: list[str] = []
     if not jobs:
@@ -207,8 +219,8 @@ def process_upload(
             ],
         )
 
-    # 3. Rater fan-out.
-    successes, failures = _run_raters_parallel(normalized)
+    # 3. Rater fan-out (angle gates the geometry rater — see _build_job_list).
+    successes, failures = _run_raters_parallel(normalized, angle=angle)
 
     # 4. Insert ratings (idempotent on (photo, source, run_index)).
     if successes:
