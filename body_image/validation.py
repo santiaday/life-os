@@ -24,7 +24,7 @@ from datetime import datetime
 from pathlib import Path
 from statistics import mean, stdev
 
-from lifeos_core.alerts import push
+from lifeos_core.alerts import _send_pushover, _send_slack
 from lifeos_core.logging import get_logger
 
 from . import service
@@ -111,11 +111,13 @@ def run_weekly_validation() -> dict:
         deltas = sorted(per_ref, key=lambda x: abs(x["observed"] - x["expected"]), reverse=True)
         lines = [f"{r2['slug']}: want {r2['expected']:.0f}, got {r2['observed']:.0f}"
                  for r2 in deltas[:5]]
-        push(
-            title="body-image: model drift",
-            message=msg + "\n" + "\n".join(lines),
-            priority=0,
-        )
+        title = "body-image: model drift"
+        body = msg + "\n" + "\n".join(lines)
+        # Same fallback logic as lifeos_core.alerts.check_and_alert:
+        # Pushover preferred, Slack second. Both no-op silently if the
+        # corresponding token env var isn't set.
+        if not _send_pushover(title, body):
+            _send_slack(title, body)
 
     return {
         "pearson_r": r,
