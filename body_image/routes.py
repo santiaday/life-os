@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from lifelog_api.auth import current_user_id, require_token
 from lifeos_core.logging import get_logger
 
+from . import coach
 from . import interventions as interventions_service
 from . import service, storage
 from .schemas import (
@@ -179,3 +180,43 @@ def api_delete_intervention(
 ) -> None:
     if not interventions_service.delete_intervention(user_id, intervention_id):
         raise HTTPException(status_code=404, detail="intervention not found")
+
+
+# ─── recommendations (coach synthesizer) ────────────────────────────
+
+
+@router.get(
+    "/api/recommendations",
+    dependencies=[Depends(require_token)],
+)
+def api_get_recommendations(
+    user_id: str = Depends(current_user_id),
+) -> dict | None:
+    """Most-recently-generated recommendations brief, or None if the
+    user hasn't kicked one off yet. Dashboard reads this on load."""
+    return coach.fetch_latest(user_id)
+
+
+@router.post(
+    "/api/recommendations",
+    dependencies=[Depends(require_token)],
+)
+def api_generate_recommendations(
+    window_days: int = Query(default=30, ge=7, le=365),
+    user_id: str = Depends(current_user_id),
+) -> dict:
+    """Trigger a fresh synthesis. Costs one Opus call (~$0.10). Returns
+    the new brief row. The weekly scheduler cron also calls into this
+    via body_image.coach.generate_recommendations."""
+    return coach.generate_recommendations(user_id, window_days=window_days)
+
+
+@router.get(
+    "/api/recommendations/history",
+    dependencies=[Depends(require_token)],
+)
+def api_recommendations_history(
+    limit: int = Query(default=20, ge=1, le=100),
+    user_id: str = Depends(current_user_id),
+) -> list[dict]:
+    return coach.list_recent(user_id, limit=limit)

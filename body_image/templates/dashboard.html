@@ -128,6 +128,71 @@
     background: var(--accent); color: #0b1020; border: none;
     padding: 6px 14px; border-radius: 6px; cursor: pointer; font-weight: 600;
   }
+
+  /* Recommendations brief */
+  .brief-summary {
+    color: var(--text); line-height: 1.55; margin-bottom: 12px;
+    padding: 10px 14px; background: #0b0d12; border-radius: 8px;
+    border-left: 3px solid var(--accent);
+  }
+  .brief-fixed {
+    color: var(--muted); font-style: italic; font-size: 13px;
+    margin-bottom: 16px; padding: 0 4px;
+  }
+  .brief-theme {
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px; margin-bottom: 12px; background: #0d1018;
+  }
+  .brief-theme h3 {
+    font-size: 14px; margin: 0 0 4px; font-weight: 600; color: var(--text);
+  }
+  .brief-theme .evidence {
+    color: var(--muted); font-size: 12px; margin-bottom: 10px;
+  }
+  .brief-action {
+    border-top: 1px solid var(--border); padding: 8px 0;
+    display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: start;
+  }
+  .brief-action .tag {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em;
+    background: #1a1f2a; color: var(--accent); white-space: nowrap;
+  }
+  .brief-action .title { font-weight: 600; color: var(--text); font-size: 13px; }
+  .brief-action .details { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .brief-action .effort {
+    color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums;
+    text-align: right; white-space: nowrap;
+  }
+  .brief-avoid {
+    margin-top: 10px; padding: 8px 12px;
+    background: rgba(231, 111, 81, 0.08);
+    border-left: 3px solid var(--neg); border-radius: 6px;
+  }
+  .brief-avoid h4 {
+    margin: 0 0 4px; font-size: 11px; text-transform: uppercase;
+    color: var(--neg); font-weight: 600; letter-spacing: 0.06em;
+  }
+  .brief-avoid ul { margin: 0; padding-left: 18px; }
+  .brief-avoid li { color: var(--neg); font-size: 12px; margin: 2px 0; }
+  .brief-photo-protocol {
+    margin-top: 12px; padding: 8px 12px; background: #0b0d12;
+    border-radius: 6px; border-left: 3px solid var(--pos);
+  }
+  .brief-photo-protocol h4 {
+    margin: 0 0 4px; font-size: 11px; text-transform: uppercase;
+    color: var(--pos); font-weight: 600; letter-spacing: 0.06em;
+  }
+  .brief-photo-protocol ul { margin: 0; padding-left: 18px; }
+  .brief-photo-protocol li { color: var(--text); font-size: 12px; margin: 2px 0; }
+  .brief-meta {
+    color: var(--muted); font-size: 11px; margin-top: 8px;
+  }
+  .brief-generate {
+    background: var(--accent); color: #0b1020; border: none;
+    padding: 6px 14px; border-radius: 6px; cursor: pointer; font-weight: 600;
+  }
+  .brief-generate:disabled { opacity: 0.5; cursor: progress; }
 </style>
 </head>
 <body>
@@ -186,6 +251,16 @@
     <button id="iv-add">add</button>
   </div>
   <div id="interventions-list"></div>
+</div>
+
+<div class="panel" style="margin-top: 20px;">
+  <h2>Recommendations brief
+    <button id="brief-regen" class="brief-generate"
+            style="float: right; font-size: 11px; padding: 4px 10px;">
+      regenerate
+    </button>
+  </h2>
+  <div id="brief-content"><div class="empty">loading…</div></div>
 </div>
 
 <div class="panel" style="margin-top: 20px;">
@@ -666,6 +741,101 @@ function aggregateFeaturesAcrossRaters(ratings) {
   return out;
 }
 
+// ── Recommendations brief ────────────────────────────────────────
+
+async function loadBrief() {
+  const host = document.getElementById("brief-content");
+  clear(host);
+  let brief;
+  try { brief = await jget("/body-image/api/recommendations"); }
+  catch (e) { host.appendChild(el("div", { class: "empty" }, "Failed to load brief.")); return; }
+  if (!brief) {
+    host.appendChild(el("div", { class: "empty" },
+      "No brief yet. Click regenerate (one Claude Opus call ~$0.10)."));
+    return;
+  }
+  renderBrief(host, brief);
+}
+
+function renderBrief(host, brief) {
+  clear(host);
+  const b = brief.brief || {};
+
+  if (b.summary) {
+    host.appendChild(el("div", { class: "brief-summary" }, b.summary));
+  }
+  if (b.fixed_features_acknowledgement) {
+    host.appendChild(el("div", { class: "brief-fixed" },
+      b.fixed_features_acknowledgement));
+  }
+
+  for (const theme of (b.themes || [])) {
+    const themeEl = el("div", { class: "brief-theme" });
+    themeEl.appendChild(el("h3", null,
+      `${theme.theme}  [${theme.evidence_count || 0}× cited]`));
+    if (theme.evidence_summary) {
+      themeEl.appendChild(el("div", { class: "evidence" }, theme.evidence_summary));
+    }
+    for (const action of (theme.actions || [])) {
+      const a = el("div", { class: "brief-action" });
+      a.appendChild(el("span", { class: "tag" }, action.type || "—"));
+      const center = el("div");
+      center.appendChild(el("div", { class: "title" }, action.title || ""));
+      if (action.details) {
+        center.appendChild(el("div", { class: "details" }, action.details));
+      }
+      a.appendChild(center);
+      const right = el("div", { class: "effort" });
+      const effort = action.effort || "";
+      const window = action.expected_window_days;
+      right.textContent = effort + (window ? ` · ~${window}d` : "");
+      a.appendChild(right);
+      themeEl.appendChild(a);
+    }
+    if ((theme.avoid || []).length) {
+      const avoid = el("div", { class: "brief-avoid" });
+      avoid.appendChild(el("h4", null, "avoid"));
+      const ul = el("ul");
+      for (const item of theme.avoid) ul.appendChild(el("li", null, item));
+      avoid.appendChild(ul);
+      themeEl.appendChild(avoid);
+    }
+    host.appendChild(themeEl);
+  }
+
+  if ((b.photo_protocol_suggestions || []).length) {
+    const pp = el("div", { class: "brief-photo-protocol" });
+    pp.appendChild(el("h4", null, "photo protocol"));
+    const ul = el("ul");
+    for (const item of b.photo_protocol_suggestions) {
+      ul.appendChild(el("li", null, item));
+    }
+    pp.appendChild(ul);
+    host.appendChild(pp);
+  }
+
+  const meta = el("div", { class: "brief-meta" });
+  const when = new Date(brief.created_at).toLocaleString();
+  meta.textContent =
+    `Generated ${when} · ${brief.photo_count} photos · ` +
+    `${brief.rating_count} ratings · ${brief.intervention_count} interventions ` +
+    `· model ${brief.model}`;
+  host.appendChild(meta);
+}
+
+document.getElementById("brief-regen").onclick = async () => {
+  const btn = document.getElementById("brief-regen");
+  btn.disabled = true; btn.textContent = "generating…";
+  try {
+    await jsend("POST", "/body-image/api/recommendations?window_days=30");
+    await loadBrief();
+  } catch (e) {
+    alert("Failed: " + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = "regenerate";
+  }
+};
+
 // ── Bootstrap ────────────────────────────────────────────────────
 
 (async () => {
@@ -678,6 +848,7 @@ function aggregateFeaturesAcrossRaters(ratings) {
   try { await loadLatest(); } catch (e) { console.error(e); }
   try { await loadInterventions(); } catch (e) { console.error(e); }
   try { await loadTrends(); } catch (e) { console.error(e); }
+  try { await loadBrief(); } catch (e) { console.error(e); }
   try { await loadSessions(); } catch (e) { console.error(e); }
 })();
 </script>

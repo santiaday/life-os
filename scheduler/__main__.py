@@ -329,6 +329,21 @@ def build() -> BlockingScheduler:
         coalesce=True,
     )
 
+    # ---- Body-image weekly recommendations synthesizer ---------------------
+    # Sunday 6am: aggregate the last 30 days of ratings + intervention
+    # logs into a structured recommendations brief (themes, specific
+    # actions, things to avoid). One Opus call (~$0.10/wk). Brief lands
+    # in body_image_recommendation and the dashboard reads the latest.
+    # Skips silently if there's no rating data yet.
+    sched.add_job(
+        _body_image_recommendations,
+        CronTrigger(day_of_week="sun", hour=6, minute=0),
+        id="body_image_recommendations_weekly",
+        name="Body-image weekly recommendations brief",
+        max_instances=1,
+        coalesce=True,
+    )
+
     return sched
 
 
@@ -368,6 +383,26 @@ def _body_image_validation() -> None:
         log.info("scheduler.body_image_validation", **result)
     except Exception:
         log.exception("scheduler.body_image_validation_failed")
+
+
+def _body_image_recommendations() -> None:
+    """In-process: weekly recommendations synthesizer. Pulls 30 days of
+    body-image data + interventions and asks Claude Opus to write a
+    structured brief. Skips silently when there's no data."""
+    try:
+        from body_image.coach import generate_recommendations
+    except ImportError:  # pragma: no cover
+        return
+    try:
+        result = generate_recommendations(settings.LIFELOG_USER_ID, window_days=30)
+        log.info(
+            "scheduler.body_image_recommendations",
+            recommendation_id=result["id"],
+            photo_count=result["photo_count"],
+            theme_count=len((result.get("brief") or {}).get("themes") or []),
+        )
+    except Exception:
+        log.exception("scheduler.body_image_recommendations_failed")
 
 
 def main() -> int:

@@ -119,6 +119,16 @@ be below the median reference's overall. Do NOT average compensating
 features upward against a clearly limiting feature. A face with a 50
 jawline and 75 eye_quality is a 50-55 overall, NOT a 62. The weakest
 structural feature is the ceiling.
+
+RECOMMENDATIONS RULE: `three_highest_roi_structural_changes` must be
+NON-SURGICAL, NON-INVASIVE actions only. The subject does not want
+recommendations for: rhinoplasty, chin implants, jaw implants, facial
+fillers, Botox, surgical augmentation, mewing/bone-restructuring
+claims, or any cosmetic procedure. Recommend instead: posture changes,
+facial-hair shaping/styling that visually compensates, framing/angle
+suggestions for photos, weight changes if relevant to facial fat
+coverage, or honest "structural features are fixed — focus on surface
+and styling levers" guidance.
 """
 
 
