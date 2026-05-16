@@ -623,6 +623,61 @@ SCHEMA_DOCS: dict = {
             "hevy_workout_id + strength rollup."
         ),
     },
+    "body_image_surface": {
+        "purpose": (
+            "Daily headshot rating pipeline. iOS Shortcut posts a 3-photo "
+            "session (front / 3-4 left / 3-4 right) to /body-image/upload. "
+            "Each photo gets rated by every configured LLM rater (Claude "
+            "+ optionally GPT-4o + Gemini), each split into Structure + "
+            "Surface specialist calls, plus a MediaPipe geometry sidecar "
+            "(front photo only — 3-4 angles get the geometry skipped). "
+            "Scores are calibrated three ways: anchored on 5 SCUT-FBP "
+            "Caucasian-Male reference photos, ceiling-rule rubric "
+            "(weakest feature drags overall), and personal slope/offset "
+            "(slope*raw + offset, derived from 15 blind user-rated "
+            "photos via Track B)."
+        ),
+        "tables": [
+            "body_image_photo (id, session_id, storage_path, caption, "
+            "metadata (incl. angle), created_at)",
+            "body_image_rating (photo_id, source, run_index, overall, "
+            "dimensions JSONB) — source ∈ {claude_structure, "
+            "claude_surface, gpt4v_*, gemini_*, geometry}; dimensions "
+            "JSONB has per-feature 0-100 scores plus qualitative arrays "
+            "three_biggest_structural_negatives, "
+            "three_biggest_surface_negatives, "
+            "three_highest_roi_structural_changes, "
+            "three_highest_roi_surface_changes; overall is the "
+            "personally-calibrated score, dimensions._raw_overall keeps "
+            "the model's pre-correction output",
+            "body_image_intervention (intervention_key, event in "
+            "{start,stop,apply,milestone}, occurred_on, metadata) — "
+            "behavior changes that overlay every dashboard trend chart",
+            "body_image_recommendation (window_days, brief JSONB) — "
+            "weekly synthesized brief from body_image.coach with themes "
+            "→ tagged actions + avoid lists",
+            "mart_body_image_daily (one row per day per user with "
+            "body_image_overall + per-feature averages + geometry). "
+            "Mirror columns also live on mart_daily so correlate_metrics "
+            "sees body-image alongside HRV/sleep/alcohol etc.",
+        ],
+        "tools": [
+            "get_body_image_summary  — daily composite trend",
+            "get_body_image_sessions — 3-photo sessions with per-photo ratings",
+            "get_body_image_photo     — single-photo deep dive",
+            "get_body_image_critique  — top recurring qualitative themes",
+            "get_body_image_interventions — behavior-change log",
+            "get_body_image_geometry  — symmetry / gonial / jaw-ratio time series",
+            "get_body_image_recommendations — latest synthesized brief",
+            "log_body_image_intervention — write a new intervention",
+            "regenerate_body_image_recommendations — fresh brief (~$0.10)",
+        ],
+        "lag_examples": (
+            "skin_clarity vs alcohol_g (lag 1-3 days), under_eye vs "
+            "sleep_consistency_pct (lag 1), overall vs recovery_score "
+            "(lag 1). Use correlate_metrics with lag_range=[0,7]."
+        ),
+    },
     "performance_tips": {
         "prefer_mart_daily": "For any daily-grain question (recovery, sleep, spend trends), mart_daily already has the joins done — one query, no expression-evaluation overhead.",
         "lag_sweeps_in_one_call": "Use correlate_metrics with lag_range=[min,max] (up to 21 lags) instead of N separate calls. Returns the best-magnitude lag plus per-lag stats.",

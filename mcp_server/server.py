@@ -63,6 +63,21 @@ mcp = FastMCP(
         "get_coach_plan — it returns the parsed movements with "
         "recommended kg + the reasoning string explaining the math "
         "(1RM × pct × recovery adjust × last-RPE adjust). "
+        "For body-image / face-rating questions ('how's my skin "
+        "trending', 'what does the model keep flagging', 'is the "
+        "tretinoin working') prefer the dedicated body-image tools: "
+        "get_body_image_summary (daily-grain composite + per-feature "
+        "averages), get_body_image_sessions (3-photo Shortcut runs "
+        "grouped), get_body_image_critique (top recurring qualitative "
+        "feedback across photos), get_body_image_interventions, "
+        "get_body_image_recommendations (latest synthesized brief). "
+        "Use correlate_metrics with lag_days for 'how does X affect Y' "
+        "questions involving body_image_overall / body_image_skin_quality "
+        "/ body_image_skin_clarity / body_image_under_eye / "
+        "body_image_jawline / body_image_hair_quality / body_image_symmetry "
+        "/ body_image_photo_quality against alcohol_g, sleep_consistency_pct, "
+        "etc. Log interventions inline with log_body_image_intervention "
+        "when the user mentions starting/stopping something. "
         "Use ask_sql only when no semantic tool fits."
     ),
     # The streamable-HTTP route lives at the *root* of the inner ASGI app so
@@ -751,6 +766,64 @@ def resolve_coach_review(
     notes: str | None = None,
 ) -> dict:
     return T.resolve_coach_review(review_id, exercise_template_id, notes)
+
+
+# ---- body_image -----------------------------------------------------------
+@_tool(description=T.TOOLS["get_body_image_summary"]["description"])
+def get_body_image_summary(start_date: date, end_date: date) -> dict:
+    return T.get_body_image_summary(start_date, end_date)
+
+
+@_tool(description=T.TOOLS["get_body_image_sessions"]["description"])
+def get_body_image_sessions(
+    start_date: date, end_date: date,
+    limit: int = 20, include_ratings: bool = True,
+) -> dict:
+    return T.get_body_image_sessions(start_date, end_date, limit, include_ratings)
+
+
+@_tool(description=T.TOOLS["get_body_image_photo"]["description"])
+def get_body_image_photo(photo_id: str) -> dict:
+    return T.get_body_image_photo(photo_id)
+
+
+@_tool(description=T.TOOLS["get_body_image_critique"]["description"])
+def get_body_image_critique(
+    start_date: date, end_date: date, top_n: int = 15,
+) -> dict:
+    return T.get_body_image_critique(start_date, end_date, top_n)
+
+
+@_tool(description=T.TOOLS["get_body_image_interventions"]["description"])
+def get_body_image_interventions(
+    start_date: date | None = None, end_date: date | None = None,
+) -> dict:
+    return T.get_body_image_interventions(start_date, end_date)
+
+
+@_tool(description=T.TOOLS["get_body_image_geometry"]["description"])
+def get_body_image_geometry(start_date: date, end_date: date) -> dict:
+    return T.get_body_image_geometry(start_date, end_date)
+
+
+@_tool(description=T.TOOLS["get_body_image_recommendations"]["description"])
+def get_body_image_recommendations(
+    latest_only: bool = True, limit: int = 5,
+) -> dict:
+    return T.get_body_image_recommendations(latest_only, limit)
+
+
+@_tool(description=T.TOOLS["log_body_image_intervention"]["description"])
+def log_body_image_intervention(
+    intervention_key: str, event: str, occurred_on: date,
+    metadata: dict | None = None,
+) -> dict:
+    return T.log_body_image_intervention(intervention_key, event, occurred_on, metadata)
+
+
+@_tool(description=T.TOOLS["regenerate_body_image_recommendations"]["description"])
+def regenerate_body_image_recommendations(window_days: int = 30) -> dict:
+    return T.regenerate_body_image_recommendations(window_days)
 
 
 @_tool(description=(

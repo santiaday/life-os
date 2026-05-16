@@ -2345,6 +2345,267 @@ def resolve_coach_review(
                  "exercise_template_id": exercise_template_id}])
 
 
+# ---- body_image semantic tools ---------------------------------------------
+# Reads + writes against the body-image rating pipeline. Single-tenant
+# today (LIFELOG_USER_ID); future multi-tenant rewrite swaps the literal
+# below for a per-call user resolution.
+
+_BODY_IMAGE_USER = "santi"
+
+
+def get_body_image_summary(start_date: date, end_date: date) -> dict:
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT day, body_image_overall,
+                   body_image_skin_quality, body_image_skin_clarity, body_image_under_eye,
+                   body_image_jawline, body_image_chin,
+                   body_image_eye_quality, body_image_nose_harmony, body_image_lip_quality,
+                   body_image_hair_quality, body_image_hairline,
+                   body_image_beard_density, body_image_grooming,
+                   body_image_expression, body_image_photo_quality,
+                   body_image_symmetry, body_image_gonial_angle, body_image_jaw_ratio,
+                   body_image_photo_count, body_image_rating_count
+              FROM mart_body_image_daily
+             WHERE user_id = %s AND day BETWEEN %s AND %s
+             ORDER BY day
+            """,
+            [_BODY_IMAGE_USER, start_date, end_date],
+        )
+        rows = _serialize(cur.fetchall())
+    return _ok("get_body_image_summary", rows)
+
+
+def get_body_image_sessions(
+    start_date: date, end_date: date,
+    limit: int = 20, include_ratings: bool = True,
+) -> dict:
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT session_id, MIN(created_at) AS started_at,
+                   COUNT(*) AS photo_count,
+                   array_agg(id::text ORDER BY created_at) AS photo_ids
+              FROM body_image_photo
+             WHERE user_id = %s AND created_at::date BETWEEN %s AND %s
+             GROUP BY session_id
+             ORDER BY started_at DESC
+             LIMIT %s
+            """,
+            [_BODY_IMAGE_USER, start_date, end_date, max(1, min(limit, 100))],
+        )
+        sessions = cur.fetchall()
+        if not sessions:
+            return _ok("get_body_image_sessions", [])
+
+        all_pids = [pid for s in sessions for pid in s["photo_ids"]]
+        cur.execute(
+            "SELECT id, session_id, storage_path, caption, metadata, created_at "
+            "FROM body_image_photo WHERE id = ANY(%s::uuid[])",
+            [all_pids],
+        )
+        photos = {str(p["id"]): p for p in cur.fetchall()}
+
+        ratings_by_photo: dict[str, list] = {}
+        if include_ratings:
+            cur.execute(
+                "SELECT photo_id, source, run_index, overall, dimensions, rated_at "
+                "FROM body_image_rating WHERE photo_id = ANY(%s::uuid[]) "
+                "ORDER BY source, run_index",
+                [all_pids],
+            )
+            for r in cur.fetchall():
+                ratings_by_photo.setdefault(str(r["photo_id"]), []).append(r)
+
+    result = []
+    for s in sessions:
+        pids = s["photo_ids"]
+        overalls = [
+            float(r["overall"]) for pid in pids
+            for r in ratings_by_photo.get(pid, [])
+            if r["overall"] is not None and r["source"] != "geometry"
+        ]
+        composite = sum(overalls) / len(overalls) if overalls else None
+        result.append({
+            "session_id": str(s["session_id"]) if s["session_id"] else None,
+            "started_at": s["started_at"].isoformat(),
+            "photo_count": int(s["photo_count"]),
+            "composite_overall": composite,
+            "photos": [
+                {
+                    "photo_id": pid,
+                    "storage_path": photos[pid]["storage_path"],
+                    "caption": photos[pid]["caption"],
+                    "metadata": photos[pid]["metadata"] or {},
+                    "ratings": _serialize(ratings_by_photo.get(pid, [])) if include_ratings else None,
+                }
+                for pid in pids if pid in photos
+            ],
+        })
+    return _ok("get_body_image_sessions", result)
+
+
+def get_body_image_photo(photo_id: str) -> dict:
+    from uuid import UUID
+    try:
+        UUID(photo_id)
+    except ValueError:
+        return _err("get_body_image_photo", ValueError("invalid uuid"))
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            "SELECT id, session_id, storage_path, caption, metadata, created_at "
+            "FROM body_image_photo WHERE user_id = %s AND id = %s",
+            [_BODY_IMAGE_USER, photo_id],
+        )
+        photo = cur.fetchone()
+        if photo is None:
+            return _err("get_body_image_photo", ValueError("photo not found"))
+        cur.execute(
+            "SELECT source, run_index, overall, dimensions, rated_at "
+            "FROM body_image_rating WHERE photo_id = %s ORDER BY source, run_index",
+            [photo_id],
+        )
+        ratings = _serialize(cur.fetchall())
+    return _ok("get_body_image_photo", [{
+        "photo_id": str(photo["id"]),
+        "session_id": str(photo["session_id"]) if photo["session_id"] else None,
+        "storage_path": photo["storage_path"],
+        "caption": photo["caption"],
+        "metadata": photo["metadata"] or {},
+        "created_at": photo["created_at"].isoformat(),
+        "ratings": ratings,
+    }])
+
+
+def get_body_image_critique(
+    start_date: date, end_date: date, top_n: int = 15,
+) -> dict:
+    from collections import Counter
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT r.source, r.dimensions
+              FROM body_image_rating r
+              JOIN body_image_photo p ON p.id = r.photo_id
+             WHERE p.user_id = %s
+               AND p.created_at::date BETWEEN %s AND %s
+               AND r.source != 'geometry'
+            """,
+            [_BODY_IMAGE_USER, start_date, end_date],
+        )
+        rows = cur.fetchall()
+
+    buckets = {
+        "structural_negatives": Counter(),
+        "surface_negatives": Counter(),
+        "structural_roi": Counter(),
+        "surface_roi": Counter(),
+    }
+    for r in rows:
+        d = r["dimensions"] or {}
+        for arr_key, bucket in (
+            ("three_biggest_structural_negatives", buckets["structural_negatives"]),
+            ("three_biggest_surface_negatives",   buckets["surface_negatives"]),
+            ("three_highest_roi_structural_changes", buckets["structural_roi"]),
+            ("three_highest_roi_surface_changes",    buckets["surface_roi"]),
+        ):
+            for item in d.get(arr_key, []) or []:
+                if isinstance(item, str) and item.strip():
+                    bucket[item.strip()] += 1
+
+    return _ok("get_body_image_critique", [{
+        "rating_rows_scanned": len(rows),
+        "structural_negatives": [{"phrase": p, "count": c} for p, c in buckets["structural_negatives"].most_common(top_n)],
+        "surface_negatives":    [{"phrase": p, "count": c} for p, c in buckets["surface_negatives"].most_common(top_n)],
+        "structural_roi":       [{"phrase": p, "count": c} for p, c in buckets["structural_roi"].most_common(top_n)],
+        "surface_roi":          [{"phrase": p, "count": c} for p, c in buckets["surface_roi"].most_common(top_n)],
+    }])
+
+
+def get_body_image_interventions(
+    start_date: date | None = None, end_date: date | None = None,
+) -> dict:
+    parts = ["SELECT id, intervention_key, event, occurred_on, metadata, created_at "
+             "FROM body_image_intervention WHERE user_id = %s"]
+    params: list = [_BODY_IMAGE_USER]
+    if start_date is not None:
+        parts.append("AND occurred_on >= %s"); params.append(start_date)
+    if end_date is not None:
+        parts.append("AND occurred_on <= %s"); params.append(end_date)
+    parts.append("ORDER BY occurred_on DESC, id DESC")
+    with conn() as c, c.cursor() as cur:
+        cur.execute(" ".join(parts), params)
+        rows = _serialize(cur.fetchall())
+    return _ok("get_body_image_interventions", rows)
+
+
+def get_body_image_geometry(start_date: date, end_date: date) -> dict:
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT p.created_at::date AS day, p.id::text AS photo_id,
+                   (r.dimensions->>'symmetry_score')::numeric  AS symmetry_score,
+                   (r.dimensions->>'gonial_angle_deg')::numeric AS gonial_angle_deg,
+                   (r.dimensions->>'bigonial_bizygomatic_ratio')::numeric AS jaw_cheek_ratio
+              FROM body_image_rating r
+              JOIN body_image_photo p ON p.id = r.photo_id
+             WHERE p.user_id = %s
+               AND r.source = 'geometry'
+               AND p.created_at::date BETWEEN %s AND %s
+             ORDER BY p.created_at
+            """,
+            [_BODY_IMAGE_USER, start_date, end_date],
+        )
+        rows = _serialize(cur.fetchall())
+    return _ok("get_body_image_geometry", rows)
+
+
+def get_body_image_recommendations(
+    latest_only: bool = True, limit: int = 5,
+) -> dict:
+    lim = 1 if latest_only else max(1, min(limit, 50))
+    with conn() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            SELECT id, window_days, photo_count, rating_count, intervention_count,
+                   brief, model, created_at
+              FROM body_image_recommendation
+             WHERE user_id = %s
+             ORDER BY created_at DESC
+             LIMIT %s
+            """,
+            [_BODY_IMAGE_USER, lim],
+        )
+        rows = _serialize(cur.fetchall())
+    return _ok("get_body_image_recommendations", rows)
+
+
+def log_body_image_intervention(
+    intervention_key: str, event: str, occurred_on: date,
+    metadata: dict | None = None,
+) -> dict:
+    if event not in ("start", "stop", "apply", "milestone"):
+        return _err("log_body_image_intervention",
+                    ValueError("event must be one of: start, stop, apply, milestone"))
+    from body_image.interventions import create_intervention
+    from body_image.schemas import InterventionCreate
+    iv = create_intervention(_BODY_IMAGE_USER, InterventionCreate(
+        intervention_key=intervention_key, event=event,  # type: ignore[arg-type]
+        occurred_on=occurred_on, metadata=metadata or {},
+    ))
+    payload = iv.model_dump()
+    # Coerce non-JSON-native types so the MCP envelope serializes cleanly.
+    payload["occurred_on"] = payload["occurred_on"].isoformat()
+    payload["created_at"] = payload["created_at"].isoformat()
+    return _ok("log_body_image_intervention", [payload])
+
+
+def regenerate_body_image_recommendations(window_days: int = 30) -> dict:
+    from body_image.coach import generate_recommendations
+    result = generate_recommendations(_BODY_IMAGE_USER, window_days=window_days)
+    return _ok("regenerate_body_image_recommendations", [result])
+
+
 # ---- registry ---------------------------------------------------------------
 # Tool name → callable + JSON schema (input). Used by server.py to wire MCP.
 TOOLS: dict[str, dict] = {
@@ -3003,6 +3264,170 @@ TOOLS: dict[str, dict] = {
                 "review_id": {"type": "integer"},
                 "exercise_template_id": {"type": "string"},
                 "notes": {"type": "string"},
+            },
+        },
+    },
+
+    # ---- body_image ---------------------------------------------------------
+    "get_body_image_summary": {
+        "fn": get_body_image_summary,
+        "description": (
+            "Daily-grain body-image rollup from mart_body_image_daily. One "
+            "row per day with composite (avg of every LLM rater's overall) "
+            "plus per-feature averages (skin_quality, jawline, hair_quality, "
+            "etc.) and geometry metrics (symmetry, gonial angle, jaw/cheek). "
+            "Scores are on the user's calibrated scale (slope/offset from "
+            "Track B applied at write time)."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["start_date", "end_date"],
+            "properties": {
+                "start_date": {"type": "string", "format": "date"},
+                "end_date":   {"type": "string", "format": "date"},
+            },
+        },
+    },
+    "get_body_image_sessions": {
+        "fn": get_body_image_sessions,
+        "description": (
+            "Sessions (groups of photos sharing a session_id, typically a "
+            "single 3-photo iOS Shortcut run for front/3-4 left/3-4 right "
+            "angles). Returns each session with composite + per-photo "
+            "ratings (omit ratings via include_ratings=false for a smaller "
+            "payload)."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["start_date", "end_date"],
+            "properties": {
+                "start_date": {"type": "string", "format": "date"},
+                "end_date":   {"type": "string", "format": "date"},
+                "limit":      {"type": "integer", "minimum": 1, "maximum": 100},
+                "include_ratings": {"type": "boolean"},
+            },
+        },
+    },
+    "get_body_image_photo": {
+        "fn": get_body_image_photo,
+        "description": (
+            "Deep-dive on one photo by UUID — every rater output including "
+            "the full dimensions JSON (per-feature scores, qualitative "
+            "arrays, _raw_overall before personal-calibration correction)."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["photo_id"],
+            "properties": {"photo_id": {"type": "string"}},
+        },
+    },
+    "get_body_image_critique": {
+        "fn": get_body_image_critique,
+        "description": (
+            "Aggregated qualitative critique across photos in a window. "
+            "Returns the top-N most-cited negatives and ROI suggestions "
+            "across structural and surface specialists, with repetition "
+            "counts. Use this to surface recurring themes — 'what's the "
+            "feedback that keeps coming up' — not single-photo opinions."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["start_date", "end_date"],
+            "properties": {
+                "start_date": {"type": "string", "format": "date"},
+                "end_date":   {"type": "string", "format": "date"},
+                "top_n":      {"type": "integer", "minimum": 1, "maximum": 50},
+            },
+        },
+    },
+    "get_body_image_interventions": {
+        "fn": get_body_image_interventions,
+        "description": (
+            "List body_image_intervention rows — start/stop/apply/milestone "
+            "events the user has logged (e.g. tretinoin start, fresh "
+            "haircut). Optional date range. Pair these with "
+            "get_body_image_summary trends to do lagged correlation."
+        ),
+        "input": {
+            "type": "object",
+            "properties": {
+                "start_date": {"type": "string", "format": "date"},
+                "end_date":   {"type": "string", "format": "date"},
+            },
+        },
+    },
+    "get_body_image_geometry": {
+        "fn": get_body_image_geometry,
+        "description": (
+            "Time series of geometry metrics (MediaPipe — deterministic "
+            "across the same photo). symmetry_score 0-100, gonial_angle "
+            "in degrees, bigonial/bizygomatic ratio. Front-photo only "
+            "(the symmetry math is meaningless on 3/4 angles)."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["start_date", "end_date"],
+            "properties": {
+                "start_date": {"type": "string", "format": "date"},
+                "end_date":   {"type": "string", "format": "date"},
+            },
+        },
+    },
+    "get_body_image_recommendations": {
+        "fn": get_body_image_recommendations,
+        "description": (
+            "Structured recommendations briefs from body_image.coach (the "
+            "weekly synthesizer + manual regeneration endpoint). Each row "
+            "has a `brief` JSON with themes → tagged actions "
+            "(skincare/hair/grooming/photo/behavior/posture/clothing), "
+            "effort, expected_window_days, and per-theme avoid lists. "
+            "By default returns only the most recent brief; set "
+            "latest_only=false to compare brief evolution."
+        ),
+        "input": {
+            "type": "object",
+            "properties": {
+                "latest_only": {"type": "boolean"},
+                "limit":       {"type": "integer", "minimum": 1, "maximum": 50},
+            },
+        },
+    },
+    "log_body_image_intervention": {
+        "fn": log_body_image_intervention,
+        "description": (
+            "Log an intervention event so it shows up as a vertical marker "
+            "on every dashboard trend chart AND gets included in the next "
+            "recommendations brief synthesis. intervention_key is a stable "
+            "snake_case grouping (e.g. 'tretinoin', 'minoxidil_cheeks', "
+            "'haircut', 'spf_daily'). event ∈ {start, stop, apply, "
+            "milestone}. occurred_on is the date the change happened. "
+            "metadata is free-form context (dosage, brand, notes)."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["intervention_key", "event", "occurred_on"],
+            "properties": {
+                "intervention_key": {"type": "string"},
+                "event": {"type": "string",
+                          "enum": ["start", "stop", "apply", "milestone"]},
+                "occurred_on": {"type": "string", "format": "date"},
+                "metadata": {"type": "object"},
+            },
+        },
+    },
+    "regenerate_body_image_recommendations": {
+        "fn": regenerate_body_image_recommendations,
+        "description": (
+            "Trigger a fresh body-image recommendations brief synthesis. "
+            "Costs ~$0.10 (one Claude Opus call). Use sparingly — the "
+            "weekly cron auto-regenerates every Sunday 6am. Typical use: "
+            "after logging a new intervention or after a meaningful "
+            "string of new photos."
+        ),
+        "input": {
+            "type": "object",
+            "properties": {
+                "window_days": {"type": "integer", "minimum": 7, "maximum": 365},
             },
         },
     },
