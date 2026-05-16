@@ -79,7 +79,7 @@ def _build_job_list(jpeg_bytes: bytes) -> list[tuple[str, Any]]:
     """Build a list of (job_name, callable) for every rater × specialist
     × run_index. Geometry runs once (deterministic). Each callable
     returns the rater's dict shape; the name is just for logging."""
-    anchors, anchor_scores = load_anchors()
+    anchor_pairs = load_anchors()
     use_specialist = settings.BODY_IMAGE_USE_SPECIALIST_CALLS
     runs = max(1, settings.BODY_IMAGE_RUNS_PER_RATER)
 
@@ -90,13 +90,11 @@ def _build_job_list(jpeg_bytes: bytes) -> list[tuple[str, Any]]:
             def _wrap(fn, idx=run_index, label=name):
                 def _go():
                     # gpt4v accepts a seed kwarg for variance estimation;
-                    # claude doesn't (Anthropic API has no seed param);
-                    # gemini also ignores. Just call and let signature
-                    # mismatches surface as TypeErrors caught upstream.
+                    # claude and gemini ignore it (no SDK-exposed seed).
                     if label == "gpt4v":
-                        result = fn(jpeg_bytes, anchors, anchor_scores, seed=idx)
+                        result = fn(jpeg_bytes, anchor_pairs, seed=idx)
                     else:
-                        result = fn(jpeg_bytes, anchors, anchor_scores)
+                        result = fn(jpeg_bytes, anchor_pairs)
                     result["run_index"] = idx
                     return result
                 return _go

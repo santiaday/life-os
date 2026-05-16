@@ -32,27 +32,18 @@ log = get_logger(__name__)
 # ── Anchor loading ───────────────────────────────────────────────────
 
 
-def load_anchors() -> tuple[list[bytes], dict[str, int]]:
-    """Return ([anchor_low_jpg, anchor_mid_jpg, anchor_high_jpg], {scores})
-    when calibration is enabled and all files exist; otherwise ([], {})."""
+def load_anchors() -> list[tuple[bytes, int]]:
+    """Return [(jpeg_bytes, score), ...] sorted ascending by score when
+    calibration is enabled and the anchor files exist; otherwise []."""
     if not settings.BODY_IMAGE_USE_CALIBRATION_ANCHORS:
-        return [], {}
+        return []
     if not calibration.anchors_available():
         log.warning("body_image.anchors.requested_but_missing")
-        return [], {}
-    images = [
-        calibration.anchor_bytes("low"),
-        calibration.anchor_bytes("mid"),
-        calibration.anchor_bytes("high"),
-    ]
-    if any(b is None for b in images):
-        return [], {}
-    scores = {
-        "overall_low":  calibration.anchor_score("low") or 0,
-        "overall_mid":  calibration.anchor_score("mid") or 0,
-        "overall_high": calibration.anchor_score("high") or 0,
-    }
-    return [b for b in images if b is not None], scores
+        return []
+    pairs = calibration.load_anchor_pairs()
+    if not pairs:
+        return []
+    return pairs
 
 
 # ── Available raters ─────────────────────────────────────────────────
@@ -82,12 +73,12 @@ def run_llm_raters_once(jpeg_bytes: bytes) -> list[dict[str, Any]]:
     """No-DB sequential pass for the weekly validation cron. Returns
     every rater's per-specialist result (or fewer if some fail). Does
     NOT iterate run_index — validation only needs one sample per ref."""
-    anchors, anchor_scores = load_anchors()
+    anchor_pairs = load_anchors()
     results: list[dict[str, Any]] = []
     for name, struct_fn, surf_fn in available_llm_raters():
         for label, fn in (("structure", struct_fn), ("surface", surf_fn)):
             try:
-                results.append(fn(jpeg_bytes, anchors, anchor_scores))
+                results.append(fn(jpeg_bytes, anchor_pairs))
             except Exception as e:  # noqa: BLE001
                 log.warning(
                     "body_image.validation.rater_failed",

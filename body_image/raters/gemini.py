@@ -36,11 +36,11 @@ ENDPOINT_TEMPLATE = (
 )
 
 
-def _call(prompt_text: str, target_jpeg: bytes, anchors: list[bytes]) -> dict[str, Any]:
+def _call(prompt_text: str, target_jpeg: bytes, anchor_images: list[bytes]) -> dict[str, Any]:
     if not settings.GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY is not set.")
     parts: list[dict[str, Any]] = []
-    for a in anchors:
+    for a in anchor_images:
         parts.append({
             "inline_data": {
                 "mime_type": "image/jpeg",
@@ -97,13 +97,13 @@ def _parse_json(text: str) -> dict[str, Any]:
         raise RuntimeError(f"Gemini returned non-JSON: {e}") from e
 
 
-def rate_gemini_structure(jpeg_bytes: bytes, anchors: list[bytes], anchor_scores: dict[str, int]) -> dict[str, Any]:
-    prompt = _rubric.structure_prompt(**_common.anchor_kwargs(anchor_scores))
-    dims = _call(prompt, jpeg_bytes, anchors)
+def rate_gemini_structure(jpeg_bytes: bytes, anchor_pairs: list[tuple[bytes, int]]) -> dict[str, Any]:
+    images, scores = _common.split_anchors(anchor_pairs)
+    dims = _call(_rubric.structure_prompt(scores or None), jpeg_bytes, images)
     return _common.shape_result("gemini_structure", dims)
 
 
-def rate_gemini_surface(jpeg_bytes: bytes, anchors: list[bytes], anchor_scores: dict[str, int]) -> dict[str, Any]:
-    prompt = _rubric.surface_prompt(**_common.anchor_kwargs(anchor_scores))
-    dims = _call(prompt, jpeg_bytes, anchors)
+def rate_gemini_surface(jpeg_bytes: bytes, anchor_pairs: list[tuple[bytes, int]]) -> dict[str, Any]:
+    images, scores = _common.split_anchors(anchor_pairs)
+    dims = _call(_rubric.surface_prompt(scores or None), jpeg_bytes, images)
     return _common.shape_result("gemini_surface", dims)

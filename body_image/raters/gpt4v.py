@@ -41,11 +41,11 @@ def _img_content(jpeg: bytes) -> dict[str, Any]:
 def _call(
     prompt_text: str,
     target_jpeg: bytes,
-    anchors: list[bytes],
+    anchor_images: list[bytes],
     *,
     seed: int,
 ) -> dict[str, Any]:
-    content: list[dict[str, Any]] = [_img_content(a) for a in anchors]
+    content: list[dict[str, Any]] = [_img_content(a) for a in anchor_images]
     content.append(_img_content(target_jpeg))
     content.append({"type": "text", "text": prompt_text})
 
@@ -62,18 +62,20 @@ def _call(
 
 
 def rate_gpt4v_structure(
-    jpeg_bytes: bytes, anchors: list[bytes],
-    anchor_scores: dict[str, int], *, seed: int = 1,
+    jpeg_bytes: bytes,
+    anchor_pairs: list[tuple[bytes, int]],
+    *, seed: int = 1,
 ) -> dict[str, Any]:
-    prompt = _rubric.structure_prompt(**_common.anchor_kwargs(anchor_scores))
-    dims = _call(prompt, jpeg_bytes, anchors, seed=seed)
+    images, scores = _common.split_anchors(anchor_pairs)
+    dims = _call(_rubric.structure_prompt(scores or None), jpeg_bytes, images, seed=seed)
     return _common.shape_result("gpt4v_structure", dims)
 
 
 def rate_gpt4v_surface(
-    jpeg_bytes: bytes, anchors: list[bytes],
-    anchor_scores: dict[str, int], *, seed: int = 1,
+    jpeg_bytes: bytes,
+    anchor_pairs: list[tuple[bytes, int]],
+    *, seed: int = 1,
 ) -> dict[str, Any]:
-    prompt = _rubric.surface_prompt(**_common.anchor_kwargs(anchor_scores))
-    dims = _call(prompt, jpeg_bytes, anchors, seed=seed)
+    images, scores = _common.split_anchors(anchor_pairs)
+    dims = _call(_rubric.surface_prompt(scores or None), jpeg_bytes, images, seed=seed)
     return _common.shape_result("gpt4v_surface", dims)

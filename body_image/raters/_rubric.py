@@ -33,26 +33,28 @@ You are a casting director rating a headshot on a calibrated 0-100 scale.
 80+   = books print work.
 """
 
-_PREAMBLE_WITH_ANCHORS = """\
-You are a casting director rating a headshot on a calibrated 0-100 scale.
+def preamble(anchor_scores: list[int] | None = None) -> str:
+    """Build the rubric preamble. If anchor_scores is a non-empty list,
+    use the anchored variant; otherwise the base.
 
-For calibration, three reference photos appear FIRST with crowd-rated
-scores from panels of ~60 raters:
-  - Reference 1 (image #1): overall {low}/100
-  - Reference 2 (image #2): overall {mid}/100
-  - Reference 3 (image #3): overall {high}/100
-
-The SUBJECT is the LAST image. Score it on the same 0-100 scale,
-anchored by the three references above. Do not rate the references.
-"""
-
-
-def preamble(*, low: int | None = None, mid: int | None = None, high: int | None = None) -> str:
-    """Return the rubric preamble. If all three anchor scores are
-    provided, use the anchored variant; otherwise the base."""
-    if low is not None and mid is not None and high is not None:
-        return _PREAMBLE_WITH_ANCHORS.format(low=low, mid=mid, high=high)
-    return _PREAMBLE_BASE
+    The anchored preamble lists each reference image and its score in
+    the same order the rater passes them into the API call. Raters MUST
+    pass anchor images in this order: image #1 = score_1, …, image #N =
+    score_N, then the subject as the final image."""
+    if not anchor_scores:
+        return _PREAMBLE_BASE
+    lines = [f"  - Reference {i+1} (image #{i+1}): overall {s}/100"
+             for i, s in enumerate(anchor_scores)]
+    return (
+        "You are a casting director rating a headshot on a calibrated "
+        "0-100 scale.\n\n"
+        f"For calibration, {len(anchor_scores)} reference photos appear "
+        "FIRST with crowd-rated scores from panels of ~60 raters:\n"
+        + "\n".join(lines) +
+        "\n\nThe SUBJECT is the LAST image. Score it on the same 0-100 "
+        "scale, anchored by the references above. Do not rate the "
+        "references.\n"
+    )
 
 
 # ── STRUCTURE (bone + proportion) ───────────────────────────────────
@@ -172,12 +174,12 @@ JSON only.
 """
 
 
-def structure_prompt(*, low: int | None = None, mid: int | None = None, high: int | None = None) -> str:
-    return preamble(low=low, mid=mid, high=high) + "\n" + STRUCTURE_BODY
+def structure_prompt(anchor_scores: list[int] | None = None) -> str:
+    return preamble(anchor_scores) + "\n" + STRUCTURE_BODY
 
 
-def surface_prompt(*, low: int | None = None, mid: int | None = None, high: int | None = None) -> str:
-    return preamble(low=low, mid=mid, high=high) + "\n" + SURFACE_BODY
+def surface_prompt(anchor_scores: list[int] | None = None) -> str:
+    return preamble(anchor_scores) + "\n" + SURFACE_BODY
 
 
 # Feature key catalog — kept here so dashboard + mart wiring can import

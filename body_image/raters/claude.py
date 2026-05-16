@@ -47,8 +47,8 @@ def _image_block(jpeg: bytes) -> dict[str, Any]:
     }
 
 
-def _call(prompt_text: str, target_jpeg: bytes, anchors: list[bytes]) -> dict[str, Any]:
-    content: list[dict[str, Any]] = [_image_block(a) for a in anchors]
+def _call(prompt_text: str, target_jpeg: bytes, anchor_images: list[bytes]) -> dict[str, Any]:
+    content: list[dict[str, Any]] = [_image_block(a) for a in anchor_images]
     content.append(_image_block(target_jpeg))
     content.append({"type": "text", "text": prompt_text})
 
@@ -62,13 +62,13 @@ def _call(prompt_text: str, target_jpeg: bytes, anchors: list[bytes]) -> dict[st
     return parse_json_lenient(text, source="claude")
 
 
-def rate_claude_structure(jpeg_bytes: bytes, anchors: list[bytes], anchor_scores: dict[str, int]) -> dict[str, Any]:
-    prompt = _rubric.structure_prompt(**_common.anchor_kwargs(anchor_scores))
-    dims = _call(prompt, jpeg_bytes, anchors)
+def rate_claude_structure(jpeg_bytes: bytes, anchor_pairs: list[tuple[bytes, int]]) -> dict[str, Any]:
+    images, scores = _common.split_anchors(anchor_pairs)
+    dims = _call(_rubric.structure_prompt(scores or None), jpeg_bytes, images)
     return _common.shape_result("claude_structure", dims)
 
 
-def rate_claude_surface(jpeg_bytes: bytes, anchors: list[bytes], anchor_scores: dict[str, int]) -> dict[str, Any]:
-    prompt = _rubric.surface_prompt(**_common.anchor_kwargs(anchor_scores))
-    dims = _call(prompt, jpeg_bytes, anchors)
+def rate_claude_surface(jpeg_bytes: bytes, anchor_pairs: list[tuple[bytes, int]]) -> dict[str, Any]:
+    images, scores = _common.split_anchors(anchor_pairs)
+    dims = _call(_rubric.surface_prompt(scores or None), jpeg_bytes, images)
     return _common.shape_result("claude_surface", dims)
