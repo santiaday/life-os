@@ -12,6 +12,7 @@ Tools use `db.conn()` for the admin pool (mart/fact reads) and
 
 from __future__ import annotations
 
+import json
 import math
 import time
 from datetime import date, datetime
@@ -67,15 +68,58 @@ CORRELATE_ALLOWLIST = {
 
 
 # ---- envelope helpers -------------------------------------------------------
+# Anthropic's MCP-connector tool-result transport starts dropping
+# responses somewhere above ~30-40KB JSON. The failure surfaces as a
+# generic "Error occurred during tool execution" with a `req_*` id —
+# tool runs fine server-side, claude.ai inference layer rejects the
+# return value. Hold every response under this cap and warn the model
+# so it knows to narrow the window.
+MAX_RESPONSE_BYTES = 30_000
+
+
+def _apply_size_cap(rows: list[dict], warnings: list[str]) -> tuple[list[dict], bool]:
+    """If rows JSON-encode to more than MAX_RESPONSE_BYTES, truncate
+    keeping the MOST RECENT rows (time-series tools sort ascending —
+    we want the tail, which is the newest). Returns (rows, was_capped).
+    Skips silently if rows is empty or fails to serialize."""
+    if len(rows) <= 1:
+        return rows, False
+    try:
+        text = json.dumps(rows, default=str)
+    except Exception:
+        return rows, False
+    if len(text) <= MAX_RESPONSE_BYTES:
+        return rows, False
+    bytes_per_row = max(1, len(text) // len(rows))
+    target = max(1, int(MAX_RESPONSE_BYTES / bytes_per_row * 0.85))
+    capped = rows[-target:]
+    warnings.append(
+        f"Result truncated to last {len(capped)} rows (of {len(rows)}) — "
+        f"the full payload would exceed the MCP transport's tool-result "
+        f"size budget (~{MAX_RESPONSE_BYTES // 1000}KB). Narrow the date "
+        f"window or use ask_sql with aggregation (e.g. date_trunc('week')) "
+        f"for longer-range queries."
+    )
+    return capped, True
+
+
 def _ok(tool: str, rows: list[dict], *, truncated: bool = False, warnings: list[str] | None = None,
         extra: dict | None = None) -> dict:
+    warnings_list = list(warnings or [])
+    # Auto-truncate to fit the MCP response budget unless the caller
+    # has already done its own truncation (most haven't — DAILY_MAX_ROWS
+    # is row-count-based, not byte-aware).
+    if not truncated and rows:
+        rows, was_capped = _apply_size_cap(rows, warnings_list)
+        if was_capped:
+            truncated = True
     out: dict = {
         "ok": True,
         "tool": tool,
         "rows": rows,
         "row_count": len(rows),
         "truncated": truncated,
-        "warnings": warnings or [],
+        "warnings": warnings_list,
     }
     if extra:
         out.update(extra)
