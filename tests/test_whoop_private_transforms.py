@@ -190,3 +190,52 @@ def test_transform_lift_workout():
 def test_transform_lift_workout_missing_keys():
     assert transforms.transform_lift_workout({"date": "2026-06-06"}) is None  # no activity_id
     assert transforms.transform_lift_workout({"activity_id": "x"}) is None    # no date
+
+
+def test_transform_cardio_details_sets():
+    payload = {"weightlifting_cardio_details": {"weightlifting_exercises": {"exercise_summary": {
+        "tonnage_display": "7,380",
+        "exercise_card_groups": [
+            {"cards": [{
+                "exercise_id": "BENCHPRESS_BARBELL",
+                "title_display": "Bench Press - Barbell",
+                "volume_title_display": "REPS",
+                "bottom_stats": {"tonnage_display": "3700"},
+                "stat_rows": [
+                    {"volume_display": "5", "weight_display": "95", "avg_hr_display": "130", "achievement_icon": None},
+                    {"volume_display": "5", "weight_display": "135", "avg_hr_display": "139", "achievement_icon": "BADGE_BRONZE"},
+                ],
+            }]},
+            {"cards": [{
+                "exercise_id": "ROWS_MACHINE",
+                "title_display": "Rowing",
+                "volume_title_display": "TIME",
+                "stat_rows": [
+                    {"volume_display": "1:00", "weight_display": "0", "avg_hr_display": "120", "achievement_icon": None},
+                ],
+            }]},
+        ],
+    }}}}
+    wk, sets = transforms.transform_cardio_details(payload, "act-1", date(2026, 6, 6))
+
+    assert wk["activity_id"] == "act-1"
+    assert wk["set_count"] == 3
+    assert wk["exercise_count"] == 2
+    assert wk["total_volume_kg"] == pytest.approx(7380 * 0.45359237, abs=1)
+
+    bench = [s for s in sets if s["exercise_id"] == "BENCHPRESS_BARBELL"]
+    assert [s["set_index"] for s in bench] == [1, 2]
+    assert bench[0]["reps"] == 5 and bench[0]["weight_lb"] == 95.0
+    assert bench[0]["weight_kg"] == pytest.approx(43.09, abs=0.1)
+    assert bench[0]["volume_type"] == "REPS" and bench[0]["is_pr"] is False
+    assert bench[1]["is_pr"] is True  # achievement badge -> PR flag
+
+    row = next(s for s in sets if s["exercise_id"] == "ROWS_MACHINE")
+    assert row["volume_type"] == "TIME"
+    assert row["time_seconds"] == 60 and row["reps"] is None
+    assert row["weight_lb"] == 0.0  # bodyweight/timed
+
+
+def test_transform_cardio_details_non_strength():
+    # A cardio-only workout has no weightlifting breakdown.
+    assert transforms.transform_cardio_details({"graph_response": {}}, "a", date(2026, 6, 6)) == (None, [])

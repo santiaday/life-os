@@ -200,7 +200,97 @@ def ingest_behavior_impact(client: WhoopPrivateClient) -> int:
         return len(rows)
 
 
+def ingest_lifts(client: WhoopPrivateClient, *, backfill_days: int | None = None) -> int:
+    """Pull exact per-set Strength Trainer detail. Enumerates strength workouts
+    from fact_workout (the public-OAuth ingester already lands every activity),
+    fetches each workout's cardio-details breakdown, and upserts
+    fact_whoop_lift_workout (aggregate) + fact_whoop_lift_set (one row per set).
+    Incremental covers the last 7 days; backfill covers `backfill_days`."""
+    cutoff = _local_today() - timedelta(days=backfill_days if backfill_days else 7)
+    with ingestion_run("whoop_private", "lift", since=cutoff.isoformat()) as run:
+        with tx() as c, c.cursor() as cur:
+            cur.execute(
+                """
+                SELECT workout_id, day, strain,
+                       EXTRACT(EPOCH FROM (end_ts - start_ts)) / 60.0 AS dur_min
+                FROM fact_workout
+                WHERE (sport_name ILIKE %s OR sport_name ILIKE %s)
+                  AND day >= %s
+                ORDER BY day
+                """,
+                ["%weight%", "%strength%", cutoff],
+            )
+            workouts = cur.fetchall()
+
+        fetched = 0
+        errors: dict[str, str] = {}
+        parsed: list[tuple[str, dict, list[dict], dict]] = []  # (aid, wk_row, set_rows, slim_raw)
+        for w in workouts:
+            aid = str(w["workout_id"])  # fact_workout.workout_id is uuid; our tables key on text
+            try:
+                payload = client.cardio_details(aid)
+            except WhoopAuthExpired:
+                raise
+            except Exception as e:
+                errors[aid] = f"{type(e).__name__}: {e}"
+                continue
+            wcd = (payload or {}).get("weightlifting_cardio_details")
+            if not wcd:
+                continue  # not a strength workout, or no breakdown
+            fetched += 1
+            wk_row, set_rows = transforms.transform_cardio_details(payload, aid, w["day"])
+            if wk_row is None:
+                continue
+            wk_row["strain"] = _safe_num(w["strain"])
+            wk_row["duration_minutes"] = round(w["dur_min"], 1) if w["dur_min"] else None
+            parsed.append((aid, wk_row, set_rows, {"weightlifting_cardio_details": wcd}))
+
+        total_sets = 0
+        now = _now()
+        with tx() as c:
+            for aid, wk_row, set_rows, slim in parsed:
+                upsert_rows(
+                    "raw_whoop_lift",
+                    [{"activity_id": aid, "payload": Jsonb(slim)}],
+                    conflict_cols=["activity_id"],
+                    update_cols=["payload", "fetched_at"],
+                    connection=c,
+                )
+                rid = _raw_id(c, "raw_whoop_lift", {"activity_id": aid})
+                wk_row["exercises"] = Jsonb(wk_row["exercises"])
+                wk_row["raw_id"] = rid
+                wk_row["updated_at"] = now
+                upsert_rows(
+                    "fact_whoop_lift_workout", [wk_row],
+                    conflict_cols=["activity_id"], connection=c,
+                )
+                for s in set_rows:
+                    s["raw_id"] = rid
+                    s["updated_at"] = now
+                if set_rows:
+                    upsert_rows(
+                        "fact_whoop_lift_set", set_rows,
+                        conflict_cols=["activity_id", "exercise_id", "set_index"],
+                        connection=c,
+                    )
+                total_sets += len(set_rows)
+
+        run.fetched(fetched)
+        run.upserted(total_sets)
+        run.add_metadata(workouts=len(parsed), sets=total_sets)
+        if errors:
+            run.add_metadata(errors=errors)
+        return total_sets
+
+
 # ---- orchestration ---------------------------------------------------------
+def _safe_num(v) -> float | None:
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def run_all(*, backfill_days: int | None = None, data_type: str | None = None) -> dict:
     """Run every pipeline, returning per-type counts. Failures in one pipeline
     don't abort the others — each is its own ingestion_run."""
@@ -209,6 +299,7 @@ def run_all(*, backfill_days: int | None = None, data_type: str | None = None) -
         ("trend", lambda c: ingest_trends(c, backfill_days=backfill_days)),
         ("sleep_need", lambda c: ingest_sleep_need(c)),
         ("behavior_impact", lambda c: ingest_behavior_impact(c)),
+        ("lift", lambda c: ingest_lifts(c, backfill_days=backfill_days)),
     ]
     if data_type:
         pipelines = [(n, f) for n, f in pipelines if n == data_type]

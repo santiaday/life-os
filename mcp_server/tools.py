@@ -386,6 +386,65 @@ def get_strength_sets(
     return _ok("get_strength_sets", rows, truncated=truncated, warnings=warnings)
 
 
+def get_whoop_lift_workouts(start_date: date, end_date: date) -> dict:
+    """Whoop Strength Trainer workouts in the window: per-workout total volume
+    (kg), set/exercise counts, strain, duration, and the per-exercise summary
+    (JSONB `exercises`). For the exact set-by-set breakdown use
+    get_whoop_lift_sets."""
+    q = """
+        SELECT activity_id, day, name, duration_minutes, strain,
+               total_volume_kg, set_count, exercise_count, exercises
+        FROM fact_whoop_lift_workout
+        WHERE day BETWEEN %s AND %s
+        ORDER BY day DESC
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, [start_date, end_date])
+        rows = _serialize(cur.fetchall())
+    return _ok("get_whoop_lift_workouts", rows)
+
+
+def get_whoop_lift_sets(
+    start_date: date,
+    end_date: date,
+    exercise_search: str | None = None,
+    activity_id: str | None = None,
+) -> dict:
+    """Exact per-set Whoop Strength Trainer detail — every set's reps x weight
+    (both lb and kg), time (for timed moves), average HR, and PR flag, in
+    performed order. Filter by exercise_search (ILIKE on exercise name/id) or a
+    single activity_id (one workout's full set list)."""
+    params: list = [start_date, end_date]
+    where = ["day BETWEEN %s AND %s"]
+    if activity_id:
+        where.append("activity_id = %s")
+        params.append(activity_id)
+    if exercise_search:
+        where.append("(exercise_name ILIKE %s OR exercise_id ILIKE %s)")
+        params.append(f"%{exercise_search}%")
+        params.append(f"%{exercise_search}%")
+    q = f"""
+        SELECT activity_id, day, exercise_id, exercise_name, set_index,
+               volume_type, reps, time_seconds, weight_lb, weight_kg,
+               avg_hr, is_pr
+        FROM fact_whoop_lift_set
+        WHERE {" AND ".join(where)}
+        ORDER BY day DESC, activity_id, exercise_name, set_index
+        LIMIT {STRENGTH_SET_LIMIT + 1}
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, params)
+        rows = _serialize(cur.fetchall())
+    truncated = len(rows) > STRENGTH_SET_LIMIT
+    if truncated:
+        rows = rows[:STRENGTH_SET_LIMIT]
+    warnings = (
+        [f"More than {STRENGTH_SET_LIMIT} sets; truncated. Narrow the window or filter."]
+        if truncated else []
+    )
+    return _ok("get_whoop_lift_sets", rows, truncated=truncated, warnings=warnings)
+
+
 def get_exercise_progression(
     exercise_search: str,
     start_date: date,
@@ -2763,6 +2822,45 @@ TOOLS: dict[str, dict] = {
                     "enum": ["warmup", "normal", "failure", "dropset"],
                 },
                 "working_sets_only": {"type": "boolean", "default": True},
+            },
+        },
+    },
+    "get_whoop_lift_workouts": {
+        "fn": get_whoop_lift_workouts,
+        "description": (
+            "Whoop Strength Trainer workouts in a date window: per-workout total "
+            "volume (kg), set + exercise counts, strain, duration, and the "
+            "per-exercise summary. This is the CURRENT source of strength data "
+            "(Hevy is deprecated). For exact set-by-set reps/weights call "
+            "get_whoop_lift_sets."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["start_date", "end_date"],
+            "properties": {
+                "start_date": {"type": "string", "format": "date"},
+                "end_date":   {"type": "string", "format": "date"},
+            },
+        },
+    },
+    "get_whoop_lift_sets": {
+        "fn": get_whoop_lift_sets,
+        "description": (
+            "Exact per-set Whoop Strength Trainer detail: every set's reps x "
+            "weight (lb and kg), time_seconds (timed moves), avg_hr, and is_pr, "
+            "in performed order. Filter by exercise_search (ILIKE on exercise "
+            "name/id, e.g. 'bench') or activity_id (one workout's full set list, "
+            "from get_whoop_lift_workouts). Use this for 'what exactly did I lift "
+            "on <date>' / PR / per-set questions."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["start_date", "end_date"],
+            "properties": {
+                "start_date": {"type": "string", "format": "date"},
+                "end_date":   {"type": "string", "format": "date"},
+                "exercise_search": {"type": "string"},
+                "activity_id": {"type": "string"},
             },
         },
     },

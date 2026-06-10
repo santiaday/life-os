@@ -178,6 +178,21 @@ def get_strength_sets(
     )
 
 
+@_tool(description=T.TOOLS["get_whoop_lift_workouts"]["description"])
+def get_whoop_lift_workouts(start_date: date, end_date: date) -> dict:
+    return T.get_whoop_lift_workouts(start_date, end_date)
+
+
+@_tool(description=T.TOOLS["get_whoop_lift_sets"]["description"])
+def get_whoop_lift_sets(
+    start_date: date,
+    end_date: date,
+    exercise_search: str | None = None,
+    activity_id: str | None = None,
+) -> dict:
+    return T.get_whoop_lift_sets(start_date, end_date, exercise_search, activity_id)
+
+
 @_tool(description=T.TOOLS["get_exercise_progression"]["description"])
 def get_exercise_progression(
     exercise_search: str,

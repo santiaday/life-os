@@ -322,3 +322,108 @@ def transform_lift_workout(rec: dict) -> dict | None:
         "set_count": _safe_int(rec.get("set_count")),
         "exercises": rec.get("exercises") or [],
     }
+
+
+# ---- strength trainer: exact per-set detail --------------------------------
+LB_TO_KG = 0.45359237
+
+
+def _parse_int_str(s) -> int | None:
+    if s is None:
+        return None
+    s = str(s).replace(",", "").strip()
+    if not s:
+        return None
+    try:
+        return int(float(s))
+    except ValueError:
+        return None
+
+
+def _parse_clock_seconds(s) -> int | None:
+    """'1:00' -> 60, '0:45' -> 45, '1:02:03' -> 3723."""
+    if not s:
+        return None
+    try:
+        parts = [int(p) for p in str(s).split(":")]
+    except ValueError:
+        return None
+    sec = 0
+    for p in parts:
+        sec = sec * 60 + p
+    return sec
+
+
+def transform_cardio_details(payload: dict, activity_id: str, day: date) -> tuple[dict | None, list[dict]]:
+    """Parse /core-details-bff/v1/cardio-details for a strength workout into
+    (workout_aggregate_row, [per_set_rows]).
+
+    The set data lives at weightlifting_cardio_details.weightlifting_exercises.
+    exercise_summary.exercise_card_groups[*].cards[*].stat_rows[*]. Card groups
+    are UI carousel paging — flatten them. Each stat_row is one set in performed
+    order; volume_display is reps (when volume_title_display == 'REPS') or a
+    clock string (when 'TIME'). Weights are pounds (0 = bodyweight). Returns
+    (None, []) if the payload carries no weightlifting breakdown.
+    """
+    summary = (
+        ((payload or {}).get("weightlifting_cardio_details") or {})
+        .get("weightlifting_exercises") or {}
+    ).get("exercise_summary") or {}
+    groups = summary.get("exercise_card_groups") or []
+
+    set_rows: list[dict] = []
+    exercises: list[dict] = []
+    per_ex_idx: dict[str, int] = {}
+    for group in groups:
+        for card in group.get("cards") or []:
+            ex_id = card.get("exercise_id")
+            if not ex_id:
+                continue
+            name = card.get("title_display")
+            vtype = (card.get("volume_title_display") or "").upper() or None
+            ex_set_count = 0
+            for sr in card.get("stat_rows") or []:
+                idx = per_ex_idx.get(ex_id, 0) + 1
+                per_ex_idx[ex_id] = idx
+                ex_set_count += 1
+                weight_lb = _parse_int_str(sr.get("weight_display"))
+                if vtype == "TIME":
+                    reps, tsec = None, _parse_clock_seconds(sr.get("volume_display"))
+                else:
+                    reps, tsec = _parse_int_str(sr.get("volume_display")), None
+                set_rows.append({
+                    "activity_id": activity_id,
+                    "day": day,
+                    "exercise_id": ex_id,
+                    "exercise_name": name,
+                    "set_index": idx,
+                    "volume_type": vtype,
+                    "reps": reps,
+                    "time_seconds": tsec,
+                    "weight_lb": float(weight_lb) if weight_lb is not None else None,
+                    "weight_kg": round(weight_lb * LB_TO_KG, 2) if weight_lb is not None else None,
+                    "avg_hr": _parse_int_str(sr.get("avg_hr_display")),
+                    "is_pr": bool(sr.get("achievement_icon")),
+                })
+            bs = card.get("bottom_stats") or {}
+            exercises.append({
+                "exercise_id": ex_id,
+                "name": name,
+                "set_count": ex_set_count,
+                "volume_type": vtype,
+                "tonnage_display": bs.get("tonnage_display"),
+            })
+
+    if not set_rows:
+        return None, []
+
+    tonnage_lb = _parse_int_str(summary.get("tonnage_display"))
+    workout = {
+        "activity_id": activity_id,
+        "day": day,
+        "total_volume_kg": round(tonnage_lb * LB_TO_KG, 2) if tonnage_lb else None,
+        "set_count": len(set_rows),
+        "exercise_count": len(exercises),
+        "exercises": exercises,
+    }
+    return workout, set_rows

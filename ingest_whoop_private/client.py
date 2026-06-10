@@ -105,6 +105,14 @@ class WhoopPrivateClient:
         Returns {} on 404."""
         return self._get("/behavior-impact-service/v1/impact")
 
+    def cardio_details(self, activity_id: str) -> dict:
+        """Per-workout detail. For strength workouts the response carries the
+        full per-exercise / per-set breakdown under weightlifting_cardio_details
+        (plus a large HR curve we discard). Returns {} on 404."""
+        return self._get(
+            "/core-details-bff/v1/cardio-details", params={"activityId": activity_id}
+        )
+
 
 # Metrics worth ingesting. The public OAuth ingester (ingest_whoop) already
 # captures HRV / RHR / RECOVERY / strain / sleep-stage detail, so we focus on
