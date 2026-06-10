@@ -188,6 +188,12 @@ class Settings(BaseSettings):
     # entry here; lifelog_api.auth reads os.environ directly so the token can
     # be rotated without bouncing the whole settings cache.
     LIFELOG_API_TOKEN: str | None = None
+    # Single-tenant default. When the Lifelog app moves to its own
+    # multi-tenant DB, this gets replaced by a JWT resolver in
+    # lifelog_api.auth that maps a per-user bearer to that user's id.
+    # Schema already carries user_id on every row, so the switch is
+    # auth-layer-only — no data migration needed.
+    LIFELOG_USER_ID: str = "santi"
 
     # ---- Observability -----------------------------------------------------
     LOG_LEVEL: str = "INFO"

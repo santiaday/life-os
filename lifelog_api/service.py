@@ -1,13 +1,17 @@
 """DB operations for the lifelog HTTP surface.
 
-Uses the existing lifeos_core.db pool. All writes go through `tx()` so the
-caller gets transactional semantics. The natural identity for an iOS event
-is `source='ios_manual'` + `source_event_id=<uuid4>` — consistent with
-existing sources.
+Uses the existing lifeos_core.db pool. Multi-tenant by carrying a
+`user_id` parameter on every public function — derived from the bearer
+token via lifelog_api.auth.current_user_id and forwarded by the route
+layer.
 
-Critical invariant: at most ONE open ios_manual session at any time.
-`start_event` enforces this by closing any open row in the same transaction
-that inserts the new one.
+Source = 'ios_manual' for everything written from the iOS app (both
+sessions and annotations). Distinguished by `event_kind`:
+  - session    : has start + end, supports Live Activity
+  - annotation : single moment (ended_at == started_at), no Live Activity
+
+Critical invariant: at most ONE open ios_manual SESSION per user at any
+time. annotations don't participate — they're closed at insert.
 """
 
 from __future__ import annotations
@@ -15,18 +19,21 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
+from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from lifeos_core.db import tx
 
 from .activity_types import get_activity_type
 from .schemas import (
+    AnnotateEventRequest,
     EndEventRequest,
     EventContact,
     EventLocation,
     EventResponse,
     HealthResponse,
     StartEventRequest,
+    UpdateEventRequest,
 )
 
 SOURCE = "ios_manual"
@@ -50,16 +57,15 @@ def _now_utc() -> datetime:
     return datetime.now(UTC)
 
 
-def _resolve_started_at(req_started_at: datetime | None) -> datetime:
-    if req_started_at is None:
+def _resolve_datetime(value: datetime | None) -> datetime:
+    """Normalize an incoming datetime to UTC, defaulting to now() if
+    None. The iOS app sends tz-aware datetimes; we tolerate naive input
+    by assuming UTC."""
+    if value is None:
         return _now_utc()
-    # Normalize to UTC. Postgres timestamptz stores UTC regardless of input
-    # tz, but psycopg renders it back in the connection's TZ — keeping the
-    # input UTC keeps round-trip behavior predictable.
-    if req_started_at.tzinfo is None:
-        # iOS clients should send tz-aware. If not, assume UTC and log later.
-        return req_started_at.replace(tzinfo=UTC)
-    return req_started_at.astimezone(UTC)
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _row_to_response(row: dict) -> EventResponse:
@@ -76,6 +82,7 @@ def _row_to_response(row: dict) -> EventResponse:
         started_at=row["started_at"],
         ended_at=row["ended_at"],
         duration_seconds=row["duration_seconds"],
+        event_kind=row.get("event_kind") or "session",
         location=location,
         contacts=contacts,
         notes=meta.get("notes"),
@@ -83,63 +90,88 @@ def _row_to_response(row: dict) -> EventResponse:
     )
 
 
-def _build_metadata(req: StartEventRequest) -> dict:
-    """JSONB payload for the events.metadata column. Mirrors the iOS shape so
-    /events/recent can rehydrate without joining anything."""
-    md: dict = {"activity_type": req.activity_type}
-    if req.location is not None:
-        md["location"] = req.location.model_dump()
-    if req.contacts:
-        md["contacts"] = [c.model_dump() for c in req.contacts]
-    if req.notes:
-        md["notes"] = req.notes
-    if req.focus_mode:
-        md["focus_mode"] = req.focus_mode
-    if req.device:
-        md["device"] = req.device
+def _build_metadata(
+    *,
+    activity_type: str,
+    location: EventLocation | None = None,
+    contacts: list[EventContact] | None = None,
+    notes: str | None = None,
+    focus_mode: str | None = None,
+    device: str | None = None,
+) -> dict:
+    """JSONB payload for the events.metadata column. Mirrors the iOS
+    shape so /events/recent can rehydrate without joining anything."""
+    md: dict = {"activity_type": activity_type}
+    if location is not None:
+        md["location"] = location.model_dump()
+    if contacts:
+        md["contacts"] = [c.model_dump() for c in contacts]
+    if notes:
+        md["notes"] = notes
+    if focus_mode:
+        md["focus_mode"] = focus_mode
+    if device:
+        md["device"] = device
     return md
 
 
-# ─── operations ─────────────────────────────────────────────────────────────
+def _resolve_title_and_category(
+    user_id: str, slug: str, override_label: str | None
+) -> tuple[str, str]:
+    """Look up the activity in the DB to derive the human-readable title
+    + category. Tolerant of unknown slugs (the iOS app might send a slug
+    the server doesn't have yet, e.g. mid-deploy) — falls back to the
+    slug for both fields."""
+    activity = get_activity_type(user_id, slug)
+    if activity is None:
+        title = override_label or slug
+        category = slug
+    else:
+        title = override_label or activity.label
+        category = activity.label
+    return title, category
 
 
-def start_event(req: StartEventRequest) -> EventResponse:
+# ─── operations: sessions ───────────────────────────────────────────────────
+
+
+def start_event(user_id: str, req: StartEventRequest) -> EventResponse:
     """Open a new ios_manual session.
 
-    Single transaction: closes any currently-open ios_manual events
-    (idempotency / single-session invariant), then inserts the new row.
-    Returns the inserted row in the iOS shape.
-
-    `FOR UPDATE` on the close step means a concurrent /events/start race
-    serializes — only one of two simultaneous starts will see an open
-    session to close, which is correct.
+    Single transaction: closes any currently-open ios_manual sessions
+    for this user (single-active-session invariant), then inserts the
+    new row. `FOR UPDATE` on the close step serializes concurrent
+    starts — only one of two simultaneous starts will see an open
+    session to close.
     """
-    activity = get_activity_type(req.activity_type)
-    if activity is None:
-        # Permissive: still accept unknown activity_type so the iOS app
-        # doesn't break if the JSON drifts. Title falls back to the id.
-        title = req.label or req.activity_type
-        category = req.activity_type
-    else:
-        title = req.label or activity.label
-        category = activity.label
-
-    started_at = _resolve_started_at(req.started_at)
+    title, category = _resolve_title_and_category(
+        user_id, req.activity_type, req.label
+    )
+    started_at = _resolve_datetime(req.started_at)
     new_id = uuid4()
-    metadata = _build_metadata(req)
+    metadata = _build_metadata(
+        activity_type=req.activity_type,
+        location=req.location,
+        contacts=req.contacts,
+        notes=req.notes,
+        focus_mode=req.focus_mode,
+        device=req.device,
+    )
 
-    with tx() as c, c.cursor() as cur:
-        # 1. Lock + close any open ios_manual sessions. The annotation in
-        #    metadata records why — useful when reconciling on the iOS side.
+    with tx() as c, c.cursor(row_factory=dict_row) as cur:
+        # 1. Lock + close any open ios_manual sessions for THIS user.
+        #    Annotations don't participate (their ended_at is non-null).
         cur.execute(
             """
-            SELECT id, started_at, metadata
+            SELECT id
               FROM events
-             WHERE source = %s AND ended_at IS NULL
-             ORDER BY started_at DESC
+             WHERE source = %s
+               AND user_id = %s
+               AND event_kind = 'session'
+               AND ended_at IS NULL
              FOR UPDATE
             """,
-            [SOURCE],
+            [SOURCE, user_id],
         )
         for stale in cur.fetchall():
             cur.execute(
@@ -158,14 +190,14 @@ def start_event(req: StartEventRequest) -> EventResponse:
                 [started_at, started_at, stale["id"]],
             )
 
-        # 2. Insert the new row.
+        # 2. Insert the new session row.
         cur.execute(
             """
             INSERT INTO events (
               source, source_event_id, event_type, category, title,
-              started_at, ended_at, metadata
+              started_at, ended_at, metadata, user_id, event_kind
             )
-            VALUES (%s, %s, %s, %s, %s, %s, NULL, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, NULL, %s, %s, 'session')
             RETURNING *
             """,
             [
@@ -176,6 +208,7 @@ def start_event(req: StartEventRequest) -> EventResponse:
                 title,
                 started_at,
                 Jsonb(metadata),
+                user_id,
             ],
         )
         row = cur.fetchone()
@@ -183,40 +216,35 @@ def start_event(req: StartEventRequest) -> EventResponse:
     return _row_to_response(row)
 
 
-def close_event(req: EndEventRequest) -> EventResponse | None:
-    """Close an open event by source_event_id. Returns None if the id doesn't
-    exist or the event is already closed (the route maps that to 404 so the
-    iOS app can recover by calling /events/active)."""
-    ended_at = req.ended_at or _now_utc()
-    if ended_at.tzinfo is None:
-        ended_at = ended_at.replace(tzinfo=UTC)
-    else:
-        ended_at = ended_at.astimezone(UTC)
+def close_event(user_id: str, req: EndEventRequest) -> EventResponse | None:
+    """Close an open session by source_event_id. Returns None if the id
+    doesn't exist or the event is already closed (route maps to 404)."""
+    ended_at = _resolve_datetime(req.ended_at)
 
-    with tx() as c, c.cursor() as cur:
+    with tx() as c, c.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
             SELECT id, started_at, metadata
               FROM events
-             WHERE source = %s AND source_event_id = %s
+             WHERE source = %s
+               AND user_id = %s
+               AND source_event_id = %s
              FOR UPDATE
             """,
-            [SOURCE, str(req.event_id)],
+            [SOURCE, user_id, str(req.event_id)],
         )
         row = cur.fetchone()
         if row is None:
             return None
 
-        # Merge end-time notes into metadata (preserve any existing notes).
         current_meta = row.get("metadata") or {}
         if req.notes is not None:
             existing = current_meta.get("notes") or ""
             merged = f"{existing}\n{req.notes}".strip() if existing else req.notes
             current_meta = {**current_meta, "notes": merged}
 
-        # Defensive: if ended_at would be <= started_at, clamp to
-        # started_at + 1s. Happens when the iOS clock is behind the server
-        # (unlikely but possible with a manually rewound clock).
+        # Clamp ended_at >= started_at + 1s to avoid the rare iOS-clock-
+        # behind-server case generating negative durations.
         started_at = row["started_at"]
         if ended_at <= started_at:
             ended_at = started_at.replace(microsecond=0) + timedelta(seconds=1)
@@ -237,68 +265,249 @@ def close_event(req: EndEventRequest) -> EventResponse | None:
     return _row_to_response(updated)
 
 
-def fetch_active() -> EventResponse | None:
-    with tx() as c, c.cursor() as cur:
+# ─── operations: annotations ────────────────────────────────────────────────
+
+
+def annotate(user_id: str, req: AnnotateEventRequest) -> EventResponse:
+    """Log a single-moment event. Inserts an `events` row with
+    `ended_at == started_at` and `event_kind = 'annotation'`. Doesn't
+    interact with open sessions — annotations and sessions coexist.
+
+    Generated `duration_seconds` will be 0 for annotations. Calendar
+    sync excludes annotations (see fetch_unsynced)."""
+    title, category = _resolve_title_and_category(
+        user_id, req.activity_type, None
+    )
+    occurred_at = _resolve_datetime(req.occurred_at)
+    new_id = uuid4()
+    metadata = _build_metadata(
+        activity_type=req.activity_type,
+        location=req.location,
+        contacts=req.contacts,
+        notes=req.notes,
+        focus_mode=None,
+        device=req.device,
+    )
+
+    with tx() as c, c.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            INSERT INTO events (
+              source, source_event_id, event_type, category, title,
+              started_at, ended_at, metadata, user_id, event_kind
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'annotation')
+            RETURNING *
+            """,
+            [
+                SOURCE,
+                str(new_id),
+                EVENT_TYPE,
+                category,
+                title,
+                occurred_at,
+                occurred_at,            # ended_at == started_at
+                Jsonb(metadata),
+                user_id,
+            ],
+        )
+        row = cur.fetchone()
+        assert row is not None
+    return _row_to_response(row)
+
+
+# ─── operations: reads ──────────────────────────────────────────────────────
+
+
+def fetch_active(user_id: str) -> EventResponse | None:
+    """Return this user's currently-open SESSION, if any. Annotations
+    aren't sessions and never appear here."""
+    with tx() as c, c.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
             SELECT *
               FROM events
-             WHERE source = %s AND ended_at IS NULL
+             WHERE source = %s
+               AND user_id = %s
+               AND event_kind = 'session'
+               AND ended_at IS NULL
              ORDER BY started_at DESC
              LIMIT 1
             """,
-            [SOURCE],
+            [SOURCE, user_id],
         )
         row = cur.fetchone()
     return _row_to_response(row) if row else None
 
 
-def fetch_recent(*, limit: int = 50, before: datetime | None = None) -> list[EventResponse]:
-    """Most recent ios_manual events, started_at DESC. Excludes the open
-    session — the iOS app shows that separately as the active card."""
-    sql = [
+def fetch_recent(
+    user_id: str,
+    *,
+    limit: int = 50,
+    before: datetime | None = None,
+    kind: str | None = None,
+) -> list[EventResponse]:
+    """Most recent ios_manual events for this user, started_at DESC.
+
+    Excludes the open session (it's surfaced separately at /active).
+    Optional kind filter ('session' or 'annotation') for views that want
+    one or the other."""
+    sql_parts = [
         "SELECT * FROM events",
-        "WHERE source = %s AND ended_at IS NOT NULL",
+        "WHERE source = %s",
+        "  AND user_id = %s",
+        # Annotations have ended_at = started_at so they're always
+        # considered "ended". Sessions still need the IS NOT NULL guard.
+        "  AND (event_kind = 'annotation' OR ended_at IS NOT NULL)",
     ]
-    params: list = [SOURCE]
+    params: list = [SOURCE, user_id]
+    if kind:
+        sql_parts.append("AND event_kind = %s")
+        params.append(kind)
     if before is not None:
         if before.tzinfo is None:
             before = before.replace(tzinfo=UTC)
-        sql.append("AND started_at < %s")
+        sql_parts.append("AND started_at < %s")
         params.append(before)
-    sql.append("ORDER BY started_at DESC LIMIT %s")
+    sql_parts.append("ORDER BY started_at DESC LIMIT %s")
     params.append(min(max(limit, 1), 200))
-    with tx() as c, c.cursor() as cur:
-        cur.execute("\n".join(sql), params)
+    with tx() as c, c.cursor(row_factory=dict_row) as cur:
+        cur.execute("\n".join(sql_parts), params)
         rows = cur.fetchall()
     return [_row_to_response(r) for r in rows]
 
 
-def fetch_by_id(source_event_id: UUID) -> EventResponse | None:
-    with tx() as c, c.cursor() as cur:
+def update_event(
+    user_id: str, source_event_id: UUID, req: UpdateEventRequest
+) -> EventResponse | None:
+    """PATCH an existing event. Used to fix times, edit notes, swap
+    location/contacts after the fact. Returns None if the event isn't
+    found (route maps to 404).
+
+    Rules:
+      - Sessions: started_at and ended_at independently editable. Server
+        clamps ended_at >= started_at + 1s.
+      - Annotations: ended_at is always pinned to == started_at, so any
+        provided ended_at is ignored. `occurred_at` (preferred name for
+        annotation timestamps) overrides started_at.
+      - Notes, location, contacts are merged into metadata.
+    """
+    with tx() as c, c.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            SELECT id, started_at, ended_at, metadata, event_kind
+              FROM events
+             WHERE source = %s AND user_id = %s AND source_event_id = %s
+             FOR UPDATE
+            """,
+            [SOURCE, user_id, str(source_event_id)],
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+
+        kind: str = row["event_kind"]
+        new_started = row["started_at"]
+        new_ended = row["ended_at"]
+
+        # Annotations: `occurred_at` overrides; ended stays pinned.
+        if kind == "annotation":
+            if req.occurred_at is not None:
+                new_started = _resolve_datetime(req.occurred_at)
+                new_ended = new_started
+            elif req.started_at is not None:
+                new_started = _resolve_datetime(req.started_at)
+                new_ended = new_started
+            # Any provided ended_at is intentionally ignored for annotations.
+        else:
+            if req.started_at is not None:
+                new_started = _resolve_datetime(req.started_at)
+            if req.ended_at is not None:
+                new_ended = _resolve_datetime(req.ended_at)
+            # Clamp ended_at strictly after started_at.
+            if new_ended is not None and new_ended <= new_started:
+                new_ended = new_started + timedelta(seconds=1)
+
+        # Merge metadata edits.
+        current_meta: dict = dict(row.get("metadata") or {})
+        if req.notes is not None:
+            if req.notes == "":
+                current_meta.pop("notes", None)
+            else:
+                current_meta["notes"] = req.notes
+        if req.location is not None:
+            current_meta["location"] = req.location.model_dump()
+        if req.contacts is not None:
+            if not req.contacts:
+                current_meta.pop("contacts", None)
+            else:
+                current_meta["contacts"] = [c.model_dump() for c in req.contacts]
+
+        cur.execute(
+            """
+            UPDATE events
+               SET started_at = %s,
+                   ended_at   = %s,
+                   metadata   = %s,
+                   updated_at = now()
+             WHERE id = %s
+             RETURNING *
+            """,
+            [new_started, new_ended, Jsonb(current_meta), row["id"]],
+        )
+        updated = cur.fetchone()
+        assert updated is not None
+    return _row_to_response(updated)
+
+
+def delete_event(user_id: str, source_event_id: UUID) -> bool:
+    """Hard-delete an event row. Returns True if a row was removed,
+    False if no event matched. Calendar sync will see the deletion via
+    its own reconcile pass (synced_at-aware delete is handled
+    elsewhere; for now the iOS app is the source of truth for ios_manual
+    events and we just drop the row)."""
+    with tx() as c, c.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """
+            DELETE FROM events
+             WHERE source = %s AND user_id = %s AND source_event_id = %s
+             RETURNING id
+            """,
+            [SOURCE, user_id, str(source_event_id)],
+        )
+        return cur.fetchone() is not None
+
+
+def fetch_by_id(user_id: str, source_event_id: UUID) -> EventResponse | None:
+    with tx() as c, c.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
             SELECT * FROM events
-             WHERE source = %s AND source_event_id = %s
+             WHERE source = %s
+               AND user_id = %s
+               AND source_event_id = %s
             """,
-            [SOURCE, str(source_event_id)],
+            [SOURCE, user_id, str(source_event_id)],
         )
         row = cur.fetchone()
     return _row_to_response(row) if row else None
 
 
-def health() -> HealthResponse:
-    with tx() as c, c.cursor() as cur:
+def health(user_id: str) -> HealthResponse:
+    with tx() as c, c.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
             SELECT
-              COUNT(*) FILTER (WHERE ended_at IS NULL)        AS open_count,
-              COUNT(*) FILTER (WHERE day = CURRENT_DATE)      AS today_count,
-              MAX(started_at)                                  AS last_started_at
+              COUNT(*) FILTER (
+                WHERE event_kind = 'session' AND ended_at IS NULL
+              ) AS open_count,
+              COUNT(*) FILTER (WHERE day = CURRENT_DATE)  AS today_count,
+              MAX(started_at)                              AS last_started_at
             FROM events
             WHERE source = %s
+              AND user_id = %s
             """,
-            [SOURCE],
+            [SOURCE, user_id],
         )
         row = cur.fetchone()
     return HealthResponse(
@@ -312,15 +521,19 @@ def health() -> HealthResponse:
 
 
 def close_stale_events() -> int:
-    """Auto-close any ios_manual event open for more than STALE_AFTER_HOURS,
-    estimating an end at started_at + STALE_ESTIMATED_HOURS. Returns the
-    count of rows closed.
+    """Auto-close any ios_manual SESSION open for more than
+    STALE_AFTER_HOURS, estimating an end at started_at +
+    STALE_ESTIMATED_HOURS. Returns the count of rows closed.
 
-    Run from the scheduler every 30 min. iOS Live Activities die after 8h
-    and the user often forgets to end manually after that — this keeps the
-    timeline honest without injecting fake durations.
+    Annotations are exempt — their ended_at is always set at insert.
+    Run from the scheduler every 30 min.
+
+    Multi-tenant note: this closes ALL stale sessions across users at
+    once. When we switch to per-tenant policies (different stale
+    thresholds per user) this gets re-scoped — but for now a global
+    pass is correct + cheap.
     """
-    with tx() as c, c.cursor() as cur:
+    with tx() as c, c.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """
             UPDATE events
@@ -333,6 +546,7 @@ def close_stale_events() -> int:
                                  ),
                    updated_at = now()
              WHERE source = %s
+               AND event_kind = 'session'
                AND ended_at IS NULL
                AND started_at < now() - (%s || ' hours')::interval
              RETURNING id
