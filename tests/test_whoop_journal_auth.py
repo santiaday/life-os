@@ -1,23 +1,28 @@
-"""Tests for the read-only WhoopAuth helper.
+"""Tests for the WhoopAuth helper.
 
-WhoopAuth has no refresh logic by design (the iPhone Shortcut owns refresh),
-so the contract is narrow: load tokens from oauth_tokens, hand them out
-until they're stale, then raise WhoopAuthExpired loudly.
+WhoopAuth loads tokens from oauth_tokens and, when the access token is stale,
+refreshes it server-side via Cognito. It only raises WhoopAuthExpired when
+there's no refresh token stored or the refresh itself fails (these tests use a
+row with no refresh_token, so they exercise the no-refresh-token branch).
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from ingest_whoop_journal import auth
 
 
-def _row(*, access: str | None = "tok-" + "a" * 60, expires_in_min: int = 60) -> dict:
+def _row(
+    *, access: str | None = "tok-" + "a" * 60, expires_in_min: int = 60,
+    refresh: str | None = None,
+) -> dict:
     return {
         "access_token": access,
-        "expires_at": datetime.now(timezone.utc) + timedelta(minutes=expires_in_min),
+        "refresh_token": refresh,
+        "expires_at": datetime.now(UTC) + timedelta(minutes=expires_in_min),
     }
 
 
@@ -78,9 +83,8 @@ def test_ensure_fresh_raises_expired_past_expires_at(monkeypatch):
     a = auth.WhoopAuth()
     with pytest.raises(auth.WhoopAuthExpired) as ei:
         a.ensure_fresh()
-    assert "expired" in str(ei.value).lower()
-    # Hint at the fix in the message
-    assert "iPhone" in str(ei.value) or "bootstrap" in str(ei.value)
+    # No refresh token in the row -> can't refresh; message points at re-login.
+    assert "login" in str(ei.value).lower()
 
 
 def test_ensure_fresh_raises_expired_within_skew_buffer(monkeypatch):
@@ -89,6 +93,21 @@ def test_ensure_fresh_raises_expired_within_skew_buffer(monkeypatch):
     a = auth.WhoopAuth()
     with pytest.raises(auth.WhoopAuthExpired):
         a.ensure_fresh()
+
+
+# ---- server-side refresh path ---------------------------------------------
+def test_ensure_fresh_refreshes_stale_token_via_cognito(monkeypatch):
+    """A stale access token + a stored refresh token -> refresh server-side and
+    return the new access token (no iPhone, no exception)."""
+    _patch_tx(monkeypatch, _row(expires_in_min=-30, refresh="refresh-" + "b" * 40))
+    fresh_exp = datetime.now(UTC) + timedelta(hours=24)
+    monkeypatch.setattr(
+        auth, "refresh_session",
+        lambda rt: {"access_token": "tok-NEW", "refresh_token": rt,
+                    "id_token": "id", "expires_at": fresh_exp},
+    )
+    a = auth.WhoopAuth()
+    assert a.ensure_fresh() == "tok-NEW"
 
 
 def test_ensure_fresh_raises_when_no_row(monkeypatch):

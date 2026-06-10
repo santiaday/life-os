@@ -47,15 +47,12 @@ COPY ingest_calendar ./ingest_calendar
 COPY ingest_cronometer ./ingest_cronometer
 COPY ingest_copilot ./ingest_copilot
 COPY ingest_whoop_journal ./ingest_whoop_journal
+COPY ingest_whoop_private ./ingest_whoop_private
 COPY ingest_whoop_labs ./ingest_whoop_labs
-COPY ingest_hevy ./ingest_hevy
-COPY ingest_pushpress ./ingest_pushpress
-# coach reuses mcp_server.hevy_write_tools for the routine POST/PUT path,
-# so the scheduler image needs mcp_server too. Module-load-time imports in
-# mcp_server.tools are limited to psycopg + lifeos_core (no FastAPI / mcp
-# SDK), so this doesn't pull in the MCP-server runtime.
-COPY mcp_server ./mcp_server
-COPY coach ./coach
+# Hevy / PushPress / coach were deprecated — their packages are no longer
+# scheduled, so they're not bundled into the scheduler image. Historical data
+# and the read-only MCP tools live on; only the cron-driven ingest/coach
+# subprocesses were removed.
 COPY mart_refresh ./mart_refresh
 COPY calendar_sync ./calendar_sync
 COPY scheduler ./scheduler

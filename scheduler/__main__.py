@@ -46,32 +46,6 @@ def run_subprocess(module: str, *args: str, chain_mart: bool = True) -> None:
             pass
 
 
-def run_pushpress_coach_pipeline() -> None:
-    """Single-shot end-to-end refresh: ingest_pushpress → coach run.
-
-    Used by the daily 4 AM trigger and the Sunday afternoon triple-fire (1/3/5
-    PM ET), which exists for the case where the gym publishes the next week's
-    programming on Sunday afternoon and we want it parsed + in Hevy before
-    the user wakes up Monday. The 4 AM Monday cron would catch it too, but
-    the Sunday triple-fire shortens the lag and lets the user preview next
-    week's loads on Sunday night."""
-    log.info("scheduler.coach_pipeline.start")
-    rc = subprocess.run(
-        [sys.executable, "-m", "ingest_pushpress", "ingest"], check=False,
-    )
-    if rc.returncode != 0:
-        log.error("scheduler.coach_pipeline.pushpress_failed", returncode=rc.returncode)
-        return
-    rc = subprocess.run(
-        [sys.executable, "-m", "coach", "run"], check=False,
-    )
-    log.info(
-        "scheduler.coach_pipeline.end",
-        coach_rc=rc.returncode,
-        status="success" if rc.returncode == 0 else "failure",
-    )
-
-
 def build() -> BlockingScheduler:
     sched = BlockingScheduler(timezone=settings.LOCAL_TZ)
 
@@ -129,6 +103,32 @@ def build() -> BlockingScheduler:
         coalesce=True,
     )
 
+    # ---- Whoop private (trends / sleep-need / behavior-impact) -------------
+    # Reuses the same iPhone-bridge token (oauth_tokens service='whoop_private')
+    # as the journal ingester. The Shortcut refreshes it at 5:30 AM and the
+    # journal pulls at 5:35/5:40/5:45; we fire at 5:50 so we never contend for
+    # the token row while it's being rewritten.
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(hour=5, minute=50),
+        args=["ingest_whoop_private", "ingest"],
+        id="whoop_private_daily",
+        name="Whoop private daily trends + sleep-need + impact",
+        max_instances=1,
+        coalesce=True,
+    )
+    # Sunday: deep 365-day rebackfill (walks end_date back in 182-day strides)
+    # to repair gaps from missed daily runs or late server recomputes.
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(day_of_week="sun", hour=5, minute=55),
+        args=["ingest_whoop_private", "ingest", "--backfill", "365"],
+        id="whoop_private_weekly_backfill",
+        name="Whoop private Sunday 365-day trend rebackfill",
+        max_instances=1,
+        coalesce=True,
+    )
+
     # ---- Calendar (Phase 3) ------------------------------------------------
     sched.add_job(
         run_subprocess,
@@ -176,87 +176,15 @@ def build() -> BlockingScheduler:
         coalesce=True,
     )
 
-    # ---- Hevy strength training -------------------------------------------
-    # Daily incremental at 6 AM (after Whoop's 6:00 backfill so the Whoop ↔
-    # Hevy linker can find fact_workout rows from this morning's session).
-    sched.add_job(
-        run_subprocess,
-        CronTrigger(hour=6, minute=10),
-        args=["ingest_hevy", "ingest"],
-        id="hevy_daily",
-        name="Hevy daily incremental (last_run lookback)",
-        max_instances=1,
-        coalesce=True,
-    )
-    # Sunday: deeper rebackfill (catches per-set tweaks made hours-to-days
-    # later in the Hevy app) + exercise template catalog refresh.
-    sched.add_job(
-        run_subprocess,
-        CronTrigger(day_of_week="sun", hour=6, minute=15),
-        args=["ingest_hevy", "ingest", "--backfill", "30", "--catalog"],
-        id="hevy_weekly_rebackfill",
-        name="Hevy Sunday 30-day rebackfill + exercise catalog",
-        max_instances=1,
-        coalesce=True,
-    )
-
-    # ---- PushPress (programmed gym workouts) ------------------------------
-    # Gym typically publishes the next week's programming by 4 PM ET the
-    # prior week, so 4 AM the next day gives a comfortable buffer. Window is
-    # ±7 days around today — past for late coach edits, future for new
-    # programming as soon as it lands.
-    sched.add_job(
-        run_subprocess,
-        CronTrigger(hour=4, minute=0),
-        args=["ingest_pushpress", "ingest"],
-        kwargs={"chain_mart": False},
-        id="pushpress_daily",
-        name="PushPress daily ±7-day programmed-workout sync",
-        max_instances=1,
-        coalesce=True,
-    )
-    # Coach: parse → normalize → recommend loads → push Hevy routines.
-    # Runs 5 min after the PushPress sync so today's programming is fresh.
-    # No mart-refresh chain — coach writes don't affect mart_daily.
-    sched.add_job(
-        run_subprocess,
-        CronTrigger(hour=4, minute=5),
-        args=["coach", "run"],
-        kwargs={"chain_mart": False},
-        id="coach_daily",
-        name="Coach: parse PushPress + recommend loads + sync Hevy routines",
-        max_instances=1,
-        coalesce=True,
-    )
-    # Hourly load recompute — picks up new actuals (PR set last night, RPE
-    # change in the latest Hevy session) and updates open future routines
-    # so the prescribed weight matches the user's latest training state.
-    sched.add_job(
-        run_subprocess,
-        CronTrigger(minute=35),
-        args=["coach", "recompute", "--future", "14"],
-        kwargs={"chain_mart": False},
-        id="coach_recompute_hourly",
-        name="Coach: hourly load recompute (post-Hevy-ingest fresh PRs)",
-        max_instances=1,
-        coalesce=True,
-    )
-    # Sunday afternoon triple-fire (1 PM / 3 PM / 5 PM ET). Gym typically
-    # publishes the next week's programming on Sunday afternoon; firing at
-    # multiple slots minimizes the lag between "coach published" and
-    # "user sees recommended loads in Hevy". Each fire is the full chain:
-    # ingest_pushpress (pull fresh) → coach run (parse + recompute + Hevy push).
-    # max_instances=1 + coalesce=True means an in-flight run won't get
-    # stomped if the previous slot hasn't finished.
-    for hour in (13, 15, 17):
-        sched.add_job(
-            run_pushpress_coach_pipeline,
-            CronTrigger(day_of_week="sun", hour=hour, minute=0),
-            id=f"pushpress_coach_sunday_{hour:02d}",
-            name=f"PushPress + coach pipeline (Sunday {hour:02d}:00 ET)",
-            max_instances=1,
-            coalesce=True,
-        )
+    # ---- Hevy / PushPress / coach — DEPRECATED ----------------------------
+    # Strength training is now sourced from Whoop's Strength Trainer (see the
+    # `lift` pipeline in ingest_whoop_private and mart_daily.strength_*). The
+    # Hevy ingester, PushPress programmed-workout ingester, and the coach
+    # parser/load-recommender were retired here. Their packages, historical
+    # tables, and read-only MCP tools are kept for querying past data; only the
+    # cron jobs (hevy_daily, hevy_weekly_rebackfill, pushpress_daily,
+    # coach_daily, coach_recompute_hourly, the Sunday coach triple-fire) and the
+    # write/coach MCP tools were removed.
 
     # ---- Copilot (Phase 7) ------------------------------------------------
     sched.add_job(

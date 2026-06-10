@@ -27,6 +27,7 @@ from mart_refresh.sql import (
     TRUNCATE_MART_MEAL,
     TRUNCATE_MART_WEEKLY,
     UPDATE_MART_DAILY_BODY_IMAGE,
+    UPDATE_MART_DAILY_WHOOP_PRIVATE,
 )
 
 log = get_logger(__name__)
@@ -72,12 +73,25 @@ def refresh_mart_body_image_daily() -> int:
         return n
 
 
+def refresh_mart_whoop_private() -> int:
+    """Patch the Whoop private-API daily metrics (steps, calories, VO2max,
+    respiratory rate, sleep debt) onto mart_daily. Own transaction so an empty
+    fact_whoop_metric_daily (before the first ingest) can't roll back the main
+    refresh. Must run AFTER mart_daily is rebuilt — refresh_all sequences it."""
+    with tx() as c, c.cursor() as cur:
+        cur.execute(UPDATE_MART_DAILY_WHOOP_PRIVATE)
+        return cur.rowcount
+
+
 def refresh_all() -> dict:
     """Returns per-table rowcounts and timings."""
     out: dict = {}
     with ingestion_run("mart", "refresh_all") as run:
         for name, fn in [
             ("mart_daily", refresh_mart_daily),
+            # whoop_private patch must come AFTER mart_daily so it updates a
+            # freshly-rebuilt row set.
+            ("mart_daily_whoop_private", refresh_mart_whoop_private),
             ("mart_meal", refresh_mart_meal),
             # mart_body_image_daily must come AFTER mart_daily so the
             # UPDATE step patches a freshly-rebuilt mart_daily row set.

@@ -1,0 +1,16 @@
+{
+  "alarm_schedule_state": "ON",
+  "eligible_for_smart_alarms": true,
+  "need_breakdown": {
+    "total": 28267937,
+    "baseline": 28100053,
+    "naps": 0,
+    "strain": 167884,
+    "debt": 0
+  },
+  "recommended_time_in_bed_formatted": {
+    "70": {"recommended_time_in_bed": 21707819},
+    "85": {"recommended_time_in_bed": 26357310},
+    "100": {"recommended_time_in_bed": 31006800}
+  }
+}

@@ -223,19 +223,32 @@ workout_agg AS (
   FROM fact_workout GROUP BY day
 ),
 strength_agg AS (
-  -- Per-day rollup of Hevy strength sessions. unique_exercises is the
-  -- DISTINCT-COUNT across the day (not the SUM), so two sessions that both
-  -- did Front Squat count it once.
+  -- Per-day rollup of Whoop Strength Trainer sessions (replaced Hevy after the
+  -- Hevy/PushPress/coach deprecation). Volume/sets are summed at the workout
+  -- grain; unique_exercises is the DISTINCT count across the day's workouts'
+  -- exercises[] JSONB (so two sessions that both did Bench Press count it once).
+  -- The two sub-aggregations are kept separate so the per-exercise fan-out in
+  -- the distinct count doesn't inflate the volume/sets sums.
   SELECT
-    fsw.day,
-    SUM(fsw.total_volume_kg)::numeric(12,2) AS strength_total_volume_kg,
-    SUM(fsw.total_sets)::int                AS strength_total_sets,
-    COUNT(DISTINCT fss.exercise_template_id)::int AS strength_unique_exercises
-  FROM fact_strength_workout fsw
-  LEFT JOIN fact_strength_set fss
-    ON fss.hevy_workout_id = fsw.hevy_workout_id
-   AND fss.exercise_template_id IS NOT NULL
-  GROUP BY fsw.day
+    w.day,
+    w.strength_total_volume_kg,
+    w.strength_total_sets,
+    COALESCE(e.strength_unique_exercises, 0) AS strength_unique_exercises
+  FROM (
+    SELECT day,
+           SUM(total_volume_kg)::numeric(12,2) AS strength_total_volume_kg,
+           SUM(set_count)::int                 AS strength_total_sets
+    FROM fact_whoop_lift_workout
+    GROUP BY day
+  ) w
+  LEFT JOIN (
+    SELECT flw.day,
+           COUNT(DISTINCT ex.elem->>'exercise_id')::int AS strength_unique_exercises
+    FROM fact_whoop_lift_workout flw
+    CROSS JOIN LATERAL jsonb_array_elements(
+                 COALESCE(flw.exercises, '[]'::jsonb)) AS ex(elem)
+    GROUP BY flw.day
+  ) e ON e.day = w.day
 ),
 journal_notes_agg AS (
   -- Whoop's daily notes lives in raw_whoop_journal.payload.journal.notes;
@@ -493,5 +506,32 @@ UPDATE mart_daily md
        body_image_photo_quality = m.body_image_photo_quality
   FROM mart_body_image_daily m
  WHERE md.day = m.day;
+"""
+
+
+# Patch the Whoop private-API daily metrics onto mart_daily. Runs AFTER
+# mart_daily is rebuilt (refresh_all sequences this). Long-format
+# fact_whoop_metric_daily is pivoted to the handful of columns mart_daily
+# exposes; weight / body-composition are deliberately NOT pulled here (those
+# columns stay owned by fact_biometric). SLEEP_DEBT_POST is a duration the
+# trend graph renders as "H:MM", which transforms parse to minutes.
+UPDATE_MART_DAILY_WHOOP_PRIVATE = """
+UPDATE mart_daily md
+   SET steps              = s.steps,
+       calories_burned    = s.calories_burned,
+       vo2_max            = s.vo2_max,
+       respiratory_rate   = s.respiratory_rate,
+       sleep_debt_minutes = s.sleep_debt_minutes
+  FROM (
+    SELECT day,
+      MAX(value) FILTER (WHERE metric = 'STEPS')            AS steps,
+      MAX(value) FILTER (WHERE metric = 'CALORIES')         AS calories_burned,
+      MAX(value) FILTER (WHERE metric = 'VO2_MAX')          AS vo2_max,
+      MAX(value) FILTER (WHERE metric = 'RESPIRATORY_RATE') AS respiratory_rate,
+      MAX(value) FILTER (WHERE metric = 'SLEEP_DEBT_POST')  AS sleep_debt_minutes
+    FROM fact_whoop_metric_daily
+    GROUP BY day
+  ) s
+ WHERE md.day = s.day;
 """
 

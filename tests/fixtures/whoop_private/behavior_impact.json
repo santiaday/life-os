@@ -1,0 +1,60 @@
+{
+  "header": {
+    "impact_title_display": "Recovery Impact Analysis",
+    "impact_subtitle_display": "See how behaviors impacted your Recovery over the past 90 days."
+  },
+  "journal_enabled": true,
+  "cycle_id": 1556947180,
+  "tiles": [
+    {
+      "type": "IMPACT_TILE",
+      "content": {
+        "impact_cards": [
+          {
+            "impact_uuid": "a1d219ac-1ed6-42fa-8640-27b259c2e727",
+            "impact_card_title_display": "79%+ Sleep Performance",
+            "impact_percentage_display": "+5%",
+            "yes_answer_count": null,
+            "no_answer_count": null,
+            "impact_style": "POSITIVE"
+          },
+          {
+            "impact_uuid": "66a9055c-1b6a-4e69-ba8e-a4111dd03721",
+            "impact_card_title_display": "Rest Day",
+            "impact_percentage_display": "+2%",
+            "yes_answer_count": null,
+            "no_answer_count": null,
+            "impact_style": "NEGLIGIBLE_POSITIVE"
+          },
+          {
+            "impact_uuid": "b95c09e7-d759-46ff-9576-35aca68d8dac",
+            "impact_card_title_display": "4+ Strain",
+            "impact_percentage_display": "-10%",
+            "yes_answer_count": null,
+            "no_answer_count": null,
+            "impact_style": "NEGATIVE"
+          }
+        ]
+      }
+    },
+    {
+      "type": "INSUFFICIENT_IMPACT_TILE",
+      "content": {
+        "impact_cards": [
+          {
+            "impact_uuid": "9eec406a-5016-4d18-bacf-15d00f669189",
+            "impact_card_title_display": "Alcohol",
+            "impact_percentage_display": null,
+            "yes_answer_count": {"answer_count_text_display": "19", "answer_count_style": "ELIGIBLE"},
+            "no_answer_count": {"answer_count_text_display": "60", "answer_count_style": "ELIGIBLE"},
+            "impact_style": "INSUFFICIENT"
+          }
+        ]
+      }
+    },
+    {
+      "type": "DIVIDER",
+      "content": {"id": null, "title": ""}
+    }
+  ]
+}
