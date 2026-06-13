@@ -1658,6 +1658,32 @@ def get_biomarker_info(biomarker_id: str) -> dict:
     return _ok("get_biomarker_info", _serialize([row]))
 
 
+def get_imaging_studies(
+    body_region: str | None = None, modality: str | None = None
+) -> dict:
+    """Radiology studies (MRI/X-ray/CT/...) with date, region, impression,
+    structured findings, and the full report text. Filter by body_region or
+    modality (ILIKE). Use for back/SI-joint/spine questions."""
+    where: list[str] = []
+    params: list = []
+    if body_region:
+        where.append("body_region ILIKE %s")
+        params.append(f"%{body_region}%")
+    if modality:
+        where.append("modality ILIKE %s")
+        params.append(f"%{modality}%")
+    q = (
+        "SELECT study_id, study_date, modality, body_region, provider, "
+        "ordering_reason, impression, findings, raw_text FROM fact_imaging_study"
+        + (" WHERE " + " AND ".join(where) if where else "")
+        + " ORDER BY study_date DESC NULLS LAST"
+    )
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, params)
+        rows = _serialize(cur.fetchall())
+    return _ok("get_imaging_studies", rows)
+
+
 # ---- ask_sql ----------------------------------------------------------------
 def ask_sql(
     query: str,

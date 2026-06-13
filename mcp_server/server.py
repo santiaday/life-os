@@ -626,6 +626,41 @@ def submit_lab_results(
     return LW.submit_lab_results(test_name, test_date, biomarkers, provider)
 
 
+@_tool(description=(
+    "Radiology studies (MRI/X-ray/CT/...) with date, region, radiologist "
+    "impression, structured findings, and full report text. Filter by "
+    "body_region or modality (ILIKE). Use for spine/back/SI-joint imaging "
+    "questions."
+))
+def get_imaging_studies(
+    body_region: str | None = None, modality: str | None = None
+) -> dict:
+    return T.get_imaging_studies(body_region, modality)
+
+
+@_tool(description=(
+    "WRITE: port a radiology study into the warehouse. Args: study_date "
+    "(YYYY-MM-DD), modality (MRI|X-RAY|CT|ULTRASOUND|DEXA|...), body_region "
+    "(e.g. 'lumbar spine'), impression (radiologist summary), findings (list of "
+    "{location, finding, severity?}), raw_text (full report verbatim), provider?, "
+    "ordering_reason?. Idempotent per (modality, region, date)."
+))
+def submit_imaging_study(
+    study_date: str,
+    modality: str,
+    body_region: str,
+    impression: str | None = None,
+    findings: list[dict] | None = None,
+    raw_text: str | None = None,
+    provider: str | None = None,
+    ordering_reason: str | None = None,
+) -> dict:
+    return LW.submit_imaging_study(
+        study_date, modality, body_region, impression, findings, raw_text,
+        provider, ordering_reason,
+    )
+
+
 @_tool(description=T.TOOLS["ask_sql"]["description"])
 def ask_sql(
     query: str,

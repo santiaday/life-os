@@ -146,3 +146,57 @@ def submit_lab_results(
         "biomarkers_written": len(fact_rows),
         "skipped": skipped,
     }
+
+
+def submit_imaging_study(
+    study_date: str,
+    modality: str,
+    body_region: str,
+    impression: str | None = None,
+    findings: list[dict] | None = None,
+    raw_text: str | None = None,
+    provider: str | None = None,
+    ordering_reason: str | None = None,
+) -> dict:
+    """Port a radiology study (MRI/X-ray/CT/...) into fact_imaging_study.
+
+    findings: optional list of {location, finding, severity?} (e.g.
+    {"location":"L5-S1","finding":"disc herniation","severity":"moderate"}).
+    raw_text: the full report verbatim. Idempotent per (modality, region, date).
+    """
+    sd = date.fromisoformat(study_date) if isinstance(study_date, str) else study_date
+    study_id = f"{_slug(modality)}-{_slug(body_region)}-{sd.isoformat()}"
+    payload = {
+        "modality": modality, "body_region": body_region, "study_date": sd.isoformat(),
+        "impression": impression, "findings": findings, "raw_text": raw_text,
+        "provider": provider, "ordering_reason": ordering_reason,
+    }
+    with tx() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO raw_imaging (study_id, payload) VALUES (%s, %s::jsonb)
+            ON CONFLICT (study_id) DO UPDATE SET payload = EXCLUDED.payload, fetched_at = now()
+            RETURNING id
+            """,
+            [study_id, json.dumps(payload, default=str)],
+        )
+        raw_id = cur.fetchone()["id"]
+        cur.execute(
+            """
+            INSERT INTO fact_imaging_study
+                (study_id, study_date, modality, body_region, provider,
+                 ordering_reason, impression, findings, raw_text, source, raw_id, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, 'external', %s, now())
+            ON CONFLICT (study_id) DO UPDATE SET
+                study_date = EXCLUDED.study_date, modality = EXCLUDED.modality,
+                body_region = EXCLUDED.body_region, provider = EXCLUDED.provider,
+                ordering_reason = EXCLUDED.ordering_reason, impression = EXCLUDED.impression,
+                findings = EXCLUDED.findings, raw_text = EXCLUDED.raw_text,
+                raw_id = EXCLUDED.raw_id, updated_at = now()
+            """,
+            [study_id, sd, modality, body_region, provider, ordering_reason,
+             impression, json.dumps(findings or [], default=str), raw_text, raw_id],
+        )
+    return {"ok": True, "study_id": study_id, "modality": modality,
+            "body_region": body_region, "study_date": sd.isoformat(),
+            "findings_count": len(findings or [])}
