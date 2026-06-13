@@ -1050,7 +1050,16 @@ def build_app() -> FastAPI:
 
     @app.get("/health", include_in_schema=False)
     def health(_: None = None) -> dict:
-        # Last-success-per-source. Drives the Phase 8 alerting story.
+        # Last-success-per-source + a staleness verdict per the alerting
+        # thresholds, so a single GET says what's actually broken. Sources with
+        # a configured threshold get stale=true once their last success is older
+        # than it; everything else is reported without a verdict.
+        from datetime import UTC, datetime
+
+        from lifeos_core.alerts import SOURCE_THRESHOLDS
+
+        thresholds = {src: (label, hrs) for src, label, hrs in SOURCE_THRESHOLDS}
+        now = datetime.now(UTC)
         with conn() as c, c.cursor() as cur:
             cur.execute(
                 """
@@ -1062,14 +1071,32 @@ def build_app() -> FastAPI:
                 """
             )
             rows = cur.fetchall()
-        out = {
-            r["source"]: {
-                "last_success_at": r["last_success_at"].isoformat() if r["last_success_at"] else None,
+        out: dict = {}
+        stale: list[str] = []
+        for r in rows:
+            src = r["source"]
+            last = r["last_success_at"]
+            entry: dict = {
+                "last_success_at": last.isoformat() if last else None,
                 "last_attempt_at": r["last_attempt_at"].isoformat() if r["last_attempt_at"] else None,
             }
-            for r in rows
-        }
-        return {"ok": True, "ingest_runs": out}
+            if src in thresholds:
+                _label, max_hours = thresholds[src]
+                if last is None:
+                    hours = None
+                    is_stale = True
+                else:
+                    if last.tzinfo is None:
+                        last = last.replace(tzinfo=UTC)
+                    hours = round((now - last).total_seconds() / 3600.0, 1)
+                    is_stale = hours > max_hours
+                entry["hours_since_success"] = hours
+                entry["threshold_hours"] = max_hours
+                entry["stale"] = is_stale
+                if is_stale:
+                    stale.append(src)
+            out[src] = entry
+        return {"ok": not stale, "stale_sources": sorted(stale), "ingest_runs": out}
 
     # claude.ai's MCP client probes well-known OAuth metadata before it'll
     # talk to the server. Return shapes that say "no auth required". Combined

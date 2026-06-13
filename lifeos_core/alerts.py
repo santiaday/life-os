@@ -27,8 +27,15 @@ log = get_logger(__name__)
 
 # (source, label, max_staleness_hours) — adjust per source cadence.
 SOURCE_THRESHOLDS = (
-    ("whoop", "Whoop", 6),         # hourly job, alert after 6h dark
-    ("calendar", "Calendar", 4),    # 30-min job, alert after 4h dark
+    ("whoop", "Whoop (public OAuth)", 8),  # hourly job; now best-effort (private API covers it)
+    # Private Whoop iOS API — the RESILIENCE BACKBONE. mart_daily recovery/HRV/RHR/
+    # strain/steps/calories/weight all fall back to this when public OAuth breaks,
+    # so if it goes dark the warehouse silently loses its safety net. Daily job.
+    ("whoop_private", "Whoop (private API)", 30),
+    ("whoop_journal", "Whoop journal", 30),  # daily journal/behavior pull
+    ("whoop_labs", "Whoop labs", 30),         # daily fetch (data only changes on a new panel)
+    ("calendar", "Calendar", 6),    # 30-min job, alert after 6h dark
+    ("calendar_sync", "Calendar sync", 6),
     ("cronometer", "Cronometer", 36),  # daily job, allow margin
     ("copilot", "Copilot", 12),     # 4-hourly job
     ("mart", "Mart refresh", 36),
