@@ -198,8 +198,9 @@ SCHEMA_DOCS: dict = {
             "grain": "1 row per working set, across all sources.",
             "columns": {
                 "activity_id": "Workout id (Whoop activity uuid as text, or Hevy workout uuid). Not globally typed — just a session grouping key.",
-                "exercise_id": "Whoop exercise id OR Hevy exercise_template_id. NOT a shared namespace across sources — match on exercise_name for cross-era progressions.",
-                "exercise_name": "Display name (e.g. 'Back Squat'). The reliable key for joining the same lift across the Hevy↔Whoop boundary.",
+                "exercise_id": "Whoop exercise id OR Hevy exercise_template_id. NOT a shared namespace across sources — use exercise_norm (not exercise_id) to join a lift across eras.",
+                "exercise_name": "Raw display name — differs by source (Hevy 'Deadlift (Barbell)' vs Whoop 'Deadlift - Barbell').",
+                "exercise_norm": "Canonical lift key: exercise_name lowercased with parens/hyphens normalized away, so the SAME lift unifies across the Hevy↔Whoop boundary ('deadlift barbell'). GROUP BY this for cross-era progressions/PRs — the get_whoop_lift_progression and get_whoop_lift_prs tools already do.",
                 "set_index": "1-based order of the set within its exercise.",
                 "volume_type": "REPS | TIME. Hevy rows are always REPS.",
                 "reps": "Reps (NULL for TIME sets).",

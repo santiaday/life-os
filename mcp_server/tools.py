@@ -456,8 +456,15 @@ def get_whoop_lift_progression(
     volume, set count, estimated 1RM (Epley: w*(1+reps/30)), and PR flag.
     exercise_search is ILIKE on name/id. Oldest-first so you read the trend
     top-to-bottom."""
+    # Group per session, but key the exercise by exercise_norm so the SAME lift
+    # spans both eras even though Hevy ("Deadlift (Barbell)") and Whoop
+    # ("Deadlift - Barbell") name it differently. A representative display name
+    # (most recent) rides along. Ordered by exercise_norm then day so each
+    # lift's trend reads chronologically top-to-bottom across sources.
     q = """
-        SELECT day, activity_id, exercise_id, exercise_name,
+        SELECT day, exercise_norm,
+               (ARRAY_AGG(exercise_name ORDER BY day DESC))[1] AS exercise_name,
+               (ARRAY_AGG(activity_id  ORDER BY day DESC))[1]  AS activity_id,
                MAX(source)                                AS source,
                COUNT(*)                                   AS set_count,
                SUM(reps)                                  AS total_reps,
@@ -470,8 +477,8 @@ def get_whoop_lift_progression(
         WHERE (exercise_name ILIKE %s OR exercise_id ILIKE %s)
           AND day BETWEEN %s AND %s
           AND reps IS NOT NULL
-        GROUP BY day, activity_id, exercise_id, exercise_name
-        ORDER BY exercise_name, day
+        GROUP BY day, exercise_norm
+        ORDER BY exercise_norm, day
     """
     like = f"%{exercise_search}%"
     with conn() as c, c.cursor() as cur:
@@ -493,8 +500,11 @@ def get_whoop_lift_prs(exercise_search: str | None = None) -> dict:
     if exercise_search:
         where.append("(exercise_name ILIKE %s OR exercise_id ILIKE %s)")
         params += [f"%{exercise_search}%", f"%{exercise_search}%"]
+    # Group by exercise_norm so a lift's all-time PR spans both eras (Hevy +
+    # Whoop) despite their different naming conventions. Display the most-recent
+    # name as the canonical label.
     q = f"""
-        SELECT exercise_name,
+        SELECT (ARRAY_AGG(exercise_name ORDER BY day DESC))[1] AS exercise_name,
                MAX(weight_lb) AS max_weight_lb,
                (ARRAY_AGG(reps ORDER BY weight_lb DESC NULLS LAST, reps DESC))[1] AS max_weight_reps,
                (ARRAY_AGG(day  ORDER BY weight_lb DESC NULLS LAST, reps DESC))[1] AS max_weight_day,
@@ -504,7 +514,7 @@ def get_whoop_lift_prs(exercise_search: str | None = None) -> dict:
                STRING_AGG(DISTINCT source, '+') AS sources
         FROM vw_strength_set
         WHERE {" AND ".join(where)}
-        GROUP BY exercise_name
+        GROUP BY exercise_norm
         ORDER BY max_weight_lb DESC NULLS LAST
     """
     with conn() as c, c.cursor() as cur:
