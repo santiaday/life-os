@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 from psycopg.types.json import Jsonb
 
 from ingest_whoop_journal.auth import WhoopAuth, WhoopAuthExpired
+from ingest_whoop_private import labs as labs_mod
 from ingest_whoop_private import transforms
 from ingest_whoop_private.client import METRICS, WhoopPrivateClient
 from lifeos_core.db import tx
@@ -300,6 +301,7 @@ def run_all(*, backfill_days: int | None = None, data_type: str | None = None) -
         ("sleep_need", lambda c: ingest_sleep_need(c)),
         ("behavior_impact", lambda c: ingest_behavior_impact(c)),
         ("lift", lambda c: ingest_lifts(c, backfill_days=backfill_days)),
+        ("labs", lambda c: labs_mod.ingest_labs(c)),
     ]
     if data_type:
         pipelines = [(n, f) for n, f in pipelines if n == data_type]

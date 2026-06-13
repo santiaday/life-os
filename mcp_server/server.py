@@ -24,7 +24,9 @@ from lifeos_core.logging import configure_logging, get_logger
 from lifeos_core.settings import settings
 from mcp_server import cronometer_write_tools as CW
 from mcp_server import hevy_write_tools as HW
+from mcp_server import labs_write_tools as LW
 from mcp_server import tools as T
+from mcp_server import whoop_lift_write_tools as LWT
 from mcp_server import write_tools as W
 from mcp_server.auth import (
     MCP_MOUNT,
@@ -191,6 +193,81 @@ def get_whoop_lift_sets(
     activity_id: str | None = None,
 ) -> dict:
     return T.get_whoop_lift_sets(start_date, end_date, exercise_search, activity_id)
+
+
+@_tool(description=T.TOOLS["get_whoop_lift_progression"]["description"])
+def get_whoop_lift_progression(
+    exercise_search: str,
+    start_date: date,
+    end_date: date,
+) -> dict:
+    return T.get_whoop_lift_progression(exercise_search, start_date, end_date)
+
+
+@_tool(description=T.TOOLS["get_whoop_lift_prs"]["description"])
+def get_whoop_lift_prs(exercise_search: str | None = None) -> dict:
+    return T.get_whoop_lift_prs(exercise_search)
+
+
+# ---- Whoop Strength Trainer writes (incl. custom exercises) ---------------
+@_tool(description=(
+    "WRITE: create a custom Whoop Strength Trainer exercise based on an "
+    "official one, so it can be used in templates/logs. Args: name, "
+    "base_exercise_id (official exercise_id it's based on, e.g. from "
+    "get_whoop_lift_prs/catalog), muscle_groups (ARMS|BACK|CHEST|CORE|"
+    "FULL_BODY|LEGS|OTHER|SHOULDERS), equipment (MACHINE|DUMBBELL|BARBELL|"
+    "BODY|OTHER|KETTLEBELL), movement_pattern, laterality, "
+    "volume_input_format (REPS|TIME). Preview unless dry_run=false. Returns the "
+    "new exercise_id."
+))
+def create_whoop_custom_exercise(
+    name: str,
+    base_exercise_id: str,
+    muscle_groups: list[str],
+    equipment: str = "OTHER",
+    movement_pattern: str = "OTHER",
+    laterality: str = "BILATERAL",
+    volume_input_format: str = "REPS",
+    dry_run: bool = True,
+) -> dict:
+    return LWT.create_whoop_custom_exercise(
+        name, base_exercise_id, muscle_groups, equipment, movement_pattern,
+        laterality, volume_input_format, dry_run,
+    )
+
+
+@_tool(description=(
+    "WRITE: save a Whoop Strength Trainer workout TEMPLATE. Unlike the "
+    "third-party Whoop MCP, this FULLY supports custom exercises (it builds "
+    "exercise metadata from your live library, not a static catalog). Args: "
+    "name, exercises = [{exercise_id, group? (shared int = superset), sets: "
+    "[{reps, weight_lb?, time_seconds?}]}], base_template_key? (save-as). "
+    "weight is POUNDS. Preview unless dry_run=false."
+))
+def save_whoop_lift_template(
+    name: str,
+    exercises: list[dict],
+    base_template_key: int | None = None,
+    dry_run: bool = True,
+) -> dict:
+    return LWT.save_whoop_lift_template(name, exercises, base_template_key, dry_run)
+
+
+@_tool(description=(
+    "WRITE: log a finished Whoop Strength Trainer workout (supports custom "
+    "exercises). Args: exercises = [{exercise_id, group?, sets: [{reps, "
+    "weight_lb?, time_seconds?}]}], name?, start?/end? (ISO8601; default last "
+    "30 min). weight is POUNDS. Preview unless dry_run=false. Note: the logged "
+    "workout flows back into fact_whoop_lift_* on the next ingest."
+))
+def log_whoop_workout(
+    exercises: list[dict],
+    name: str | None = None,
+    start: str | None = None,
+    end: str | None = None,
+    dry_run: bool = True,
+) -> dict:
+    return LWT.log_whoop_workout(exercises, name, start, end, dry_run)
 
 
 @_tool(description=T.TOOLS["get_exercise_progression"]["description"])
@@ -527,6 +604,26 @@ def get_lab_results(
 @_tool(description=T.TOOLS["get_biomarker_info"]["description"])
 def get_biomarker_info(biomarker_id: str) -> dict:
     return T.get_biomarker_info(biomarker_id)
+
+
+@_tool(description=(
+    "WRITE: port an EXTERNAL lab test (one the user hands over — a PDF, "
+    "printout, or values they paste — that didn't come through Whoop) directly "
+    "into the warehouse. Lands in the same fact_lab_result table as Whoop "
+    "Advanced Labs (source='external'), so get_lab_results / correlate_metrics "
+    "see it. Args: test_name, test_date (YYYY-MM-DD), provider (optional lab "
+    "name), biomarkers — a list of {name (or biomarker_id), value (number, "
+    "required), unit?, status? (OPTIMAL|SUFFICIENT|OUT_OF_RANGE — derived from "
+    "ranges if omitted), optimal_low?, optimal_high?, sufficient_low?, "
+    "sufficient_high?}. Idempotent per (test_name, test_date)."
+))
+def submit_lab_results(
+    test_name: str,
+    test_date: str,
+    biomarkers: list[dict],
+    provider: str | None = None,
+) -> dict:
+    return LW.submit_lab_results(test_name, test_date, biomarkers, provider)
 
 
 @_tool(description=T.TOOLS["ask_sql"]["description"])

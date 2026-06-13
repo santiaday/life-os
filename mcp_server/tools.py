@@ -445,6 +445,71 @@ def get_whoop_lift_sets(
     return _ok("get_whoop_lift_sets", rows, truncated=truncated, warnings=warnings)
 
 
+def get_whoop_lift_progression(
+    exercise_search: str,
+    start_date: date,
+    end_date: date,
+) -> dict:
+    """Per-session weight progression for a Whoop Strength Trainer exercise:
+    for each workout day, the top-set weight (lb), reps at that top set, total
+    volume, set count, estimated 1RM (Epley: w*(1+reps/30)), and whether a PR
+    was hit. exercise_search is ILIKE on name/id. Ordered oldest-first so you
+    can read the progression top-to-bottom."""
+    q = """
+        SELECT day, activity_id, exercise_id, exercise_name,
+               COUNT(*)                                   AS set_count,
+               SUM(reps)                                  AS total_reps,
+               MAX(weight_lb)                             AS top_weight_lb,
+               (ARRAY_AGG(reps ORDER BY weight_lb DESC NULLS LAST, reps DESC))[1] AS top_set_reps,
+               ROUND(SUM(COALESCE(weight_lb,0)*COALESCE(reps,0))::numeric, 0)     AS total_volume_lb,
+               ROUND(MAX(weight_lb*(1 + reps/30.0))::numeric, 1)                  AS est_1rm_lb,
+               BOOL_OR(is_pr)                             AS had_pr
+        FROM fact_whoop_lift_set
+        WHERE (exercise_name ILIKE %s OR exercise_id ILIKE %s)
+          AND day BETWEEN %s AND %s
+          AND reps IS NOT NULL
+        GROUP BY day, activity_id, exercise_id, exercise_name
+        ORDER BY exercise_name, day
+    """
+    like = f"%{exercise_search}%"
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, [like, like, start_date, end_date])
+        rows = _serialize(cur.fetchall())
+    if not rows:
+        return _ok("get_whoop_lift_progression", rows,
+                   warnings=[f"No Whoop lift sets match '{exercise_search}' in range."])
+    return _ok("get_whoop_lift_progression", rows)
+
+
+def get_whoop_lift_prs(exercise_search: str | None = None) -> dict:
+    """All-time Whoop Strength Trainer PRs per exercise: heaviest set ever
+    (weight_lb + the reps and date of that set), best estimated 1RM (Epley),
+    max bodyweight reps, and how many sets Whoop flagged as records. Optional
+    exercise_search (ILIKE on name/id) narrows to one movement."""
+    where = ["reps IS NOT NULL"]
+    params: list = []
+    if exercise_search:
+        where.append("(exercise_name ILIKE %s OR exercise_id ILIKE %s)")
+        params += [f"%{exercise_search}%", f"%{exercise_search}%"]
+    q = f"""
+        SELECT exercise_id, exercise_name,
+               MAX(weight_lb) AS max_weight_lb,
+               (ARRAY_AGG(reps ORDER BY weight_lb DESC NULLS LAST, reps DESC))[1] AS max_weight_reps,
+               (ARRAY_AGG(day  ORDER BY weight_lb DESC NULLS LAST, reps DESC))[1] AS max_weight_day,
+               ROUND(MAX(weight_lb*(1 + reps/30.0))::numeric, 1) AS best_est_1rm_lb,
+               MAX(reps) FILTER (WHERE COALESCE(weight_lb,0) = 0) AS max_bodyweight_reps,
+               COUNT(*) FILTER (WHERE is_pr) AS pr_flagged_sets
+        FROM fact_whoop_lift_set
+        WHERE {" AND ".join(where)}
+        GROUP BY exercise_id, exercise_name
+        ORDER BY max_weight_lb DESC NULLS LAST
+    """
+    with conn() as c, c.cursor() as cur:
+        cur.execute(q, params)
+        rows = _serialize(cur.fetchall())
+    return _ok("get_whoop_lift_prs", rows)
+
+
 def get_exercise_progression(
     exercise_search: str,
     start_date: date,
@@ -2861,6 +2926,43 @@ TOOLS: dict[str, dict] = {
                 "end_date":   {"type": "string", "format": "date"},
                 "exercise_search": {"type": "string"},
                 "activity_id": {"type": "string"},
+            },
+        },
+    },
+    "get_whoop_lift_progression": {
+        "fn": get_whoop_lift_progression,
+        "description": (
+            "Per-session weight PROGRESSION for one Whoop Strength Trainer "
+            "exercise over a date window: per workout day, the top-set weight "
+            "(lb) + its reps, total volume, set count, estimated 1RM (Epley), "
+            "and PR flag, oldest-first. Use for 'how has my bench progressed' / "
+            "'am I getting stronger on squats'. exercise_search is ILIKE on "
+            "name/id."
+        ),
+        "input": {
+            "type": "object",
+            "required": ["exercise_search", "start_date", "end_date"],
+            "properties": {
+                "exercise_search": {"type": "string"},
+                "start_date": {"type": "string", "format": "date"},
+                "end_date":   {"type": "string", "format": "date"},
+            },
+        },
+    },
+    "get_whoop_lift_prs": {
+        "fn": get_whoop_lift_prs,
+        "description": (
+            "All-time Whoop Strength Trainer PRs per exercise: heaviest set ever "
+            "(weight_lb + reps + date), best estimated 1RM (Epley), max "
+            "bodyweight reps, and Whoop-flagged record count. Optional "
+            "exercise_search (ILIKE) narrows to one movement; omit for every "
+            "exercise ranked by top weight."
+        ),
+        "input": {
+            "type": "object",
+            "required": [],
+            "properties": {
+                "exercise_search": {"type": "string"},
             },
         },
     },

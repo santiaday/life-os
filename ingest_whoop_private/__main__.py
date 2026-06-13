@@ -94,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument(
         "--data-type",
-        choices=["trend", "sleep_need", "behavior_impact", "lift"],
+        choices=["trend", "sleep_need", "behavior_impact", "lift", "labs"],
         default=None,
         help="Limit to one pipeline. Omit to run all.",
     )

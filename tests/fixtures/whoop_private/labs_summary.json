@@ -1,0 +1,115 @@
+{
+ "response": {
+  "biomarker_test_id": "9132cb63-4ee4-4866-ad62-b54486728963",
+  "user_id": 13097342,
+  "test_display_name": "Back Pain Test",
+  "test_date": "2026-05-30T10:00:00.000-04:00",
+  "raw_test_date_time": 1780149600,
+  "biomarkers": [
+   {
+    "biomarker_name": "alanine_aminotransferase",
+    "biomarker_display_name": "Alanine Aminotransferase (ALT)",
+    "value": 13,
+    "units": "U/L",
+    "status": "OPTIMAL",
+    "test_date": "2026-05-30T10:00:00.000-04:00",
+    "optimal_range": {
+     "lower_endpoint": 6,
+     "lower_bound_type": "CLOSED",
+     "upper_endpoint": 35,
+     "upper_bound_type": "CLOSED"
+    },
+    "sufficient_range": {
+     "lower_endpoint": 6,
+     "lower_bound_type": "CLOSED",
+     "upper_endpoint": 45,
+     "upper_bound_type": "CLOSED"
+    },
+    "out_of_range": {
+     "lower_endpoint": 0,
+     "lower_bound_type": "CLOSED",
+     "upper_endpoint": 2000,
+     "upper_bound_type": "CLOSED"
+    }
+   },
+   {
+    "biomarker_name": "albumin",
+    "biomarker_display_name": "Albumin",
+    "value": 4.6,
+    "units": "g/dL",
+    "status": "OPTIMAL",
+    "test_date": "2026-05-30T10:00:00.000-04:00",
+    "optimal_range": {
+     "lower_endpoint": 4,
+     "lower_bound_type": "CLOSED",
+     "upper_endpoint": 5,
+     "upper_bound_type": "CLOSED"
+    },
+    "sufficient_range": {
+     "lower_endpoint": 3.6,
+     "lower_bound_type": "CLOSED",
+     "upper_endpoint": 5.1,
+     "upper_bound_type": "CLOSED"
+    },
+    "out_of_range": {
+     "lower_endpoint": 1,
+     "lower_bound_type": "CLOSED",
+     "upper_endpoint": 7,
+     "upper_bound_type": "CLOSED"
+    }
+   },
+   {
+    "biomarker_name": "albumin_globulin_ratio",
+    "biomarker_display_name": "Albumin/Globulin Ratio",
+    "value": 1.6,
+    "units": null,
+    "status": "OPTIMAL",
+    "test_date": "2026-05-30T10:00:00.000-04:00",
+    "optimal_range": {
+     "lower_endpoint": 1.5,
+     "lower_bound_type": "CLOSED",
+     "upper_endpoint": 2,
+     "upper_bound_type": "CLOSED"
+    },
+    "sufficient_range": {
+     "lower_endpoint": 1,
+     "lower_bound_type": "CLOSED",
+     "upper_endpoint": 2.5,
+     "upper_bound_type": "CLOSED"
+    },
+    "out_of_range": {
+     "lower_endpoint": 0.1,
+     "lower_bound_type": "CLOSED",
+     "upper_endpoint": 3,
+     "upper_bound_type": "CLOSED"
+    }
+   },
+   {
+    "biomarker_name": "1_5_anhydroglucitol_1_5_ag",
+    "biomarker_display_name": "1,5-Anhydroglucitol (1,5-AG)",
+    "value": 0,
+    "units": null,
+    "status": "UNAVAILABLE",
+    "test_date": null,
+    "optimal_range": {
+     "lower_endpoint": 20,
+     "lower_bound_type": "CLOSED",
+     "upper_endpoint": 36.6,
+     "upper_bound_type": "CLOSED"
+    },
+    "sufficient_range": {
+     "lower_endpoint": 10,
+     "lower_bound_type": "CLOSED",
+     "upper_endpoint": 36.6,
+     "upper_bound_type": "CLOSED"
+    },
+    "out_of_range": {
+     "lower_endpoint": 0,
+     "lower_bound_type": "CLOSED",
+     "upper_endpoint": 100,
+     "upper_bound_type": "CLOSED"
+    }
+   }
+  ]
+ }
+}

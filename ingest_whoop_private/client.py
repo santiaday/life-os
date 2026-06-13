@@ -73,7 +73,7 @@ class WhoopPrivateClient:
             log.warning("whoop_private.client.401", path=path)
             raise WhoopAuthExpired(
                 f"Whoop private API rejected the access token at {path}. "
-                f"The iPhone Shortcut needs to refresh — check its run log."
+                f"Re-run `python -m ingest_whoop_private login`."
             )
         if resp.status_code == 404:
             log.debug("whoop_private.client.404", path=path)
@@ -81,6 +81,32 @@ class WhoopPrivateClient:
         if resp.status_code >= 400:
             raise WhoopPrivateAPIError(
                 f"Whoop private {resp.status_code} {path}: {resp.text[:300]}"
+            )
+        try:
+            return resp.json() or {}
+        except ValueError:
+            return {}
+
+    @retry(
+        retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException)),
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=2, min=1, max=20),
+        reraise=True,
+    )
+    def post(self, path: str, body: dict) -> dict:
+        """POST a JSON body to a private write endpoint (custom-exercise,
+        workout-template, workout activity). Raises on >=400; returns the parsed
+        JSON receipt (or {} if the body is empty)."""
+        resp = self._client.post(path, json=body, headers=self._auth.headers())
+        if resp.status_code == 401:
+            log.warning("whoop_private.client.401", path=path)
+            raise WhoopAuthExpired(
+                f"Whoop private API rejected the access token at {path}. "
+                f"Re-run `python -m ingest_whoop_private login`."
+            )
+        if resp.status_code >= 400:
+            raise WhoopPrivateAPIError(
+                f"Whoop private POST {resp.status_code} {path}: {resp.text[:400]}"
             )
         try:
             return resp.json() or {}
@@ -112,6 +138,22 @@ class WhoopPrivateClient:
         return self._get(
             "/core-details-bff/v1/cardio-details", params={"activityId": activity_id}
         )
+
+    def labs_tests(self) -> dict:
+        """List of Advanced Labs tests: {records:[{id, test_source, test_date,
+        display_name, upload_source, panel_id, ...}], next_token}."""
+        return self._get("/advanced-labs-service/v1/biomarker-tests")
+
+    def labs_summary(self, test_id: str) -> dict:
+        """One test's full biomarker results: response is flat with
+        biomarkers[] (biomarker_name, value, units, status, *_range)."""
+        return self._get(f"/advanced-labs-service/v1/biomarker-tests/{test_id}/summary")
+
+    def exercise_library(self) -> dict:
+        """All Strength Trainer exercises incl. the user's customs: {exercises:[
+        {exercise_id, name, custom_exercise, push_core_name, muscle_groups,
+        equipment, movement_pattern, ...}], filter_options}."""
+        return self._get("/weightlifting-service/v2/exercise")
 
 
 # Metrics worth ingesting. The public OAuth ingester (ingest_whoop) already
