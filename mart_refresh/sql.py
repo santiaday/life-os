@@ -100,7 +100,13 @@ cycle_primary AS (
   --     past midnight (e.g. cycle ends 01:34, but activity was the prior day)
   -- The correct attribution is the cycle's midpoint, which lands during the
   -- waking-activity portion regardless of bedtime drift. For the active cycle
-  -- (end_ts IS NULL), use now() as the open-bound proxy.
+  -- (end_ts IS NULL) we must NOT use now() as the open bound: as now() advances
+  -- the midpoint DRIFTS forward a day every ~2 real days, so a stuck-open cycle
+  -- (e.g. when public ingestion stalls and the latest cycle never gets its
+  -- end_ts) gets re-bucketed onto the wrong day and double-counts strain across
+  -- two days. Instead assume a ~12h half-cycle from start, which pins the
+  -- effective day stably to the waking day the cycle belongs to and matches the
+  -- authoritative private DAY_STRAIN day.
   --
   -- Whoop occasionally produces multiple cycles per local day around tz
   -- transitions / naps; we keep the longest as the "main" daily cycle.
@@ -109,7 +115,7 @@ cycle_primary AS (
   FROM (
     SELECT
       c.cycle_id,
-      local_date(c.start_ts + (COALESCE(c.end_ts, now()) - c.start_ts) / 2)
+      local_date(c.start_ts + (COALESCE(c.end_ts, c.start_ts + INTERVAL '12 hours') - c.start_ts) / 2)
         AS effective_day,
       c.scaled_strain,
       c.day_kilojoules,
@@ -346,14 +352,21 @@ LEFT JOIN fact_food_daily fd ON fd.day = d.day
 LEFT JOIN food_agg        fa ON fa.day = d.day
 LEFT JOIN spend_agg       sa ON sa.day = d.day
 LEFT JOIN strength_agg    st ON st.day = d.day
+-- Body composition from Apple Health (synced via Cronometer's metric feed).
+-- The real metric names are the '_apple_health' variants; weight is stored in
+-- lbs so we convert to kg here. (A previous version joined metric='weight' and
+-- 'body_fat', which never existed, so body_fat_pct was always NULL.) The Whoop
+-- private WEIGHT trend backfills weight_kg gaps later via WHOOP_FALLBACK;
+-- body_fat_pct has no Whoop fallback (Whoop BODY_COMPOSITION reports lean-mass
+-- fraction, not fat, so mapping it here would be a semantic error).
 LEFT JOIN LATERAL (
-  SELECT value FROM fact_biometric
-  WHERE day = d.day AND metric = 'weight'
+  SELECT ROUND((value * 0.45359237)::numeric, 2) AS value FROM fact_biometric
+  WHERE day = d.day AND metric = 'weight_apple_health'
   ORDER BY measured_at DESC LIMIT 1
 ) bw ON TRUE
 LEFT JOIN LATERAL (
   SELECT value FROM fact_biometric
-  WHERE day = d.day AND metric = 'body_fat'
+  WHERE day = d.day AND metric = 'body_fat_apple_health'
   ORDER BY measured_at DESC LIMIT 1
 ) bf ON TRUE;
 """
@@ -521,7 +534,13 @@ UPDATE mart_daily md
        calories_burned    = s.calories_burned,
        vo2_max            = s.vo2_max,
        respiratory_rate   = s.respiratory_rate,
-       sleep_debt_minutes = s.sleep_debt_minutes
+       sleep_debt_minutes = s.sleep_debt_minutes,
+       -- day_kilojoules is the same energy figure as CALORIES, just in kJ
+       -- (verified: day_kilojoules/4.184 == calories_burned). Fill it when the
+       -- cycle row was missing (open-cycle gap / future day) so the
+       -- strain/energy pair stays consistent. COALESCE keeps the cycle value.
+       day_kilojoules     = COALESCE(md.day_kilojoules,
+                                     ROUND((s.calories_burned * 4.184)::numeric, 2))
   FROM (
     SELECT day,
       MAX(value) FILTER (WHERE metric = 'STEPS')            AS steps,

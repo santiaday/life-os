@@ -136,10 +136,17 @@ def ingest_biometrics(*, backfill_days: int | None = None) -> int:
             return 0
 
         with tx() as c:
+            # Conflict on the natural grain (metric, measured_at), not
+            # source_row_hash — the hash includes the value, so a revised value
+            # would otherwise insert a duplicate instead of updating in place
+            # (see migration 0032). source_row_hash stays as a change-detection
+            # field and is refreshed on update.
             upsert_rows(
                 "fact_biometric",
                 [_with_updated(r) for r in rows],
-                conflict_cols=["source_row_hash"],
+                conflict_cols=["metric", "measured_at"],
+                update_cols=["value", "unit", "note", "source",
+                             "source_row_hash", "updated_at"],
                 connection=c,
             )
 
