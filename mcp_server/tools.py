@@ -42,6 +42,8 @@ CORRELATE_ALLOWLIST = {
     "sleep_efficiency_pct", "sleep_performance_pct", "sleep_consistency_pct",
     "nap_count", "nap_total_min",
     "strain", "day_kilojoules",
+    # Whoop private-API daily trends (populated by UPDATE_MART_DAILY_WHOOP_PRIVATE).
+    "steps", "calories_burned", "vo2_max", "respiratory_rate", "sleep_debt_minutes",
     "workout_count", "workout_total_min", "workout_total_kj", "workout_max_strain",
     "meeting_count", "meeting_hours", "meeting_internal_hours", "meeting_external_hours",
     "longest_focus_block_min", "total_focus_block_min",
@@ -468,10 +470,10 @@ def get_whoop_lift_progression(
                MAX(source)                                AS source,
                COUNT(*)                                   AS set_count,
                SUM(reps)                                  AS total_reps,
-               MAX(weight_lb)                             AS top_weight_lb,
+               MAX(NULLIF(weight_lb, 0))                  AS top_weight_lb,
                (ARRAY_AGG(reps ORDER BY weight_lb DESC NULLS LAST, reps DESC))[1] AS top_set_reps,
                ROUND(SUM(COALESCE(weight_lb,0)*COALESCE(reps,0))::numeric, 0)     AS total_volume_lb,
-               ROUND(MAX(weight_lb*(1 + reps/30.0))::numeric, 1)                  AS est_1rm_lb,
+               ROUND(MAX(NULLIF(weight_lb, 0)*(1 + reps/30.0))::numeric, 1)       AS est_1rm_lb,
                BOOL_OR(is_pr)                             AS had_pr
         FROM vw_strength_set
         WHERE (exercise_name ILIKE %s OR exercise_id ILIKE %s)
@@ -505,10 +507,10 @@ def get_whoop_lift_prs(exercise_search: str | None = None) -> dict:
     # name as the canonical label.
     q = f"""
         SELECT (ARRAY_AGG(exercise_name ORDER BY day DESC))[1] AS exercise_name,
-               MAX(weight_lb) AS max_weight_lb,
+               MAX(NULLIF(weight_lb, 0)) AS max_weight_lb,
                (ARRAY_AGG(reps ORDER BY weight_lb DESC NULLS LAST, reps DESC))[1] AS max_weight_reps,
                (ARRAY_AGG(day  ORDER BY weight_lb DESC NULLS LAST, reps DESC))[1] AS max_weight_day,
-               ROUND(MAX(weight_lb*(1 + reps/30.0))::numeric, 1) AS best_est_1rm_lb,
+               ROUND(MAX(NULLIF(weight_lb, 0)*(1 + reps/30.0))::numeric, 1) AS best_est_1rm_lb,
                MAX(reps) FILTER (WHERE COALESCE(weight_lb,0) = 0) AS max_bodyweight_reps,
                COUNT(*) AS total_sets,
                STRING_AGG(DISTINCT source, '+') AS sources
@@ -1559,7 +1561,13 @@ def get_lab_results(
     params: list = []
 
     if test_id is None:
-        where.append("f.test_id = (SELECT test_id FROM raw_whoop_labs ORDER BY test_date DESC NULLS LAST LIMIT 1)")
+        # Most recent panel across ALL sources, not just Whoop. Externally
+        # submitted labs (source='external') live only in fact_lab_result, never
+        # raw_whoop_labs, so deriving the default from raw_whoop_labs hid them.
+        where.append(
+            "f.test_id = (SELECT test_id FROM fact_lab_result "
+            "ORDER BY test_date DESC NULLS LAST LIMIT 1)"
+        )
     else:
         where.append("f.test_id = %s")
         params.append(test_id)
@@ -1604,6 +1612,9 @@ def get_lab_results(
           d.influenced_by,
           d.notes,
           f.indicator_percent,
+          f.source,
+          f.lab_provider,
+          f.reference_ranges,
           f.test_id,
           f.test_date
         FROM fact_lab_result f
@@ -2078,15 +2089,17 @@ def get_rep_maxes(
     include_estimated: bool = True,
 ) -> dict:
     """Every direct rep-max the user has hit for one exercise — the actual
-    1RM, 3RM, 5RM, 8RM, 10RM, 12RM, 15RM weights they've logged in Hevy.
-    Plus (with include_estimated=true) the Epley-projected 1RM from each
-    rep count, so you can see which set is the user's strongest data point
-    overall.
+    1RM, 3RM, 5RM, 8RM, 10RM, 12RM, 15RM weights, from the HEVY history only
+    (ends 2026-06-04). Plus (with include_estimated=true) the Epley-projected
+    1RM from each rep count.
 
-    Use this to ground load-recommendation conversations: 'you've hit
-    102.5 kg for 5 in May → estimated 1RM 119 kg → today's 5×5 should be
-    around X'. Resolves the exercise via dim_hevy_exercise.title (ILIKE).
-    Picks the most-frequent template if multiple match."""
+    NOTE: strength is now logged in Whoop Strength Trainer, which this tool does
+    NOT see (it reads the Hevy-only vw_exercise_rep_max). For current PRs / rep
+    maxes that span both the Hevy and Whoop eras, prefer get_whoop_lift_prs
+    (all-time heaviest set + best Epley 1RM per lift) or get_whoop_lift_progression
+    (per-session series). Use this tool only for the historical Hevy rep-max
+    breakdown by exact rep count. Resolves the exercise via dim_hevy_exercise.title
+    (ILIKE); picks the most-frequent template if multiple match."""
     if not exercise_search or not exercise_search.strip():
         return _err("get_rep_maxes", ValueError("exercise_search is required"))
 

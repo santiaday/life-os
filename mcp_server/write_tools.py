@@ -34,17 +34,22 @@ log = get_logger(__name__)
 def refresh_data(source: str = "all") -> dict:
     """Pull fresh data from one or all sources, then rebuild the mart.
 
-    `source` ∈ {all, whoop, calendar, cronometer, copilot, mart}. Default 'all'
-    re-runs every ingester and the mart. Use this at session start to ensure
-    you're not analyzing stale data."""
-    valid = {"all", "whoop", "whoop_journal", "whoop_labs", "hevy", "pushpress",
-             "coach", "calendar", "cronometer", "copilot", "mart"}
+    `source` ∈ {all, whoop, whoop_journal, whoop_private, calendar, cronometer,
+    copilot, mart}. Default 'all' re-runs every live ingester and the mart. Use
+    this at session start to ensure you're not analyzing stale data.
+
+    whoop_private covers the private-API pull (daily trends incl. recovery/HRV/
+    strain/steps/calories, sleep-need, behavior-impact, Strength Trainer lifts,
+    AND native Advanced Labs) — it's the resilience backbone. The retired Hevy/
+    PushPress/coach ingesters are no longer run here."""
+    valid = {"all", "whoop", "whoop_journal", "whoop_private",
+             "calendar", "cronometer", "copilot", "mart"}
     if source not in valid:
         return _err("refresh_data", ValueError(f"source must be one of {sorted(valid)}"))
 
     out: dict[str, Any] = {}
     targets = (
-        ("whoop", "whoop_journal", "whoop_labs", "hevy", "pushpress", "coach",
+        ("whoop", "whoop_journal", "whoop_private",
          "calendar", "cronometer", "copilot")
         if source == "all" else (source,)
     )
@@ -58,22 +63,12 @@ def refresh_data(source: str = "all") -> dict:
                 elif name == "whoop_journal":
                     from ingest_whoop_journal import ingest as journal_ingest
                     out[name] = journal_ingest.run_all()
-                elif name == "whoop_labs":
-                    # Catalog-only refresh: panel ingestion is file-based
-                    # (Whoop has no public API yet) so it's not part of the
-                    # automatic source list. Re-seeds dim_lab_biomarker from
-                    # the curated reference data — idempotent.
-                    from ingest_whoop_labs import ingest as labs_ingest
-                    out[name] = {"biomarker_catalog": labs_ingest.ingest_biomarker_catalog()}
-                elif name == "hevy":
-                    from ingest_hevy import ingest as hevy_ingest
-                    out[name] = hevy_ingest.run_all()
-                elif name == "pushpress":
-                    from ingest_pushpress import ingest as pushpress_ingest
-                    out[name] = pushpress_ingest.run_all()
-                elif name == "coach":
-                    from coach import orchestrator as coach_orch
-                    out[name] = coach_orch.run_all()
+                elif name == "whoop_private":
+                    # The private-API backbone: daily trends, sleep-need,
+                    # behavior-impact, Strength Trainer lifts, and native
+                    # Advanced Labs — all idempotent.
+                    from ingest_whoop_private import ingest as wp_ingest
+                    out[name] = wp_ingest.run_all()
                 elif name == "calendar":
                     from ingest_calendar import ingest as calendar_ingest
                     out[name] = calendar_ingest.run_all()

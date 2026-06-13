@@ -340,6 +340,20 @@ def _parse_int_str(s) -> int | None:
         return None
 
 
+def _parse_float_str(s) -> float | None:
+    """Like _parse_int_str but preserves fractional values — use for weights,
+    where 22.5 lb dumbbells / 2.5 lb micro-plates must not truncate to 22."""
+    if s is None:
+        return None
+    s = str(s).replace(",", "").strip()
+    if not s:
+        return None
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
 def _parse_clock_seconds(s) -> int | None:
     """'1:00' -> 60, '0:45' -> 45, '1:02:03' -> 3723."""
     if not s:
@@ -386,7 +400,7 @@ def transform_cardio_details(payload: dict, activity_id: str, day: date) -> tupl
                 idx = per_ex_idx.get(ex_id, 0) + 1
                 per_ex_idx[ex_id] = idx
                 ex_set_count += 1
-                weight_lb = _parse_int_str(sr.get("weight_display"))
+                weight_lb = _parse_float_str(sr.get("weight_display"))
                 if vtype == "TIME":
                     reps, tsec = None, _parse_clock_seconds(sr.get("volume_display"))
                 else:
