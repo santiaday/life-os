@@ -103,6 +103,34 @@ def ingestion_run(source: str, data_type: str, **metadata) -> Iterator[Run]:
         )
 
 
+def sweep_orphaned_runs(max_hours: float = 2.0) -> int:
+    """Mark long-'running' rows as failed.
+
+    ingestion_run only flips a row off 'running' in its finally block, which
+    never runs if the process is SIGKILLed / OOM-killed / container-restarted
+    mid-run. Those rows then sit 'running' forever and pollute run history and
+    any per-stage 'last run' logic. This marks any row still 'running' after
+    max_hours as a failure. Idempotent; safe to call on scheduler startup and
+    periodically. Returns the number of rows swept."""
+    with tx() as c, c.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE ingestion_runs SET
+              status = 'failure',
+              finished_at = now(),
+              error_message = COALESCE(error_message,
+                  'orphaned: still running after ' || %s || 'h (process died)')
+            WHERE status = 'running'
+              AND started_at < now() - (%s || ' hours')::interval
+            """,
+            [max_hours, max_hours],
+        )
+        n = cur.rowcount
+    if n:
+        log.info("ingest.sweep_orphaned", swept=n, max_hours=max_hours)
+    return n
+
+
 def last_successful_run(source: str, data_type: str | None = None) -> dict | None:
     """Most recent successful ingestion_runs row for (source[, data_type])."""
     with tx() as c, c.cursor() as cur:

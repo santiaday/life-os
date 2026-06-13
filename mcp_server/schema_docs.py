@@ -101,6 +101,10 @@ SCHEMA_DOCS: dict = {
                 "total_kcal, protein_g, carbs_g, fat_g, fiber_g": "Sums across the meal's items.",
                 "food_names": "Array of food names, ordered by eaten_at.",
             },
+            "gotchas": [
+                "NON-AUTHORITATIVE for daily totals. mart_meal sums per-item fact_food_log (Cronometer, frozen ~2026-05-30) while mart_daily.total_kcal comes from fact_food_daily / Apple-Health fallback — they can diverge up to ~3x and DON'T reconcile. For a day's calorie/macro totals use mart_daily; use mart_meal only for within-day meal timing/structure.",
+                "Cronometer items on a day often share one timestamp (16:00 UTC), so duration_min is frequently 0 and some items appear duplicated — don't read meal duration as real elapsed eating time.",
+            ],
         },
         "mart_weekly": {
             "purpose": "Weekly rollup over mart_daily for trend questions.",
@@ -134,8 +138,8 @@ SCHEMA_DOCS: dict = {
             "grain": "1 row per workout.",
             "columns": {
                 "sport_name": "Whoop's sport label (e.g. 'Running', 'Cycling').",
-                "strain": "Whoop strain for just this workout.",
-                "zone_zero_min..zone_five_min": "Minutes spent in each Whoop HR zone.",
+                "strain": "Whoop strain for just this workout. Populated (with avg_heart_rate); HR zones are not.",
+                "zone_zero_min..zone_five_min": "DEAD COLUMNS — the public Whoop workout pipeline never populates per-zone minutes (always NULL). Don't query them; use strain / avg_heart_rate instead.",
             },
         },
         "fact_strength_workout": {

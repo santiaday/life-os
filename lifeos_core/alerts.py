@@ -147,10 +147,15 @@ def _stale_hosts(now: datetime | None = None, max_minutes: int = 45) -> list[dic
 def check_and_alert() -> dict:
     """Survey ingest + host freshness. Send an alert if anything is stale.
     Returns the survey result for logging/debugging."""
+    # Hygiene: clear runs left 'running' by a killed process before surveying,
+    # so orphans don't masquerade as in-flight work.
+    from lifeos_core.runs import sweep_orphaned_runs
+
+    swept = sweep_orphaned_runs()
     stale_sources = _stale_sources()
     stale_hosts = _stale_hosts()
     if not stale_sources and not stale_hosts:
-        return {"ok": True, "stale_sources": [], "stale_hosts": []}
+        return {"ok": True, "stale_sources": [], "stale_hosts": [], "swept_orphans": swept}
 
     parts = []
     if stale_sources:
@@ -187,4 +192,5 @@ def check_and_alert() -> dict:
         "stale_sources": stale_sources,
         "stale_hosts": stale_hosts,
         "delivered": delivered,
+        "swept_orphans": swept,
     }

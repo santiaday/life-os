@@ -301,9 +301,11 @@ def get_strength_workouts(
     end_date: date,
     exercise_search: str | None = None,
 ) -> dict:
-    """List Hevy strength sessions with rollup metrics. Joins Whoop's
-    HR/strain view via the soft-FK whoop_workout_id populated by
-    ingest_hevy."""
+    """HISTORICAL Hevy strength sessions only (Hevy ingestion is deprecated;
+    data ends ~2026-06-04). For CURRENT strength use get_whoop_lift_workouts /
+    the era-spanning get_whoop_lift_progression / get_whoop_lift_prs. List Hevy
+    sessions with rollup metrics; joins Whoop's HR/strain view via the soft-FK
+    whoop_workout_id populated by ingest_hevy."""
     params: list = [start_date, end_date]
     where = ["fsw.day BETWEEN %s AND %s"]
     if exercise_search:
@@ -350,8 +352,10 @@ def get_strength_sets(
     set_type: str | None = None,
     working_sets_only: bool = True,
 ) -> dict:
-    """Per-set Hevy data, filterable. `working_sets_only=True` (default)
-    drops warmup sets — what you almost always want for volume / PR work."""
+    """HISTORICAL Hevy per-set data only (deprecated, ends ~2026-06-04); for
+    current per-set detail use get_whoop_lift_sets or the unified
+    vw_strength_set. Filterable. `working_sets_only=True` (default) drops warmup
+    sets — what you almost always want for volume / PR work."""
     params: list = [start_date, end_date]
     where = ["day BETWEEN %s AND %s"]
     if exercise_search:
@@ -531,10 +535,11 @@ def get_exercise_progression(
     end_date: date,
     metric: str = "top_weight",
 ) -> dict:
-    """Per-session progression for an exercise. ILIKE matches >1 distinct
-    exercise_title (e.g. 'squat' → 'Front Squat (Barbell)' + 'Back Squat
-    (Barbell)') we resolve to the most-frequent title in the window so the
-    series stays comparable.
+    """Per-session progression from HISTORICAL Hevy data only (deprecated, ends
+    ~2026-06-04); for a series that spans the current Whoop era too, prefer
+    get_whoop_lift_progression. ILIKE matches >1 distinct exercise_title (e.g.
+    'squat' → 'Front Squat (Barbell)' + 'Back Squat (Barbell)') we resolve to
+    the most-frequent title in the window so the series stays comparable.
 
     metric ∈ {top_weight, top_set_volume, session_volume, estimated_1rm}.
     Each row carries every numeric so callers can pivot client-side; the
@@ -705,10 +710,12 @@ def get_strength_volume_trend(
     granularity: str = "week",
     group_by_muscle_group: bool = False,
 ) -> dict:
-    """Volume rollup over time. granularity ∈ {day, week, month}.
-    `group_by_muscle_group=True` joins through dim_hevy_exercise to break
-    out per primary_muscle_group — useful for 'am I balancing push/pull'
-    questions."""
+    """Volume rollup over time from HISTORICAL Hevy data only (deprecated, ends
+    ~2026-06-04). Still the best tool for muscle-group breakdowns (Whoop sets
+    have no muscle-group mapping), but for current total volume cross-check
+    get_whoop_lift_workouts. granularity ∈ {day, week, month}.
+    `group_by_muscle_group=True` joins through dim_hevy_exercise to break out
+    per primary_muscle_group — useful for 'am I balancing push/pull' questions."""
     if granularity not in {"day", "week", "month"}:
         return _err(
             "get_strength_volume_trend",
@@ -848,10 +855,13 @@ def get_exercise_history(
     end_date: date | None = None,
     limit: int = 500,
 ) -> dict:
-    """Every set ever logged for one exercise across all your workouts.
-    Hits Hevy's /v1/exercise_history/{template_id} live, so it's authoritative
-    even for workouts older than your local backfill window. exercise_search
-    is ILIKE on dim_hevy_exercise.title; if it matches multiple templates we
+    """Every Hevy set ever logged for one exercise (HISTORICAL — Hevy is
+    deprecated, ends ~2026-06-04; for current data use get_whoop_lift_sets /
+    get_whoop_lift_progression). Hits Hevy's /v1/exercise_history/{template_id}
+    live, so it covers workouts older than your local backfill window — but the
+    call depends on the Hevy token still being valid and returns nothing newer
+    than the deprecation date. exercise_search is ILIKE on
+    dim_hevy_exercise.title; if it matches multiple templates we
     pick the most-frequent one in fact_strength_set so the series stays
     comparable."""
     if not exercise_search or not exercise_search.strip():
