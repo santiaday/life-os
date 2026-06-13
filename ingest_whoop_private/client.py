@@ -156,10 +156,12 @@ class WhoopPrivateClient:
         return self._get("/weightlifting-service/v2/exercise")
 
 
-# Metrics worth ingesting. The public OAuth ingester (ingest_whoop) already
-# captures HRV / RHR / RECOVERY / strain / sleep-stage detail, so we focus on
-# the net-new daily series the private trends endpoint exposes. Keeping the list
-# here means client and ingest share one source of truth.
+# Metrics worth ingesting. We include the core recovery/sleep/strain series
+# (RECOVERY/HRV/RHR/DAY_STRAIN/SLEEP_*) too — the public-OAuth ingester captures
+# them with richer per-night detail, but its token expires and breaks; the
+# private trends keep daily recovery/sleep/strain flowing as a resilient
+# fallback (mart_refresh fills mart_daily from these only where the public data
+# is absent). Keeping the list here means client and ingest share one source.
 METRICS: tuple[str, ...] = (
     "STEPS",
     "CALORIES",
@@ -176,4 +178,11 @@ METRICS: tuple[str, ...] = (
     "STRESS",
     "STRESS_DURING_SLEEP",
     "STRESS_DURING_NON_STRAIN",
+    # Core recovery/sleep/strain — resilient fallback when public OAuth breaks.
+    "RECOVERY",
+    "HRV",
+    "RHR",
+    "DAY_STRAIN",
+    "SLEEP_PERFORMANCE",
+    "AVERAGE_HR",
 )

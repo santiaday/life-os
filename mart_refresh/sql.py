@@ -535,3 +535,71 @@ UPDATE mart_daily md
  WHERE md.day = s.day;
 """
 
+# ---- Resilience fallbacks: fill mart_daily gaps from live sources ----------
+# These run AFTER the main rebuild and only fill columns that are NULL, so they
+# never override the richer primary sources — they just keep the warehouse
+# answering when a primary pipeline's token breaks.
+
+# Nutrition: Cal AI -> Apple Health -> Whoop journal lands in
+# fact_food_daily_apple_health (kept fresh by the private token) even when the
+# Cronometer source is dead. Fill the macro columns where Cronometer gave nothing.
+UPDATE_MART_DAILY_NUTRITION_FALLBACK = """
+UPDATE mart_daily md SET
+    total_kcal = COALESCE(md.total_kcal, ah.energy_kcal),
+    protein_g  = COALESCE(md.protein_g,  ah.protein_g),
+    carbs_g    = COALESCE(md.carbs_g,    ah.carbs_g),
+    fat_g      = COALESCE(md.fat_g,      ah.fat_g),
+    fiber_g    = COALESCE(md.fiber_g,    ah.fiber_g)
+  FROM fact_food_daily_apple_health ah
+ WHERE md.day = ah.day
+   AND md.total_kcal IS NULL;
+"""
+
+# Recovery / HRV / RHR / strain / sleep-performance / weight from the private
+# trends API (resilient when the public Whoop OAuth token breaks). WEIGHT is lbs.
+UPDATE_MART_DAILY_WHOOP_FALLBACK = """
+UPDATE mart_daily md SET
+    recovery_score        = COALESCE(md.recovery_score, s.recovery),
+    hrv_rmssd_ms          = COALESCE(md.hrv_rmssd_ms, s.hrv),
+    resting_heart_rate    = COALESCE(md.resting_heart_rate, s.rhr),
+    strain                = COALESCE(md.strain, s.day_strain),
+    sleep_performance_pct = COALESCE(md.sleep_performance_pct, s.sleep_perf),
+    weight_kg             = COALESCE(md.weight_kg, ROUND((s.weight_lb * 0.45359237)::numeric, 2))
+  FROM (
+    SELECT day,
+      MAX(value) FILTER (WHERE metric = 'RECOVERY')          AS recovery,
+      MAX(value) FILTER (WHERE metric = 'HRV')               AS hrv,
+      MAX(value) FILTER (WHERE metric = 'RHR')               AS rhr,
+      MAX(value) FILTER (WHERE metric = 'DAY_STRAIN')        AS day_strain,
+      MAX(value) FILTER (WHERE metric = 'SLEEP_PERFORMANCE') AS sleep_perf,
+      MAX(value) FILTER (WHERE metric = 'WEIGHT')            AS weight_lb
+    FROM fact_whoop_metric_daily
+    GROUP BY day
+  ) s
+ WHERE md.day = s.day;
+"""
+
+# Last-resort: Whoop biometrics that arrive via Cronometer's metric sync
+# (fact_biometric, often the single freshest day). MAX() dedups split-cycle days.
+UPDATE_MART_DAILY_BIOMETRIC_FALLBACK = """
+UPDATE mart_daily md SET
+    recovery_score     = COALESCE(md.recovery_score, b.recovery),
+    hrv_rmssd_ms       = COALESCE(md.hrv_rmssd_ms, b.hrv),
+    resting_heart_rate = COALESCE(md.resting_heart_rate, b.rhr),
+    sleep_total_hours  = COALESCE(md.sleep_total_hours, b.sleep_hours),
+    spo2_percentage    = COALESCE(md.spo2_percentage, b.spo2),
+    skin_temp_celsius  = COALESCE(md.skin_temp_celsius, b.skin_temp)
+  FROM (
+    SELECT day,
+      MAX(value) FILTER (WHERE metric = 'recovery_whoop')                   AS recovery,
+      MAX(value) FILTER (WHERE metric = 'heart_rate_variability_hrv_whoop') AS hrv,
+      MAX(value) FILTER (WHERE metric = 'resting_heart_rate_whoop')         AS rhr,
+      MAX(value) FILTER (WHERE metric = 'sleep_whoop')                      AS sleep_hours,
+      MAX(value) FILTER (WHERE metric = 'oxygen_saturation_spo2_whoop')     AS spo2,
+      MAX(value) FILTER (WHERE metric = 'skin_temperature_whoop')           AS skin_temp
+    FROM fact_biometric
+    GROUP BY day
+  ) b
+ WHERE md.day = b.day;
+"""
+

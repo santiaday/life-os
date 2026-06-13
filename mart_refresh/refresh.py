@@ -26,7 +26,10 @@ from mart_refresh.sql import (
     TRUNCATE_MART_DAILY,
     TRUNCATE_MART_MEAL,
     TRUNCATE_MART_WEEKLY,
+    UPDATE_MART_DAILY_BIOMETRIC_FALLBACK,
     UPDATE_MART_DAILY_BODY_IMAGE,
+    UPDATE_MART_DAILY_NUTRITION_FALLBACK,
+    UPDATE_MART_DAILY_WHOOP_FALLBACK,
     UPDATE_MART_DAILY_WHOOP_PRIVATE,
 )
 
@@ -80,7 +83,13 @@ def refresh_mart_whoop_private() -> int:
     refresh. Must run AFTER mart_daily is rebuilt — refresh_all sequences it."""
     with tx() as c, c.cursor() as cur:
         cur.execute(UPDATE_MART_DAILY_WHOOP_PRIVATE)
-        return cur.rowcount
+        n = cur.rowcount
+        # Resilience fallbacks (fill-only-when-NULL) so a broken primary token
+        # (public Whoop OAuth, Cronometer food) doesn't blank out the warehouse.
+        cur.execute(UPDATE_MART_DAILY_NUTRITION_FALLBACK)
+        cur.execute(UPDATE_MART_DAILY_WHOOP_FALLBACK)
+        cur.execute(UPDATE_MART_DAILY_BIOMETRIC_FALLBACK)
+        return n
 
 
 def refresh_all() -> dict:

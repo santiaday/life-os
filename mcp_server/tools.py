@@ -450,13 +450,15 @@ def get_whoop_lift_progression(
     start_date: date,
     end_date: date,
 ) -> dict:
-    """Per-session weight progression for a Whoop Strength Trainer exercise:
-    for each workout day, the top-set weight (lb), reps at that top set, total
-    volume, set count, estimated 1RM (Epley: w*(1+reps/30)), and whether a PR
-    was hit. exercise_search is ILIKE on name/id. Ordered oldest-first so you
-    can read the progression top-to-bottom."""
+    """Per-session weight progression for a strength exercise across your FULL
+    history — Whoop Strength Trainer AND historical Hevy, unified (vw_strength_set,
+    `source` per row). For each workout day: top-set weight (lb) + its reps, total
+    volume, set count, estimated 1RM (Epley: w*(1+reps/30)), and PR flag.
+    exercise_search is ILIKE on name/id. Oldest-first so you read the trend
+    top-to-bottom."""
     q = """
         SELECT day, activity_id, exercise_id, exercise_name,
+               MAX(source)                                AS source,
                COUNT(*)                                   AS set_count,
                SUM(reps)                                  AS total_reps,
                MAX(weight_lb)                             AS top_weight_lb,
@@ -464,7 +466,7 @@ def get_whoop_lift_progression(
                ROUND(SUM(COALESCE(weight_lb,0)*COALESCE(reps,0))::numeric, 0)     AS total_volume_lb,
                ROUND(MAX(weight_lb*(1 + reps/30.0))::numeric, 1)                  AS est_1rm_lb,
                BOOL_OR(is_pr)                             AS had_pr
-        FROM fact_whoop_lift_set
+        FROM vw_strength_set
         WHERE (exercise_name ILIKE %s OR exercise_id ILIKE %s)
           AND day BETWEEN %s AND %s
           AND reps IS NOT NULL
@@ -477,31 +479,32 @@ def get_whoop_lift_progression(
         rows = _serialize(cur.fetchall())
     if not rows:
         return _ok("get_whoop_lift_progression", rows,
-                   warnings=[f"No Whoop lift sets match '{exercise_search}' in range."])
+                   warnings=[f"No strength sets match '{exercise_search}' in range."])
     return _ok("get_whoop_lift_progression", rows)
 
 
 def get_whoop_lift_prs(exercise_search: str | None = None) -> dict:
-    """All-time Whoop Strength Trainer PRs per exercise: heaviest set ever
-    (weight_lb + the reps and date of that set), best estimated 1RM (Epley),
-    max bodyweight reps, and how many sets Whoop flagged as records. Optional
-    exercise_search (ILIKE on name/id) narrows to one movement."""
+    """All-time strength PRs per exercise across your FULL history (Whoop +
+    historical Hevy, unified): heaviest set ever (weight_lb + reps + date), best
+    estimated 1RM (Epley), max bodyweight reps, total working sets, and which
+    source(s) the exercise was trained in. Optional exercise_search (ILIKE)."""
     where = ["reps IS NOT NULL"]
     params: list = []
     if exercise_search:
         where.append("(exercise_name ILIKE %s OR exercise_id ILIKE %s)")
         params += [f"%{exercise_search}%", f"%{exercise_search}%"]
     q = f"""
-        SELECT exercise_id, exercise_name,
+        SELECT exercise_name,
                MAX(weight_lb) AS max_weight_lb,
                (ARRAY_AGG(reps ORDER BY weight_lb DESC NULLS LAST, reps DESC))[1] AS max_weight_reps,
                (ARRAY_AGG(day  ORDER BY weight_lb DESC NULLS LAST, reps DESC))[1] AS max_weight_day,
                ROUND(MAX(weight_lb*(1 + reps/30.0))::numeric, 1) AS best_est_1rm_lb,
                MAX(reps) FILTER (WHERE COALESCE(weight_lb,0) = 0) AS max_bodyweight_reps,
-               COUNT(*) FILTER (WHERE is_pr) AS pr_flagged_sets
-        FROM fact_whoop_lift_set
+               COUNT(*) AS total_sets,
+               STRING_AGG(DISTINCT source, '+') AS sources
+        FROM vw_strength_set
         WHERE {" AND ".join(where)}
-        GROUP BY exercise_id, exercise_name
+        GROUP BY exercise_name
         ORDER BY max_weight_lb DESC NULLS LAST
     """
     with conn() as c, c.cursor() as cur:
