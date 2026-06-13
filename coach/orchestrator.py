@@ -35,7 +35,6 @@ from coach import hevy_routines, normalizer, parser, recommend
 from lifeos_core.db import tx
 from lifeos_core.logging import get_logger
 from lifeos_core.runs import ingestion_run
-from lifeos_core.settings import settings
 
 log = get_logger(__name__)
 
@@ -81,7 +80,7 @@ def parse_pending_sessions(
         for sess in sessions:
             try:
                 stats = _parse_one_session(sess)
-            except Exception as e:  # noqa: BLE001
+            except Exception:
                 log.exception("coach.parse.failed", workout_uid=sess["workout_uid"])
                 out["errors"] += 1
                 continue
@@ -291,8 +290,8 @@ def recompute_loads(
             )
             new = rec.recommended_load_kg
             moved = (
-                old is None and new is not None
-                or old is not None and new is None
+                (old is None and new is not None)
+                or (old is not None and new is None)
                 or (old is not None and new is not None
                     and abs((new or 0) - (old or 0)) >= epsilon_kg)
             )
@@ -350,7 +349,7 @@ def sync_to_hevy(
                 result = hevy_routines.sync_workout(
                     r["workout_uid"], dry_run=dry_run,
                 )
-            except Exception as e:  # noqa: BLE001
+            except Exception:
                 log.exception("coach.hevy.sync_failed", workout_uid=r["workout_uid"])
                 out["errors"] += 1
                 continue
@@ -389,7 +388,7 @@ def run_all(
         out["parse"] = parse_pending_sessions(
             days_past=days_past, days_future=days_future, force=force_parse,
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.exception("coach.run_all.parse_failed")
         out["parse"] = f"FAILED: {type(e).__name__}: {e}"
 
@@ -397,7 +396,7 @@ def run_all(
         out["recompute"] = recompute_loads(
             days_future=days_future,
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.exception("coach.run_all.recompute_failed")
         out["recompute"] = f"FAILED: {type(e).__name__}: {e}"
 
@@ -406,7 +405,7 @@ def run_all(
             out["sync_hevy"] = sync_to_hevy(
                 days_past=days_past, days_future=days_future,
             )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.exception("coach.run_all.sync_failed")
             out["sync_hevy"] = f"FAILED: {type(e).__name__}: {e}"
 

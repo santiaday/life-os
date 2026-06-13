@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 
 def parse_pushpress_ts(s: str | None) -> datetime | None:
@@ -29,13 +29,10 @@ def parse_pushpress_ts(s: str | None) -> datetime | None:
     raw = s.strip()
     # Try fromisoformat first (handles "2026-05-07T00:00:00", "...Z", "+00:00").
     try:
-        if raw.endswith("Z"):
-            raw_iso = raw[:-1] + "+00:00"
-        else:
-            raw_iso = raw
+        raw_iso = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
         dt = datetime.fromisoformat(raw_iso)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            dt = dt.replace(tzinfo=UTC)
         return dt
     except ValueError:
         pass
@@ -43,7 +40,7 @@ def parse_pushpress_ts(s: str | None) -> datetime | None:
     for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
         try:
             dt = datetime.strptime(raw, fmt)
-            return dt.replace(tzinfo=timezone.utc)
+            return dt.replace(tzinfo=UTC)
         except ValueError:
             continue
     return None

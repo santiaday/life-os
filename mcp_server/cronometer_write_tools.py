@@ -61,7 +61,7 @@ def _sync_food_pipelines() -> dict | None:
         result = run_food_pipelines()
         log.info("cronometer.write.sync.ok", result=str(result)[:200])
         return result
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.exception("cronometer.write.sync.failed")
         return {"error": f"{type(e).__name__}: {e}"}
 

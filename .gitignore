@@ -62,3 +62,7 @@ IMG_*.HEIC
 copilot-money-cli/
 copilot-money-mcp/
 JSON Formatter and Validator.txt
+
+# scratch files from audit/analysis agents
+_audit*.py
+_tmp*.py

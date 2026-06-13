@@ -119,7 +119,7 @@ class PushPressClient:
         )
         self._last_call_ts: float = 0.0
 
-    def __enter__(self) -> "PushPressClient":
+    def __enter__(self) -> PushPressClient:
         return self
 
     def __exit__(self, *exc) -> None:

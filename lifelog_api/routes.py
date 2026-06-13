@@ -28,7 +28,6 @@ from .schemas import (
     UpdateEventRequest,
 )
 
-
 router = APIRouter(
     prefix="/lifelog",
     tags=["lifelog"],

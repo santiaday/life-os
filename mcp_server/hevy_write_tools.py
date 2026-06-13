@@ -19,7 +19,7 @@ Returns the standard `_ok` / `_err` envelope from mcp_server.tools.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from psycopg.types.json import Jsonb
@@ -201,7 +201,7 @@ def _send_workout(
     except (HevyAuthError, HevyAPIError) as e:
         log.exception("hevy.write.send_failed", tool=tool)
         return _err(tool, e)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.exception("hevy.write.unexpected", tool=tool)
         return _err(tool, e)
 
@@ -222,7 +222,7 @@ def _send_workout(
     # ---- mirror into local DB -----------------------------------------
     try:
         _mirror_workout(workout_resp)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.exception("hevy.write.mirror_failed", workout_id=workout_resp.get("id"))
         # Still surface the success: Hevy is the source of truth, the
         # next ingest_hevy run will re-mirror.
@@ -341,8 +341,8 @@ def _coerce_iso(s: str, field: str) -> str:
     except ValueError as e:
         raise ValueError(f"{field}: not a valid ISO8601 timestamp ({e})") from None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    dt = dt.astimezone(timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    dt = dt.astimezone(UTC)
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
@@ -397,7 +397,7 @@ def _mirror_workout(payload: dict) -> None:
             )
 
         rollup["raw_id"] = raw_id
-        rollup["updated_at"] = datetime.now(timezone.utc)
+        rollup["updated_at"] = datetime.now(UTC)
         # Whoop linker: same ±10/15min match used by the cron ingester.
         rollup["whoop_workout_id"] = _match_whoop_workout(
             c, rollup["start_ts"], rollup["end_ts"]
@@ -573,7 +573,7 @@ def _send_routine(
     except (HevyAuthError, HevyAPIError) as e:
         log.exception("hevy.routine.send_failed", tool=tool)
         return _err(tool, e)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.exception("hevy.routine.unexpected", tool=tool)
         return _err(tool, e)
 
@@ -592,7 +592,7 @@ def _send_routine(
 
     try:
         _mirror_routine(routine_resp)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.exception("hevy.routine.mirror_failed", routine_id=routine_resp.get("id"))
         return _ok(
             tool,
@@ -743,7 +743,7 @@ def create_routine_folder(title: str) -> dict:
             resp = client.create_routine_folder(title.strip())
     except (HevyAuthError, HevyAPIError) as e:
         return _err("create_routine_folder", e)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return _err("create_routine_folder", e)
 
     folder = resp.get("routine_folder") if isinstance(resp, dict) else None
@@ -767,7 +767,7 @@ def create_routine_folder(title: str) -> dict:
             conflict_cols=["folder_id"],
             update_cols=["title", "index", "payload", "fetched_at"],
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.exception("hevy.folder.mirror_failed", folder_id=folder.get("id"))
         return _ok(
             "create_routine_folder",
@@ -821,7 +821,7 @@ def create_custom_exercise(
             resp = client.create_custom_exercise(body)
     except (HevyAuthError, HevyAPIError) as e:
         return _err("create_custom_exercise", e)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return _err("create_custom_exercise", e)
 
     tpl = resp.get("exercise_template") if isinstance(resp, dict) else None
@@ -857,7 +857,7 @@ def create_custom_exercise(
                 "payload", "fetched_at",
             ],
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.exception("hevy.custom_ex.mirror_failed", template_id=tpl.get("id"))
         return _ok(
             "create_custom_exercise",

@@ -14,9 +14,8 @@ import hashlib
 import io
 from collections import OrderedDict
 from datetime import date, datetime, time
-from typing import Iterator
 
-from lifeos_core.tz import from_local_naive, local_tz
+from lifeos_core.tz import from_local_naive
 
 # Header → (column_name_in_fact_food_log, parser)
 # Anything not in this map gets bucketed into the `micros` JSONB.

@@ -23,8 +23,9 @@ any time. Treat all calls as best-effort.
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Iterable
 from datetime import date, datetime
-from typing import Iterable
 
 import httpx
 from tenacity import (
@@ -124,7 +125,7 @@ class CronometerMobileClient:
             },
         )
 
-    def __enter__(self) -> "CronometerMobileClient":
+    def __enter__(self) -> CronometerMobileClient:
         return self
 
     def __exit__(self, *exc) -> None:
@@ -159,7 +160,7 @@ class CronometerMobileClient:
             )
         try:
             data = resp.json()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             raise CronometerAuthError(
                 f"login: non-JSON body: {resp.text[:200]}"
             ) from e
@@ -219,7 +220,7 @@ class CronometerMobileClient:
             resp.raise_for_status()
         try:
             data = resp.json()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             raise CronometerAPIError(
                 f"POST {endpoint}: non-JSON body: {resp.text[:200]}"
             ) from e
@@ -493,8 +494,6 @@ def reset_shared_client() -> None:
     and graceful shutdown."""
     global _shared_client
     if _shared_client is not None:
-        try:
+        with contextlib.suppress(Exception):
             _shared_client.close()
-        except Exception:  # noqa: BLE001
-            pass
     _shared_client = None

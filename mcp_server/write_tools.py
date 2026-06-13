@@ -524,7 +524,7 @@ def set_couple_tag(transaction_id: str, owner: str) -> dict:
 
         # Drop any existing couple tags, keep the rest, add the new one.
         other_ids = [i for i in current_ids if i not in couple_id_set]
-        new_ids = other_ids + [couple_ids[owner]]
+        new_ids = [*other_ids, couple_ids[owner]]
     except Exception as e:
         return _err("set_couple_tag", e)
 

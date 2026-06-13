@@ -26,7 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -158,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     expires_in = int(result.get("ExpiresIn") or 86400)
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in)
+    expires_at = datetime.now(UTC) + timedelta(seconds=expires_in)
     auth.save_tokens(
         access_token=result["AccessToken"],
         refresh_token=result["RefreshToken"],
@@ -172,13 +172,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     sidecar = _write_sidecar(result["RefreshToken"], args.sidecar_dir)
 
-    print(f"OK. Tokens persisted to oauth_tokens(service='whoop_private').")
+    print("OK. Tokens persisted to oauth_tokens(service='whoop_private').")
     print(f"AccessToken expires at: {expires_at.isoformat()}")
     if ignored:
         print(f"Note: ignored {ignored} older RespondToAuthChallenge flow(s); "
               f"used the most recent.")
     print()
-    print(f"Refresh-token sidecar written to:")
+    print("Refresh-token sidecar written to:")
     print(f"  {sidecar}")
     print()
     print("Next: drop that file into iCloud Drive (drag/drop, or `mv` to a")

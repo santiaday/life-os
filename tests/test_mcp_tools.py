@@ -195,8 +195,9 @@ def test_telemetry_summarize_truncates_long_strings():
 
 
 def test_telemetry_summarize_preserves_short_args():
-    from mcp_server.telemetry import _summarize_args
     from datetime import date
+
+    from mcp_server.telemetry import _summarize_args
 
     out = _summarize_args(
         (), {"start_date": date(2026, 4, 1), "category": "Bars & Nightlife", "limit": 50},

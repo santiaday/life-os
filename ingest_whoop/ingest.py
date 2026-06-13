@@ -14,8 +14,8 @@ without re-fetching.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
-from typing import Callable, Iterable
+from collections.abc import Callable, Iterable
+from datetime import UTC, datetime, timedelta
 
 from psycopg.types.json import Jsonb
 
@@ -40,7 +40,7 @@ def _window(backfill_days: int | None, source: str, data_type: str) -> tuple[dat
     - If backfill_days given: now - backfill_days .. now.
     - Else: max(last successful run.started_at, now - lookback) .. now.
     """
-    end = datetime.now(timezone.utc)
+    end = datetime.now(UTC)
     if backfill_days is not None:
         return end - timedelta(days=backfill_days), end
 
@@ -79,7 +79,7 @@ def ingest_cycles(client: WhoopClient, *, backfill_days: int | None = None) -> i
             for r in records:
                 row = transforms.transform_cycle(r)
                 row["raw_id"] = id_map.get(row["cycle_id"])
-                row["updated_at"] = datetime.now(timezone.utc)
+                row["updated_at"] = datetime.now(UTC)
                 fact_rows.append(row)
             upsert_rows("fact_cycle", fact_rows, conflict_cols=["cycle_id"], connection=c)
 
@@ -116,7 +116,7 @@ def ingest_recoveries(client: WhoopClient, *, backfill_days: int | None = None) 
                     log.warning("whoop.recovery.no_day", cycle_id=row["cycle_id"])
                     continue
                 row["raw_id"] = id_map.get(row["cycle_id"])
-                row["updated_at"] = datetime.now(timezone.utc)
+                row["updated_at"] = datetime.now(UTC)
                 fact_rows.append(row)
 
             _sanity_check_hrv(fact_rows)
@@ -148,7 +148,7 @@ def ingest_sleep(client: WhoopClient, *, backfill_days: int | None = None) -> in
             for r in records:
                 row = transforms.transform_sleep(r)
                 row["raw_id"] = id_map.get(row["sleep_id"])
-                row["updated_at"] = datetime.now(timezone.utc)
+                row["updated_at"] = datetime.now(UTC)
                 fact_rows.append(row)
             upsert_rows("fact_sleep", fact_rows, conflict_cols=["sleep_id"], connection=c)
             event_rows = [e for e in (transforms.to_sleep_event(r) for r in records) if e]
@@ -183,7 +183,7 @@ def ingest_workouts(client: WhoopClient, *, backfill_days: int | None = None) ->
             for r in records:
                 row = transforms.transform_workout(r)
                 row["raw_id"] = id_map.get(row["workout_id"])
-                row["updated_at"] = datetime.now(timezone.utc)
+                row["updated_at"] = datetime.now(UTC)
                 fact_rows.append(row)
             upsert_rows("fact_workout", fact_rows, conflict_cols=["workout_id"], connection=c)
             event_rows = [e for e in (transforms.to_workout_event(r) for r in records) if e]

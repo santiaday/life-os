@@ -10,8 +10,8 @@ Reference: https://developers.google.com/calendar/api/v3/reference/events/list
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import Iterator
+from collections.abc import Iterator
+from datetime import UTC, datetime
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -102,7 +102,7 @@ def save_sync_token(calendar_id: str, sync_token: str | None, *, full_sync: bool
               last_full_sync_at = COALESCE(EXCLUDED.last_full_sync_at, calendar_sync_state.last_full_sync_at),
               updated_at = now()
             """,
-            [calendar_id, sync_token, datetime.now(timezone.utc) if full_sync else None],
+            [calendar_id, sync_token, datetime.now(UTC) if full_sync else None],
         )
 
 
@@ -115,5 +115,5 @@ def _rfc3339(dt: datetime | None) -> str | None:
     if dt is None:
         return None
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        dt = dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")

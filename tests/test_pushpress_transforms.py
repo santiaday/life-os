@@ -7,9 +7,7 @@ placeholder behavior, and the parts-derived divisions roll-up.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
-
-import pytest
+from datetime import UTC, date, datetime
 
 from ingest_pushpress import transforms
 
@@ -18,12 +16,12 @@ from ingest_pushpress import transforms
 def test_parse_pushpress_ts_native_format():
     # Their wire format is "YYYY-MM-DD HH:MM:SS.f" (no timezone).
     out = transforms.parse_pushpress_ts("2026-05-07 00:00:00.0")
-    assert out == datetime(2026, 5, 7, 0, 0, 0, tzinfo=timezone.utc)
+    assert out == datetime(2026, 5, 7, 0, 0, 0, tzinfo=UTC)
 
 
 def test_parse_pushpress_ts_iso_z():
     out = transforms.parse_pushpress_ts("2026-05-03T16:00:00Z")
-    assert out == datetime(2026, 5, 3, 16, 0, 0, tzinfo=timezone.utc)
+    assert out == datetime(2026, 5, 3, 16, 0, 0, tzinfo=UTC)
 
 
 def test_parse_pushpress_ts_none():
@@ -108,7 +106,7 @@ def test_session_row_collects_divisions_from_parts():
     assert row["parts_count"] == 2
     assert row["divisions"] == ["Fitness", "Performance"]
     assert row["workout_state"] == "PUBLISHED"
-    assert row["published_on"] == datetime(2026, 5, 3, 16, 0, 0, tzinfo=timezone.utc)
+    assert row["published_on"] == datetime(2026, 5, 3, 16, 0, 0, tzinfo=UTC)
 
 
 def test_session_row_synthesizes_uid_for_hyrox_placeholder():

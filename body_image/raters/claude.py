@@ -21,8 +21,7 @@ from anthropic import Anthropic
 from lifeos_core.logging import get_logger
 from lifeos_core.settings import settings
 
-from . import _common
-from . import _rubric
+from . import _common, _rubric
 from ._parse import parse_json_lenient
 
 log = get_logger(__name__)

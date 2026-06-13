@@ -22,12 +22,11 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from statistics import mean, stdev
+from statistics import mean
 
 from lifeos_core.alerts import _send_pushover, _send_slack
 from lifeos_core.logging import get_logger
 
-from . import service
 from .raters import run_llm_raters_once
 
 log = get_logger(__name__)

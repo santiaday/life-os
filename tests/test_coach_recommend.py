@@ -11,7 +11,6 @@ from __future__ import annotations
 import pytest
 
 from coach.recommend import (
-    RPE_TABLE,
     _parse_rep_count,
     reps_to_pct,
     round_load,

@@ -7,7 +7,7 @@ service hand-rolling SQL string concatenation.
 
 from __future__ import annotations
 
-from typing import Iterable, Sequence
+from collections.abc import Iterable, Sequence
 
 import psycopg
 from psycopg import sql

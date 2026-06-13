@@ -24,7 +24,7 @@ Three pipelines:
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from psycopg.types.json import Jsonb
 
@@ -61,7 +61,7 @@ def ingest_behavior_catalog(*, auth: WhoopAuth | None = None) -> int:
             if row is None:
                 continue
             row["payload"] = Jsonb(r)
-            row["updated_at"] = datetime.now(timezone.utc)
+            row["updated_at"] = datetime.now(UTC)
             rows.append(row)
 
         if not rows:
@@ -117,7 +117,7 @@ def _ensure_dim_rows_for_autofill(
             name = ar.get("habit_key") or f"autofill-{bid}"
         row = transforms.synthesize_dim_from_autofill(name, bid)
         row["payload"] = Jsonb({"synthesized_from": "autofill", "name": name})
-        row["updated_at"] = datetime.now(timezone.utc)
+        row["updated_at"] = datetime.now(UTC)
         synth.append(row)
 
     if not synth:
@@ -196,7 +196,7 @@ def ingest_journal_day(day: date, *, client: WhoopJournalClient | None = None) -
         row = transforms.transform_tracked_behavior(t, day)
         if row is None:
             continue
-        row["updated_at"] = datetime.now(timezone.utc)
+        row["updated_at"] = datetime.now(UTC)
         fact_rows.append(row)
 
     autofill_rows: list[dict] = []
@@ -204,7 +204,7 @@ def ingest_journal_day(day: date, *, client: WhoopJournalClient | None = None) -
         row = transforms.transform_autofill_input(inp, day)
         if row is None:
             continue
-        row["updated_at"] = datetime.now(timezone.utc)
+        row["updated_at"] = datetime.now(UTC)
         autofill_rows.append(row)
 
     # Synth dim rows for any autofill behavior_ids that aren't in the
@@ -245,7 +245,7 @@ def ingest_journal_day(day: date, *, client: WhoopJournalClient | None = None) -
     ah_row = transforms.transform_tracker_inputs(payload, day)
     if ah_row is not None:
         ah_row["payload"] = Jsonb(ah_row.get("payload") or [])
-        ah_row["updated_at"] = datetime.now(timezone.utc)
+        ah_row["updated_at"] = datetime.now(UTC)
         with tx() as c:
             upsert_rows(
                 "fact_food_daily_apple_health",
@@ -302,7 +302,7 @@ def ingest_journal_window(
                     counts = ingest_journal_day(d, client=client)
                     per_day[d.isoformat()] = counts
                     total_habits += counts.get("habit_log", 0) + counts.get("habit_log_autofill", 0)
-                except Exception as e:  # noqa: BLE001
+                except Exception as e:
                     log.exception("whoop_journal.day_failed", day=str(d))
                     per_day[d.isoformat()] = {"error": f"{type(e).__name__}: {e}"}
 
@@ -324,14 +324,14 @@ def run_all(
     out: dict = {}
     try:
         out["behavior_catalog"] = ingest_behavior_catalog(auth=auth)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.exception("whoop_journal.catalog_failed")
         out["behavior_catalog"] = f"FAILED: {type(e).__name__}: {e}"
     try:
         out["drafts"] = ingest_journal_window(
             backfill_days=backfill_days, start=start, end=end, auth=auth,
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.exception("whoop_journal.drafts_failed")
         out["drafts"] = f"FAILED: {type(e).__name__}: {e}"
     return out

@@ -26,7 +26,7 @@ If no row, fall back to ratio=1.0 with a low-confidence note.
 
 from __future__ import annotations
 
-import math
+import itertools
 from dataclasses import dataclass
 from datetime import date
 
@@ -61,7 +61,7 @@ def reps_to_pct(reps: int) -> float:
         return RPE_TABLE[keys[0]]
     if reps > keys[-1]:
         return 0.30
-    for lo, hi in zip(keys, keys[1:]):
+    for lo, hi in itertools.pairwise(keys):
         if lo <= reps <= hi:
             t = (reps - lo) / (hi - lo)
             return RPE_TABLE[lo] + t * (RPE_TABLE[hi] - RPE_TABLE[lo])

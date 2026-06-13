@@ -29,7 +29,6 @@ import psycopg
 from coach.normalizer import normalize_pattern
 from lifeos_core.settings import settings
 
-
 # (raw_pattern, exercise_template_id, exercise_title_for_log)
 # Patterns are passed through normalize_pattern() so 'Bench Press' and
 # 'bench press' produce the same key. Variants of the same canonical

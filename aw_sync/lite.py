@@ -40,9 +40,9 @@ import socket
 import sys
 import urllib.error
 import urllib.request
-# noqa: UP017 — this script must run on macOS system python3 (3.9), which
+
 # doesn't have `from datetime import UTC` (added in 3.11). Keep timezone.utc.
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 # ---- Config -----------------------------------------------------------------
 ENV_FILE = os.path.expanduser("~/.config/aw-sync.env")
@@ -98,7 +98,7 @@ MAX_BLOCK_S = 24 * 3600  # sanity cap
 # ---- Logging (tiny, stderr-tee'd to optional file) --------------------------
 def log(event: str, **fields: object) -> None:
     fields["event"] = event
-    fields["ts"] = datetime.now(timezone.utc).isoformat()
+    fields["ts"] = datetime.now(UTC).isoformat()
     line = json.dumps(fields, default=str)
     print(line, file=sys.stderr)
     fp = os.environ.get("AW_LOG_FILE")
@@ -235,7 +235,7 @@ def write_heartbeat(host: str, source: str, *, blocks: int, raw_aw: int) -> None
     )
     body = [{
         "host": host, "source": source,
-        "last_tick_at": datetime.now(timezone.utc).isoformat(),
+        "last_tick_at": datetime.now(UTC).isoformat(),
         "last_blocks": blocks, "raw_aw_events": raw_aw,
     }]
     headers = {
@@ -292,7 +292,7 @@ def parse_aw_event(ev: dict) -> tuple[datetime, datetime]:
     derived end to wall-clock now() so blocks never end in the future."""
     s = _parse_ts(ev["timestamp"])
     raw_end = s + timedelta(seconds=ev["duration"])
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
     return s, min(raw_end, now_utc)
 
 
@@ -339,7 +339,7 @@ def main() -> int:
     category = category_for(host)
     source = source_tag(category)
 
-    end = datetime.now(timezone.utc)
+    end = datetime.now(UTC)
     last = last_block(source)
     if last is not None:
         # Slight overlap so a block that was still in progress on the
@@ -394,7 +394,7 @@ def main() -> int:
             # event. Without this, PostgREST's ON CONFLICT update leaves
             # the original updated_at intact and the calendar never gets
             # the latest ended_at, even though the DB row is correct.
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
             "metadata": {
                 "hostname": host,
                 "duration_seconds": int((e - s).total_seconds()),

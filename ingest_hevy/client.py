@@ -15,7 +15,7 @@ Reference: https://api.hevyapp.com/docs/
 
 from __future__ import annotations
 
-from typing import Iterator
+from collections.abc import Iterator
 
 import httpx
 from tenacity import (
@@ -66,7 +66,7 @@ class HevyClient:
             },
         )
 
-    def __enter__(self) -> "HevyClient":
+    def __enter__(self) -> HevyClient:
         return self
 
     def __exit__(self, *exc) -> None:
@@ -343,7 +343,7 @@ class HevyClient:
             tpl = data.get("exercise_template") or data.get("exercise") or data
             if isinstance(tpl, dict) and tpl.get("id"):
                 return tpl
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
         # Bare-UUID branch — synthesize a template dict from what we sent.
         new_id = body_text.strip().strip('"')

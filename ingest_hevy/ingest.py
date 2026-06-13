@@ -22,8 +22,8 @@ run_all() is what the scheduler / refresh_data tool calls.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import Iterable
+from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta
 
 from psycopg.types.json import Jsonb
 
@@ -67,26 +67,26 @@ def run_all(
     with HevyClient() as client:
         try:
             out["workout"] = ingest_workouts(client, backfill_days=backfill_days)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.exception("hevy.workout.failed")
             out["workout"] = f"FAILED: {type(e).__name__}: {e}"
 
         if refresh_routines:
             try:
                 out["routine_folders"] = ingest_routine_folders(client)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 log.exception("hevy.folders.failed")
                 out["routine_folders"] = f"FAILED: {type(e).__name__}: {e}"
             try:
                 out["routines"] = ingest_routines(client)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 log.exception("hevy.routines.failed")
                 out["routines"] = f"FAILED: {type(e).__name__}: {e}"
 
         if refresh_catalog:
             try:
                 out["exercise_templates"] = ingest_exercise_templates(client)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 log.exception("hevy.catalog.failed")
                 out["exercise_templates"] = f"FAILED: {type(e).__name__}: {e}"
     return out
@@ -159,7 +159,7 @@ def ingest_workouts(
 
     Returns the number of workouts upserted (excluding pure deletions)."""
     since = _since_cursor(backfill_days)
-    end = datetime.now(timezone.utc)
+    end = datetime.now(UTC)
 
     with ingestion_run(
         "hevy", "workout", start=since.isoformat(), end=end.isoformat()
@@ -188,7 +188,7 @@ def ingest_workouts(
                     # if so, stash it to skip the per-id GET below.
                     if workout.get("exercises") is not None and workout.get("start_time"):
                         payloads[wid] = workout
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             # Events endpoint is the preferred path but not load-bearing.
             log.warning("hevy.events.failed", error=str(e))
             run.add_metadata(events_failed=str(e))
@@ -213,7 +213,7 @@ def ingest_workouts(
                 continue
             try:
                 payloads[wid] = client.workout(wid)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 log.warning("hevy.workout.fetch_failed", workout_id=wid, error=str(e))
 
         run.fetched(len(payloads) + len(deleted_ids))
@@ -263,7 +263,7 @@ def ingest_workouts(
                         log.warning("hevy.rollup.skipped_no_ts", workout_id=wid)
                         continue
                     rollup["raw_id"] = raw_ids.get(wid)
-                    rollup["updated_at"] = datetime.now(timezone.utc)
+                    rollup["updated_at"] = datetime.now(UTC)
                     rollup["whoop_workout_id"] = _match_whoop_workout(
                         c, rollup["start_ts"], rollup["end_ts"]
                     )
@@ -339,7 +339,7 @@ def _since_cursor(backfill_days: int | None) -> datetime:
     - prior successful run    → started_at - lookback overlap
     - no prior run            → now - DEFAULT_FIRST_RUN_DAYS
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if backfill_days is not None:
         return now - timedelta(days=max(0, backfill_days))
 

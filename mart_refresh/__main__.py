@@ -12,7 +12,6 @@ import json
 import sys
 
 from lifeos_core.logging import configure_logging
-
 from mart_refresh import refresh as r
 
 

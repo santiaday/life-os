@@ -69,7 +69,23 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
-ignore = ["E501"]  # line length handled by formatter
+ignore = [
+    "E501",                      # line length handled by formatter
+    "RUF001", "RUF002", "RUF003",  # intentional unicode in docs/comments (×, σ, →, ≥)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# FastAPI's Query()/Form()/File()/Depends() in argument defaults is the idiom.
+"**/routes.py" = ["B008"]
+# Deprecated/peripheral modules — kept for historical data; not worth churning.
+"coach/*.py" = ["B007", "B905", "B904"]
+"body_image/*.py" = ["B007", "B905", "B904"]
+"ingest_copilot/*.py" = ["F841"]
+"ingest_cronometer/*.py" = ["B904"]
+"ingest_pushpress/*.py" = ["B904", "B007"]
+"ingest_whoop/*.py" = ["B904"]
+"aw_sync/*.py" = ["B904", "SIM115"]
+"scripts/*.py" = ["B007"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

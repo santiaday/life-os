@@ -8,7 +8,7 @@ Three pipelines:
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from psycopg.types.json import Jsonb
 
@@ -60,7 +60,7 @@ def ingest_transactions(*, backfill_days: int | None = None) -> int:
             for r in records:
                 row = transforms.transform_transaction(r)
                 row["raw_id"] = id_map.get(row["transaction_id"])
-                row["updated_at"] = datetime.now(timezone.utc)
+                row["updated_at"] = datetime.now(UTC)
                 fact_rows.append(row)
 
             upsert_rows(
@@ -99,7 +99,7 @@ def ingest_categories() -> int:
             dim_rows = [transforms.transform_category(r) for r in records]
             base_rows = [{**r, "parent_category_id": None} for r in dim_rows]
             for r in base_rows:
-                r["updated_at"] = datetime.now(timezone.utc)
+                r["updated_at"] = datetime.now(UTC)
             upsert_rows("dim_category", base_rows, conflict_cols=["category_id"], connection=c)
 
             # Second pass: backfill parent_category_id now that all rows exist.
@@ -136,7 +136,7 @@ def ingest_accounts() -> int:
             )
             dim_rows = [transforms.transform_account(r) for r in records]
             for r in dim_rows:
-                r["updated_at"] = datetime.now(timezone.utc)
+                r["updated_at"] = datetime.now(UTC)
             upsert_rows("dim_account", dim_rows, conflict_cols=["account_id"], connection=c)
 
         run.upserted(len(dim_rows))
@@ -154,7 +154,7 @@ def run_all(*, backfill_days: int | None = None) -> dict:
     ]:
         try:
             out[name] = fn()
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.exception("copilot.pipeline.failed", pipeline=name)
             out[name] = f"FAILED: {type(e).__name__}: {e}"
     return out
@@ -176,7 +176,7 @@ def upsert_transaction_from_api(api: dict) -> dict:
         id_map = _id_map(c, "raw_copilot_transaction", "transaction_id", [api["id"]])
         fact_row = transforms.transform_transaction(api)
         fact_row["raw_id"] = id_map.get(api["id"])
-        fact_row["updated_at"] = datetime.now(timezone.utc)
+        fact_row["updated_at"] = datetime.now(UTC)
         upsert_rows("fact_transaction", [fact_row], conflict_cols=["transaction_id"], connection=c)
     return fact_row
 

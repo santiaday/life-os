@@ -18,8 +18,7 @@ forward programming as soon as the gym publishes it.
 
 from __future__ import annotations
 
-import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from psycopg.types.json import Jsonb
@@ -57,7 +56,7 @@ def run_all(
         if not skip_class_types:
             try:
                 out["class_types"] = ingest_class_types(client)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 log.exception("pushpress.class_types.failed")
                 out["class_types"] = f"FAILED: {type(e).__name__}: {e}"
 
@@ -65,7 +64,7 @@ def run_all(
             out["workouts"] = ingest_workouts(
                 client, days_past=days_past, days_future=days_future
             )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.exception("pushpress.workouts.failed")
             out["workouts"] = f"FAILED: {type(e).__name__}: {e}"
 
@@ -162,7 +161,7 @@ def ingest_workouts(
                 for payload in payloads:
                     try:
                         result = _persist_payload(payload, ct, d)
-                    except Exception as e:  # noqa: BLE001
+                    except Exception as e:
                         log.exception(
                             "pushpress.workout.persist_failed",
                             class_type=ct["uuid"], date=d.isoformat(),
@@ -270,7 +269,7 @@ def _persist_payload(payload: dict, ct: dict, class_date: date) -> dict:
                 "is_empty": False,
                 "payload": Jsonb(payload),
                 "payload_hash": h,
-                "fetched_at": datetime.now(timezone.utc),
+                "fetched_at": datetime.now(UTC),
                 "updated_at_src": updated_src,
             }],
             conflict_cols=["class_type_uuid", "class_date"],
@@ -294,7 +293,7 @@ def _persist_payload(payload: dict, ct: dict, class_date: date) -> dict:
             "fact_pushpress_session",
             [sess],
             conflict_cols=["workout_uid"],
-            update_cols=[k for k in sess.keys() if k != "workout_uid"]
+            update_cols=[k for k in sess if k != "workout_uid"]
                        + ["fetched_at"],
             connection=c,
         )
@@ -352,6 +351,6 @@ def _match_whoop_workout(connection, class_date: date) -> str | None:
                 [class_date, class_date],
             )
             row = cur.fetchone()
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
     return row["workout_id"] if row else None

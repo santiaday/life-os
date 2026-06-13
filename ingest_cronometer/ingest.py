@@ -8,8 +8,8 @@ full stderr but treated as non-fatal — the scheduler keeps running.
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timedelta, timezone
-from typing import Callable
+from collections.abc import Callable
+from datetime import UTC, date, datetime, timedelta
 
 from psycopg.types.json import Jsonb
 
@@ -181,7 +181,7 @@ def run_all(*, backfill_days: int | None = None) -> dict:
     for name, fn in pipelines:
         try:
             out[name] = fn(backfill_days=backfill_days)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.exception("cronometer.pipeline.failed", pipeline=name)
             out[name] = f"FAILED: {type(e).__name__}: {e}"
     return out
@@ -202,7 +202,7 @@ def run_food_pipelines(*, backfill_days: int | None = None) -> dict:
     for name, fn in pipelines:
         try:
             out[name] = fn(backfill_days=backfill_days)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             log.exception("cronometer.food_pipeline.failed", pipeline=name)
             out[name] = f"FAILED: {type(e).__name__}: {e}"
     return out
@@ -211,7 +211,7 @@ def run_food_pipelines(*, backfill_days: int | None = None) -> dict:
 # ---- helpers ---------------------------------------------------------------
 def _with_updated(r: dict) -> dict:
     r = dict(r)
-    r["updated_at"] = datetime.now(timezone.utc)
+    r["updated_at"] = datetime.now(UTC)
     # Wrap any raw dict fields in Jsonb so psycopg knows to serialize them
     # as JSONB. Currently only `micros` qualifies.
     if isinstance(r.get("micros"), dict):

@@ -7,8 +7,6 @@ events and verify attendee internal/external counting.
 
 from __future__ import annotations
 
-import pytest
-
 from ingest_calendar import transforms
 from ingest_calendar.transforms import classify
 

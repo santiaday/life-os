@@ -677,7 +677,7 @@ def _exercise_progression_summary(rows: list[dict], metric: str) -> dict:
 
     mean_x = sum(xs) / n
     mean_y = sum(ys) / n
-    num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys))
+    num = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys, strict=True))
     den = sum((x - mean_x) ** 2 for x in xs)
     if den == 0 or mean_y == 0:
         out["trend_pct_change_30d"] = None
@@ -882,7 +882,7 @@ def get_exercise_history(
                 start_date=str(start_date) if start_date else None,
                 end_date=str(end_date) if end_date else None,
             )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         return _err("get_exercise_history", e)
 
     truncated = len(entries) > limit
@@ -2726,9 +2726,11 @@ def get_body_image_interventions(
              "FROM body_image_intervention WHERE user_id = %s"]
     params: list = [_BODY_IMAGE_USER]
     if start_date is not None:
-        parts.append("AND occurred_on >= %s"); params.append(start_date)
+        parts.append("AND occurred_on >= %s")
+        params.append(start_date)
     if end_date is not None:
-        parts.append("AND occurred_on <= %s"); params.append(end_date)
+        parts.append("AND occurred_on <= %s")
+        params.append(end_date)
     parts.append("ORDER BY occurred_on DESC, id DESC")
     with conn() as c, c.cursor() as cur:
         cur.execute(" ".join(parts), params)

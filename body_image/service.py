@@ -39,7 +39,12 @@ from .raters._rubric import (
     SURFACE_FEATURES,
 )
 from .schemas import (
-    PhotoRow, RatingRow, SessionRow, TrendPoint, TrendResponse, UploadResponse,
+    PhotoRow,
+    RatingRow,
+    SessionRow,
+    TrendPoint,
+    TrendResponse,
+    UploadResponse,
 )
 
 log = get_logger(__name__)
@@ -146,7 +151,7 @@ def _run_raters_parallel(
                     failures.append(f"{name}: returned None")
                     continue
                 successes.append(result)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 log.warning("body_image.rater_failed", source=name, error=str(e))
                 failures.append(f"{name}: {e}")
     return successes, failures

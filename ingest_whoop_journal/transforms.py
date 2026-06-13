@@ -15,8 +15,9 @@ from __future__ import annotations
 
 import hashlib
 import re
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
+
 
 # ---- behavior catalog (dim) ------------------------------------------------
 def transform_behavior(api: dict) -> dict | None:
@@ -375,15 +376,15 @@ def _to_dt(v: Any) -> datetime | None:
     if v is None or v == "":
         return None
     if isinstance(v, datetime):
-        return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+        return v if v.tzinfo else v.replace(tzinfo=UTC)
     if isinstance(v, (int, float)):
         # Heuristic: Whoop's epochs >= 10**12 (post-2001 in milliseconds);
         # epochs < 10**12 are seconds. Both are reasonable in the wild.
         n = float(v)
         if n > 1e12:
-            return datetime.fromtimestamp(n / 1000.0, tz=timezone.utc)
+            return datetime.fromtimestamp(n / 1000.0, tz=UTC)
         if n > 1e9:
-            return datetime.fromtimestamp(n, tz=timezone.utc)
+            return datetime.fromtimestamp(n, tz=UTC)
         return None
     s = str(v).replace("Z", "+00:00")
     try:

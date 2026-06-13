@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import base64
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 
@@ -59,7 +59,7 @@ class PushPressAuthError(RuntimeError):
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _decode_jwt_exp(token: str) -> datetime | None:
@@ -71,15 +71,15 @@ def _decode_jwt_exp(token: str) -> datetime | None:
         claims = json.loads(base64.urlsafe_b64decode(payload))
         exp = claims.get("exp")
         if isinstance(exp, (int, float)):
-            return datetime.fromtimestamp(int(exp), tz=timezone.utc)
-    except Exception:  # noqa: BLE001
+            return datetime.fromtimestamp(int(exp), tz=UTC)
+    except Exception:
         pass
     return None
 
 
 def _save(access: str, refresh: str, expires_at: datetime) -> None:
     if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
+        expires_at = expires_at.replace(tzinfo=UTC)
     with tx() as c, c.cursor() as cur:
         cur.execute(
             """
@@ -164,7 +164,7 @@ def _refresh(refresh_token: str) -> dict:
             try:
                 exp = datetime.fromisoformat(raw_exp.replace("Z", "+00:00"))
                 if exp.tzinfo is None:
-                    exp = exp.replace(tzinfo=timezone.utc)
+                    exp = exp.replace(tzinfo=UTC)
             except ValueError:
                 exp = None
     if exp is None:

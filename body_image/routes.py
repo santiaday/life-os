@@ -7,19 +7,29 @@ from pathlib import Path
 from uuid import UUID
 
 from fastapi import (
-    APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status,
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
 )
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from lifelog_api.auth import current_user_id, require_token
 from lifeos_core.logging import get_logger
 
-from . import coach
+from . import coach, service, storage
 from . import interventions as interventions_service
-from . import service, storage
 from .schemas import (
-    Intervention, InterventionCreate,
-    PhotoRow, SessionRow, TrendResponse, UploadResponse,
+    Intervention,
+    InterventionCreate,
+    PhotoRow,
+    SessionRow,
+    TrendResponse,
+    UploadResponse,
 )
 
 log = get_logger(__name__)

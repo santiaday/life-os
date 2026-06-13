@@ -20,7 +20,7 @@ match (started_at hash). Mismatched fragments are not deleted — clean
 those up server-side if needed.
 """
 
-# noqa: UP017 — runs on macOS system python3 (3.9). Keep timezone.utc.
+
 from __future__ import annotations
 
 import hashlib
@@ -30,7 +30,7 @@ import re
 import socket
 import sys
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 ENV_FILE = os.path.expanduser("~/.config/aw-sync.env")
 if os.path.isfile(ENV_FILE):
@@ -70,7 +70,7 @@ def _parse(ts: str) -> datetime:
     return datetime.fromisoformat(re.sub(r"\.\d+", "", ts))
 
 
-end = datetime.now(timezone.utc)
+end = datetime.now(UTC)
 start = end - timedelta(hours=BACKFILL_HOURS)
 print(f"backfill window: {start.isoformat()} -> {end.isoformat()}")
 print(f"host={HOSTNAME}  source={SOURCE}  category={CATEGORY!r}")
@@ -132,7 +132,7 @@ for s, e in blocks:
         "started_at": s.isoformat(), "ended_at": e.isoformat(),
         # Bump updated_at so calendar_sync re-PATCHes the calendar entry.
         # See lite.py for full rationale.
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
         "metadata": {
             "hostname": HOSTNAME,
             "duration_seconds": int((e - s).total_seconds()),

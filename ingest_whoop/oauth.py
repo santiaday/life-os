@@ -15,7 +15,7 @@ Reference: https://developer.whoop.com/docs/developing/oauth
 from __future__ import annotations
 
 import urllib.parse
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 
@@ -73,7 +73,7 @@ def exchange_code(code: str) -> dict:
     resp.raise_for_status()
     tok = resp.json()
 
-    expires_at = datetime.now(timezone.utc) + timedelta(
+    expires_at = datetime.now(UTC) + timedelta(
         seconds=int(tok.get("expires_in", 3600))
     )
     oauth_store.save(
@@ -96,7 +96,7 @@ def refresh_access_token() -> str:
             "Run `python -m ingest_whoop oauth-init` first."
         )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     expires_at = stored.get("expires_at")
     if (
         stored.get("access_token")

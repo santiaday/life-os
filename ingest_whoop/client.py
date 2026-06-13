@@ -11,8 +11,8 @@ Reference: https://developer.whoop.com/api
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Iterator
+from collections.abc import Iterator
+from datetime import UTC, datetime
 
 import httpx
 from tenacity import (
@@ -50,7 +50,7 @@ class WhoopClient:
             headers={"Accept": "application/json"},
         )
 
-    def __enter__(self) -> "WhoopClient":
+    def __enter__(self) -> WhoopClient:
         return self
 
     def __exit__(self, *exc) -> None:
@@ -98,8 +98,7 @@ class WhoopClient:
             params.update(extra_params)
         while True:
             data = self._get(path, params=params)
-            for record in data.get("records", []):
-                yield record
+            yield from data.get("records", [])
             next_token = data.get("next_token")
             if not next_token:
                 break
@@ -128,6 +127,6 @@ class WhoopClient:
 def _isoformat_z(dt: datetime) -> str:
     """Whoop wants RFC 3339 with a 'Z' suffix for UTC."""
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    dt = dt.astimezone(timezone.utc)
+        dt = dt.replace(tzinfo=UTC)
+    dt = dt.astimezone(UTC)
     return dt.strftime("%Y-%m-%dT%H:%M:%S.000Z")

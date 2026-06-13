@@ -15,15 +15,16 @@ lives in service.py (it needs DB + threads + per-run wiring).
 
 from __future__ import annotations
 
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from lifeos_core.logging import get_logger
 from lifeos_core.settings import settings
 
 from .. import calibration
 from .claude import rate_claude_structure, rate_claude_surface
-from .geometry import rate_geometry
 from .gemini import rate_gemini_structure, rate_gemini_surface
+from .geometry import rate_geometry
 from .gpt4v import rate_gpt4v_structure, rate_gpt4v_surface
 
 log = get_logger(__name__)
@@ -79,7 +80,7 @@ def run_llm_raters_once(jpeg_bytes: bytes) -> list[dict[str, Any]]:
         for label, fn in (("structure", struct_fn), ("surface", surf_fn)):
             try:
                 results.append(fn(jpeg_bytes, anchor_pairs))
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 log.warning(
                     "body_image.validation.rater_failed",
                     rater=name, specialist=label, error=str(e),
@@ -87,7 +88,7 @@ def run_llm_raters_once(jpeg_bytes: bytes) -> list[dict[str, Any]]:
     # Geometry too — same shape (only one call, no specialist split).
     try:
         results.append(rate_geometry(jpeg_bytes))
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.warning("body_image.validation.geometry_failed", error=str(e))
     return results
 
@@ -95,9 +96,12 @@ def run_llm_raters_once(jpeg_bytes: bytes) -> list[dict[str, Any]]:
 __all__ = [
     "available_llm_raters",
     "load_anchors",
-    "rate_claude_structure", "rate_claude_surface",
+    "rate_claude_structure",
+    "rate_claude_surface",
+    "rate_gemini_structure",
+    "rate_gemini_surface",
     "rate_geometry",
-    "rate_gemini_structure", "rate_gemini_surface",
-    "rate_gpt4v_structure",  "rate_gpt4v_surface",
+    "rate_gpt4v_structure",
+    "rate_gpt4v_surface",
     "run_llm_raters_once",
 ]

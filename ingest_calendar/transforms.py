@@ -7,8 +7,8 @@ Kept as a dedicated function so the rules are testable and easy to tweak.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from datetime import datetime
-from typing import Iterable
 
 from lifeos_core.tz import local_midnight_utc
 

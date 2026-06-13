@@ -16,7 +16,7 @@ If no channel is configured, alerts log at WARNING and are visible in
 from __future__ import annotations
 
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime
 
 import httpx
 
@@ -36,7 +36,7 @@ SOURCE_THRESHOLDS = (
 
 
 def _stale_sources(now: datetime | None = None) -> list[dict]:
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     out: list[dict] = []
     with tx() as c, c.cursor() as cur:
         for source, label, max_hours in SOURCE_THRESHOLDS:
@@ -57,7 +57,7 @@ def _stale_sources(now: datetime | None = None) -> list[dict]:
                 })
                 continue
             if last.tzinfo is None:
-                last = last.replace(tzinfo=timezone.utc)
+                last = last.replace(tzinfo=UTC)
             hours = (now - last).total_seconds() / 3600.0
             if hours > max_hours:
                 out.append({
@@ -82,7 +82,7 @@ def _send_pushover(title: str, message: str) -> bool:
         )
         resp.raise_for_status()
         return True
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.warning("alerts.pushover_failed", error=str(e))
         return False
 
@@ -97,7 +97,7 @@ def _send_slack(title: str, message: str) -> bool:
         )
         resp.raise_for_status()
         return True
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         log.warning("alerts.slack_failed", error=str(e))
         return False
 
@@ -111,7 +111,7 @@ def _stale_hosts(now: datetime | None = None, max_minutes: int = 45) -> list[dic
     laptop genuinely off (overnight, weekend, travel) — these stay in
     the alert until the laptop comes back, which is the right behavior
     if you care about losing tracking time."""
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     out: list[dict] = []
     with tx() as c, c.cursor() as cur:
         cur.execute(
@@ -124,7 +124,7 @@ def _stale_hosts(now: datetime | None = None, max_minutes: int = 45) -> list[dic
         for row in cur.fetchall():
             last = row["last_tick_at"]
             if last.tzinfo is None:
-                last = last.replace(tzinfo=timezone.utc)
+                last = last.replace(tzinfo=UTC)
             minutes = (now - last).total_seconds() / 60.0
             if minutes > max_minutes:
                 out.append({
@@ -156,7 +156,7 @@ def check_and_alert() -> dict:
     for s in stale_sources:
         body_lines.append(
             f"- {s['label']}: "
-            + (f"never succeeded" if s['last_success'] is None
+            + ("never succeeded" if s['last_success'] is None
                else f"last success {s['last_success']} "
                     f"({s['hours_stale']}h ago, threshold {s['threshold_hours']}h)")
         )

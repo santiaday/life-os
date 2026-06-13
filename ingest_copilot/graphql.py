@@ -227,7 +227,7 @@ class GraphQLClient:
             headers={"Content-Type": "application/json"},
         )
 
-    def __enter__(self) -> "GraphQLClient":
+    def __enter__(self) -> GraphQLClient:
         return self
 
     def __exit__(self, *exc) -> None:
@@ -260,7 +260,7 @@ class GraphQLClient:
                 f"Copilot GraphQL {resp.status_code}: {resp.text[:300]}"
             )
         payload = resp.json()
-        if "errors" in payload and payload["errors"]:
+        if payload.get("errors"):
             raise CopilotAPIError(f"Copilot GraphQL errors: {payload['errors']}")
         return payload.get("data") or {}
 

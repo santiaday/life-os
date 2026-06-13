@@ -11,8 +11,8 @@ counts, and any error. Pattern:
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator
 
 from lifeos_core.db import tx
 from lifeos_core.logging import get_logger

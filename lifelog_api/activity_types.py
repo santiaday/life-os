@@ -26,7 +26,6 @@ from psycopg.rows import dict_row
 from lifeos_core.db import tx
 
 from .schemas import (
-    ActivityKind,
     ActivityType,
     CreateActivityTypeRequest,
     UpdateActivityTypeRequest,
@@ -198,7 +197,7 @@ def update_activity_type(
             raise NotFoundError(slug)
         return current
 
-    set_clauses = [f"{col} = %s" for col in safe_diff.keys()]
+    set_clauses = [f"{col} = %s" for col in safe_diff]
     set_clauses.append("updated_at = now()")
     params: list = list(safe_diff.values())
     params.extend([user_id, slug])

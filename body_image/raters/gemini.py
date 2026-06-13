@@ -25,8 +25,7 @@ import httpx
 from lifeos_core.logging import get_logger
 from lifeos_core.settings import settings
 
-from . import _rubric
-from . import _common
+from . import _common, _rubric
 
 log = get_logger(__name__)
 

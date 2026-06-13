@@ -6,24 +6,24 @@ fallback on 410 GONE. Each ingestion_runs row corresponds to one calendar.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from psycopg.types.json import Jsonb
 
 from ingest_calendar import transforms
 from ingest_calendar.client import (
-    CalendarClient,
     DEFAULT_INITIAL_FUTURE_DAYS,
     DEFAULT_INITIAL_PAST_DAYS,
+    CalendarClient,
     get_sync_token,
     is_gone,
     save_sync_token,
 )
 from lifeos_core.db import tx
 from lifeos_core.logging import get_logger
+from lifeos_core.runs import ingestion_run
 from lifeos_core.settings import settings
 from lifeos_core.upsert import upsert_rows
-from lifeos_core.runs import ingestion_run
 
 log = get_logger(__name__)
 
@@ -40,7 +40,7 @@ def ingest_calendar(calendar_id: str, *, force_full: bool = False) -> int:
         if sync_token:
             try:
                 events_iter, next_sync = client.list_events(calendar_id, sync_token=sync_token)
-            except Exception as e:  # noqa: BLE001
+            except Exception as e:
                 if is_gone(e):
                     log.warning("calendar.sync_token_gone", calendar_id=calendar_id)
                     sync_token = None  # fall through to full sync
@@ -48,7 +48,7 @@ def ingest_calendar(calendar_id: str, *, force_full: bool = False) -> int:
                     raise
 
         if not sync_token:
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             time_min = now - timedelta(days=DEFAULT_INITIAL_PAST_DAYS)
             time_max = now + timedelta(days=DEFAULT_INITIAL_FUTURE_DAYS)
             events_iter, next_sync = client.list_events(
@@ -95,7 +95,7 @@ def ingest_calendar(calendar_id: str, *, force_full: bool = False) -> int:
                 if row is None:
                     continue
                 row["raw_id"] = id_map.get((calendar_id, e["id"]))
-                row["updated_at"] = datetime.now(timezone.utc)
+                row["updated_at"] = datetime.now(UTC)
                 fact_rows.append(row)
 
             if fact_rows:

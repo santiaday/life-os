@@ -23,7 +23,7 @@ from __future__ import annotations
 import hmac
 import os
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Header, HTTPException, status
 from pydantic import BaseModel, Field
@@ -102,7 +102,7 @@ def refresh_callback(
         )
     # refresh_token is opaque (not JWT) — only sanity-check non-empty + minlen.
 
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=body.expires_in or 86400)
+    expires_at = datetime.now(UTC) + timedelta(seconds=body.expires_in or 86400)
     auth.save_tokens(
         access_token=body.access_token,
         refresh_token=body.refresh_token,
@@ -110,7 +110,7 @@ def refresh_callback(
         expires_at=expires_at,
         metadata={
             "source": "ios_shortcut_refresh",
-            "received_at": datetime.now(timezone.utc).isoformat(),
+            "received_at": datetime.now(UTC).isoformat(),
         },
     )
     log.info("whoop_journal.refresh_webhook.ok", expires_at=expires_at.isoformat())

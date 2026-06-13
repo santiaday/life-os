@@ -22,10 +22,7 @@ Rest seconds, set type, and rep_range are derived from the parsed envelope:
 
 from __future__ import annotations
 
-import json
-import os
 from datetime import date
-from typing import Any
 
 from lifeos_core.db import tx
 from lifeos_core.logging import get_logger
@@ -61,7 +58,7 @@ def _set_for_movement(
         # Hevy validates distance_meters as INTEGER. Coach can program "500m"
         # or "0.5km" — round to the nearest meter on write.
         "distance_meters": (
-            int(round(float(movement["prescribed_distance_m"])))
+            round(float(movement["prescribed_distance_m"]))
             if movement.get("prescribed_distance_m") else None
         ),
         "duration_seconds": (

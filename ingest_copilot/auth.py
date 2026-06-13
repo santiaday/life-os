@@ -19,7 +19,7 @@ key Copilot ships in their JS bundle):
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import httpx
 
@@ -75,7 +75,7 @@ def refresh_access_token() -> str:
             "python -m ingest_copilot set-refresh-token --token <AMf-...>"
         )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     expires_at = stored.get("expires_at")
     if (
         stored.get("access_token")

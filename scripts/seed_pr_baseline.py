@@ -19,8 +19,7 @@ exceed these synthetic anchors.
 
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 import psycopg
@@ -28,11 +27,10 @@ from psycopg.types.json import Jsonb
 
 from lifeos_core.settings import settings
 
-
 # Sentinel raw_hevy_workout id. Out-of-band uuid that's clearly synthetic
 # so a glance at raw_hevy_workout shows where these rows came from.
 SYNTHETIC_WORKOUT_ID = UUID("00000000-0000-0000-0000-00000000bee7")
-SYNTHETIC_TS = datetime(2026, 5, 7, 12, 0, 0, tzinfo=timezone.utc)
+SYNTHETIC_TS = datetime(2026, 5, 7, 12, 0, 0, tzinfo=UTC)
 LB_TO_KG = 0.4536
 
 

@@ -51,7 +51,7 @@ class WhoopJournalClient:
             headers={"Accept": "application/json"},
         )
 
-    def __enter__(self) -> "WhoopJournalClient":
+    def __enter__(self) -> WhoopJournalClient:
         return self
 
     def __exit__(self, *exc) -> None:
