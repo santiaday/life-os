@@ -114,7 +114,8 @@ SCHEMA_DOCS: dict = {
                 "avg_recovery_score, avg_hrv_rmssd_ms, avg_rhr": "Means across the week.",
                 "total_strain, total_workout_min, total_meeting_hours": "Sums across the week.",
                 "avg_meeting_hours_per_workday": "Mean meeting_hours filtered to Mon-Fri only.",
-                "total_kcal, avg_kcal_per_day, avg_protein_g, total_spend": "Self-explanatory.",
+                "total_kcal, total_spend": "Weekly sums.",
+                "avg_kcal_per_day, avg_protein_g": "Mean over days that HAVE nutrition data that week (AVG ignores NULL days) — NOT the weekly sum divided by 7. During a nutrition gap (e.g. the current Cronometer outage) only logged days count, so don't read this as average daily intake across the whole week.",
             },
         },
         "fact_calendar_event": {
