@@ -21,9 +21,9 @@ SCHEMA_DOCS: dict = {
             "grain": "1 row per day",
             "columns": {
                 "day": "Local date (America/New_York). Not UTC.",
-                "recovery_score": "Whoop recovery, 0-100. Higher = more recovered. Reflects the night's sleep ending on `day`.",
-                "hrv_rmssd_ms": "HRV during last sleep, in milliseconds. Whoop's primary recovery signal. Healthy ~10-200 ms.",
-                "resting_heart_rate": "Whoop RHR for the night ending on `day`.",
+                "recovery_score": "Whoop recovery, 0-100. Higher = more recovered. Reflects the night's sleep ending on `day`. Primary source fact_recovery (public OAuth); falls back to the private trends API (fact_whoop_metric_daily metric='RECOVERY') and then fact_biometric when the OAuth token is stale — so this stays populated even if public Whoop breaks.",
+                "hrv_rmssd_ms": "HRV during last sleep, in milliseconds. Whoop's primary recovery signal. Healthy ~10-200 ms. Same fallback chain as recovery_score (private metric='HRV').",
+                "resting_heart_rate": "Whoop RHR for the night ending on `day`. Same fallback chain (private metric='RHR').",
                 "spo2_percentage": "Blood oxygen % during sleep. Healthy ~95-99%.",
                 "skin_temp_celsius": "Skin temperature during sleep. Useful for spotting illness onset.",
                 "sleep_total_hours": "Total in-bed time of the primary nightly sleep ending on `day`. Excludes naps.",
@@ -35,8 +35,13 @@ SCHEMA_DOCS: dict = {
                 "sleep_start_ts, sleep_end_ts": "UTC timestamps of the primary night's sleep. Convert to local for human display.",
                 "nap_count": "Naps logged for this day. Naps are NOT in sleep_total_hours.",
                 "nap_total_min": "Sum of nap minutes for this day.",
-                "strain": "Whoop's daily strain (0-21). Logarithmic scale. Whoop cycles run bedtime→bedtime, so neither cycle.start_ts nor end_ts cleanly maps to the activity day. mart_daily re-buckets each cycle to local_date(midpoint) — the day where the cycle's waking activity lives. Active (still-running) cycles treat now() as the open bound.",
+                "strain": "Whoop's daily strain (0-21). Logarithmic scale. Whoop cycles run bedtime→bedtime, so neither cycle.start_ts nor end_ts cleanly maps to the activity day. mart_daily re-buckets each cycle to local_date(midpoint) — the day where the cycle's waking activity lives. Active (still-running) cycles treat now() as the open bound. Falls back to the private trends API (metric='DAY_STRAIN') when the public cycle feed is stale.",
                 "day_kilojoules": "Estimated daily energy expenditure (kJ).",
+                "steps": "Daily step count from Whoop's private trends API (fact_whoop_metric_daily metric='STEPS'). NULL before private ingestion began (~2025-09).",
+                "calories_burned": "Total daily calories burned (kcal) from Whoop's private trends API (metric='CALORIES'). Distinct from day_kilojoules (kJ); this is Whoop's headline calorie number.",
+                "vo2_max": "Estimated VO2max from Whoop's private trends API (metric='VO2_MAX'). Sparse — Whoop only recomputes it periodically.",
+                "respiratory_rate": "Breaths per minute during sleep, from Whoop's private trends API (metric='RESPIRATORY_RATE').",
+                "sleep_debt_minutes": "Accrued sleep debt in minutes, from Whoop's private trends API (metric='SLEEP_DEBT_POST', a H:MM duration parsed to minutes).",
                 "workout_count": "Number of distinct logged workouts.",
                 "workout_total_min": "Sum of workout durations.",
                 "workout_total_kj": "Sum of workout-specific kJ (subset of day_kilojoules).",
@@ -48,8 +53,8 @@ SCHEMA_DOCS: dict = {
                 "first_meeting_time, last_meeting_time": "Local time of earliest/latest meeting.",
                 "longest_focus_block_min": "Largest unbroken solo block tagged 'focus' (regex match: focus|deep work|block|do not schedule|dns).",
                 "total_focus_block_min": "Sum of focus blocks for the day.",
-                "total_kcal": "From Cronometer's daily nutrition (preferred over summing fact_food_log).",
-                "protein_g, carbs_g, fat_g, fiber_g, alcohol_g, caffeine_mg": "Macros + flagged micros from Cronometer's daily totals.",
+                "total_kcal": "Daily calorie intake. Primary source is Cronometer's daily nutrition; when that's absent (Cronometer is deprecated in favor of Cal AI) it falls back to fact_food_daily_apple_health, which carries Cal AI → Apple Health → Whoop intake. Prefer this column over summing fact_food_log.",
+                "protein_g, carbs_g, fat_g, fiber_g, alcohol_g, caffeine_mg": "Macros + flagged micros from Cronometer's daily totals, with the same Cal-AI/Apple-Health fallback as total_kcal (alcohol_g/caffeine_mg are Cronometer-only).",
                 "meal_count": "Distinct food log entries.",
                 "first_meal_time, last_meal_time": "Local time of first and last logged eating event.",
                 "eating_window_hours": "Time between first and last meal. NOT a fasting window.",
@@ -59,8 +64,8 @@ SCHEMA_DOCS: dict = {
                 "alcohol_spend, bars_spend, entertainment_spend, shopping_spend, travel_spend": "Additional category subsets — useful for 'going-out' analysis. Bars matches 'Bars', 'Nightlife', or any category containing 'Bar'.",
                 "dining_out_txn_count": "Number of restaurant/bar transactions >= $50 posted on this date. Cleanest single signal for 'did I go out the night before'. Threshold ($50) keeps coffee/lunch noise out.",
                 "dining_out_txn_max": "Largest single restaurant/bar charge on this date.",
-                "weight_kg": "Most recent weight measurement on this day, from fact_biometric.",
-                "body_fat_pct": "Most recent body-fat % on this day.",
+                "weight_kg": "Most recent weight measurement on this day, from fact_biometric; falls back to Whoop's private trends API (fact_whoop_metric_daily metric='WEIGHT', lbs→kg) when fact_biometric has nothing.",
+                "body_fat_pct": "Most recent body-fat % on this day. (Whoop's BODY_COMPOSITION trend is kept in fact_whoop_metric_daily but deliberately NOT merged here to avoid a silent source conflict.)",
                 "had_alcohol, alcohol_drinks": "From Whoop journal. had_alcohol is the yes/no answer; alcohol_drinks is the magnitude (drinks).",
                 "had_caffeine, caffeine_servings, caffeine_last_serving_time": "From Whoop journal. Last serving time in local tz.",
                 "late_meal, read_in_bed, device_in_bed, device_in_bed_minutes": "Sleep-affecting behaviors from Whoop journal.",
@@ -68,9 +73,9 @@ SCHEMA_DOCS: dict = {
                 "took_magnesium, took_vitamin_d, took_creatine, took_l_theanine": "Supplement compliance from Whoop journal.",
                 "joint_pain, headache": "Discomfort flags from Whoop journal.",
                 "journal_notes": "Free-text notes from Whoop journal for the day.",
-                "strength_total_volume_kg": "Sum of total_volume_kg across Hevy sessions on this day (working sets only). 0 on rest days. Use this for daily strength load alongside meeting/recovery context.",
-                "strength_total_sets": "Total working+warmup sets across all Hevy sessions on the day. 0 on rest days.",
-                "strength_unique_exercises": "Distinct dim_hevy_exercise.exercise_template_id values touched on the day. 0 on rest days.",
+                "strength_total_volume_kg": "Sum of total_volume_kg across strength sessions on this day (working sets only). 0 on rest days. Sourced from Hevy through ~2026-06-04, then from Whoop Strength Trainer (fact_whoop_lift_workout). Use this for daily strength load alongside meeting/recovery context.",
+                "strength_total_sets": "Total sets across all strength sessions on the day (Hevy era includes warmups; Whoop era is working sets). 0 on rest days.",
+                "strength_unique_exercises": "Distinct exercises touched on the day. 0 on rest days. For a unified set-level history that spans both the Hevy and Whoop eras, query vw_strength_set, not the per-source fact tables.",
             },
             "common_queries": [
                 "Average recovery for the last 30 days: SELECT AVG(recovery_score) FROM mart_daily WHERE day >= CURRENT_DATE - 30",
@@ -177,6 +182,77 @@ SCHEMA_DOCS: dict = {
                 "weight_kg": "Always kg in storage; the Hevy app handles lb-display locally.",
                 "rpe": "Rate of perceived exertion, 0-10. Often NULL.",
                 "day": "Generated from local_date(workout_start_ts). Pre-indexed.",
+            },
+        },
+        "vw_strength_set": {
+            "purpose": (
+                "UNIFIED per-set strength history across BOTH training eras: "
+                "Hevy (fact_strength_set, through ~2026-06-04) and Whoop "
+                "Strength Trainer (fact_whoop_lift_set, after). Neither source "
+                "alone is a complete log. ALWAYS use this view for "
+                "progression / PR / per-set questions that should span the "
+                "full record — the get_whoop_lift_progression and "
+                "get_whoop_lift_prs tools already read it. Warmups are "
+                "excluded."
+            ),
+            "grain": "1 row per working set, across all sources.",
+            "columns": {
+                "activity_id": "Workout id (Whoop activity uuid as text, or Hevy workout uuid). Not globally typed — just a session grouping key.",
+                "exercise_id": "Whoop exercise id OR Hevy exercise_template_id. NOT a shared namespace across sources — match on exercise_name for cross-era progressions.",
+                "exercise_name": "Display name (e.g. 'Back Squat'). The reliable key for joining the same lift across the Hevy↔Whoop boundary.",
+                "set_index": "1-based order of the set within its exercise.",
+                "volume_type": "REPS | TIME. Hevy rows are always REPS.",
+                "reps": "Reps (NULL for TIME sets).",
+                "time_seconds": "Duration for TIME sets (Hevy rows carry the set's duration_seconds here, usually NULL).",
+                "weight_lb": "Weight in pounds (the user's unit). Whoop is native lbs; Hevy is converted from kg. 0 = bodyweight.",
+                "weight_kg": "Weight in kg (normalized both ways).",
+                "avg_hr": "Per-set average HR (Whoop only; NULL for Hevy).",
+                "is_pr": "Whoop's own PR flag for the set (always FALSE for Hevy rows — compute PRs yourself with Epley 1RM if you need them across both eras).",
+                "source": "'whoop' | 'hevy'. Lets you scope to one era.",
+            },
+            "gotchas": [
+                "exercise_id is source-local; only exercise_name is comparable across the Hevy/Whoop boundary. A lift's id differs between the two systems.",
+                "is_pr is meaningful only for source='whoop'. For a true cross-era PR, rank by estimated 1RM (weight*(1+reps/30)).",
+            ],
+        },
+        "fact_whoop_lift_workout": {
+            "purpose": (
+                "Per-session rollup of a Whoop Strength Trainer workout "
+                "(the current strength source, replacing Hevy). One row per "
+                "Whoop activity. Per-set detail is in fact_whoop_lift_set; "
+                "the unified cross-era view is vw_strength_set."
+            ),
+            "grain": "1 row per Whoop strength activity.",
+            "columns": {
+                "activity_id": "Whoop activity uuid (text). PK; FK target for fact_whoop_lift_set.",
+                "name": "Workout name as shown in Whoop (e.g. 'Push Day').",
+                "duration_minutes": "Session length.",
+                "strain": "Whoop strain for the session.",
+                "total_volume_kg": "Sum of weight_kg*reps over the session's sets.",
+                "intensity_pct": "Whoop's intensity metric for the session.",
+                "exercise_count, set_count": "Distinct exercises / total sets logged.",
+                "exercises": "JSONB summary of the per-exercise breakdown (denormalized convenience copy).",
+            },
+        },
+        "fact_whoop_lift_set": {
+            "purpose": (
+                "Per-set detail for Whoop Strength Trainer workouts — the "
+                "exact weight/reps the user did, parsed from Whoop's "
+                "weightlifting cardio-details payload. Prefer vw_strength_set "
+                "for anything that should also see the Hevy era."
+            ),
+            "grain": "1 row per (activity_id, exercise_id, set_index).",
+            "columns": {
+                "exercise_id": "Whoop's exercise id (its own namespace; includes custom exercises).",
+                "exercise_name": "Display name.",
+                "set_index": "1-based set order within the exercise.",
+                "volume_type": "REPS | TIME.",
+                "reps": "Reps (NULL for TIME sets).",
+                "time_seconds": "Duration for TIME sets.",
+                "weight_lb": "Native pounds (Whoop reports lbs). 0 = bodyweight.",
+                "weight_kg": "Normalized kg.",
+                "avg_hr": "Per-set average heart rate.",
+                "is_pr": "Whoop's PR flag for the set.",
             },
         },
         "dim_hevy_exercise": {
@@ -317,6 +393,51 @@ SCHEMA_DOCS: dict = {
                 "mart_daily.journal_notes is sourced from raw_whoop_journal.payload (legacy); a follow-up PR will swap it to fact_journal_day.notes. For now, prefer mart_daily.journal_notes.",
             ],
         },
+        "fact_whoop_metric_daily": {
+            "purpose": (
+                "Long-format daily metrics from Whoop's PRIVATE trends API "
+                "(the iOS-app data the public OAuth API doesn't expose). One "
+                "row per (day, metric). This is the backbone behind several "
+                "mart_daily columns and the resilience fallbacks — when the "
+                "public Whoop token breaks, recovery/HRV/RHR/strain/weight "
+                "still flow from here. For daily-grain questions prefer the "
+                "already-pivoted mart_daily columns; query this directly only "
+                "for a metric mart_daily doesn't surface."
+            ),
+            "grain": "1 row per (day, metric).",
+            "columns": {
+                "metric": (
+                    "Whoop's trend key (UPPERCASE). Available: RECOVERY, HRV, "
+                    "RHR, DAY_STRAIN, SLEEP_PERFORMANCE, AVERAGE_HR, STEPS, "
+                    "CALORIES, RESPIRATORY_RATE, RESTORATIVE_SLEEP, "
+                    "SLEEP_DEBT_POST, TIME_IN_BED, HR_ZONES_1_3, HR_ZONES_4_5, "
+                    "STRENGTH_ACTIVITY_TIME, STRESS, STRESS_DURING_SLEEP, "
+                    "STRESS_DURING_NON_STRAIN, VO2_MAX, WEIGHT, BODY_COMPOSITION."
+                ),
+                "value": "Numeric value (NUMERIC(14,3)). WEIGHT is in POUNDS; SLEEP_DEBT_POST is minutes.",
+                "value_display": "The string Whoop's UI renders (e.g. '7:32' for a duration), pre-parse.",
+                "unit": "Unit label when Whoop provides one.",
+            },
+            "common_queries": [
+                "A metric's recent series: SELECT day, value FROM fact_whoop_metric_daily WHERE metric='STEPS' AND day >= CURRENT_DATE-30 ORDER BY day",
+                "Pivot a few metrics: SELECT day, MAX(value) FILTER (WHERE metric='RECOVERY') rec, MAX(value) FILTER (WHERE metric='STEPS') steps FROM fact_whoop_metric_daily GROUP BY day",
+            ],
+            "gotchas": [
+                "metric keys are UPPERCASE and exact — 'RECOVERY' not 'recovery'. (fact_biometric uses different lowercase '*_whoop' keys; don't confuse the two.)",
+                "WEIGHT is stored in pounds here; mart_daily.weight_kg converts it.",
+                "RECOVERY/HRV/RHR/DAY_STRAIN/SLEEP_PERFORMANCE/AVERAGE_HR were added later and currently backfill ~180 days; STEPS/CALORIES/STRESS go back further (~284 days).",
+            ],
+        },
+        "fact_whoop_sleep_need": {
+            "purpose": "Whoop's per-day sleep-need breakdown from the private coaching API: how much sleep you needed and why (baseline + debt + strain − nap credit).",
+            "grain": "1 row per day.",
+            "columns": {
+                "recommended_tib_minutes": "Recommended time-in-bed for the night, in minutes.",
+                "total_need_ms, baseline_ms, debt_ms, strain_ms, nap_credit_ms": "Components of sleep need in milliseconds (total = baseline + debt + strain − nap_credit).",
+                "smart_alarm_eligible": "Whether Whoop offered a smart-alarm window.",
+                "schedule_state": "Whoop's sleep-schedule state label.",
+            },
+        },
         "raw_whoop_journal": {
             "purpose": "Untyped JSON payloads from Whoop's /journal-service/v3/journals/drafts/mobile/{day}. One row per day. The fact_/dim_ tables are derived from this — query raw only if you need a field that isn't pivoted.",
             "grain": "1 row per day.",
@@ -327,19 +448,19 @@ SCHEMA_DOCS: dict = {
             },
         },
         "oauth_tokens": {
-            "purpose": "Per-source credential store. Single row per `service`. `whoop_private` is the iPhone-bridge Whoop journal token (refreshed by the iPhone Shortcut, consumed by ingest_whoop_journal). Other services: `whoop` (public OAuth), `google`, `copilot`.",
+            "purpose": "Per-source credential store. Single row per `service`. `whoop_private` is the Whoop iOS-API token — now refreshed SERVER-SIDE via AWS Cognito (lifeos_core.whoop_cognito), consumed by both ingest_whoop_journal and ingest_whoop_private. Other services: `whoop` (public OAuth), `google`, `copilot`.",
             "grain": "1 row per service.",
             "columns": {
                 "service": "Source key. Lookup with WHERE service = '<name>'.",
-                "access_token": "Bearer token. Short-lived (typically 24h for Whoop).",
-                "refresh_token": "Long-lived. Either rotated by the source on each refresh, or held stable for ~30 days (Whoop).",
+                "access_token": "Bearer token. Short-lived (~24h for Whoop).",
+                "refresh_token": "Long-lived. For whoop_private it's the Cognito refresh token (~30 days); the server auto-rotates the access token from it.",
                 "id_token": "Optional. Cognito JWT with identity claims (sub, email). Populated for whoop_private; null for OAuth-only sources.",
-                "expires_at": "When access_token expires. ingest_whoop_journal raises WhoopAuthExpired if past this minus a 5-min skew.",
-                "metadata": "JSONB. Provenance hints like {\"source\": \"ios_shortcut_refresh\", \"received_at\": \"...\"}.",
+                "expires_at": "When access_token expires. The Whoop auth layer auto-refreshes via Cognito when within a 5-min skew of this; raises WhoopAuthExpired only if the refresh token itself is dead.",
+                "metadata": "JSONB. Provenance hints like {\"source\": \"cognito_refresh\", \"received_at\": \"...\"}.",
             },
             "gotchas": [
                 "Don't update partial — always pass all five token columns when writing, or you'll silently null id_token / metadata.",
-                "Refresh logic for whoop_private lives on the iPhone, not the server. If the row is stale, the fix is to re-trigger the Shortcut, not to call Cognito from the server.",
+                "whoop_private refresh is now fully server-side (Cognito): a stale access_token self-heals on the next ingest. Only a dead/expired REFRESH token (~30 days idle) requires re-running `python -m ingest_whoop_private login`. The iPhone Shortcut bridge is retired.",
             ],
         },
         "dim_lab_biomarker": {
@@ -361,31 +482,62 @@ SCHEMA_DOCS: dict = {
                 "what_high_means, what_low_means": "Clinical interpretation strings — surface these when explaining a result.",
                 "influenced_by": "Lifestyle / drug / physiologic factors that shift the value.",
             },
+            "gotchas": [
+                "Rows with category='external' are auto-stubbed by submit_lab_results for biomarkers Whoop's catalog doesn't cover. They carry the submitted ranges but lack the rich what_high/low_means narrative — that's expected.",
+            ],
         },
         "fact_lab_result": {
             "purpose": (
-                "Per-biomarker results from Whoop Advanced Labs panels. One row "
-                "per (test_id, biomarker_id). Always join to dim_lab_biomarker "
-                "to get the description and reference ranges — do that via the "
-                "get_lab_results tool, which composes the join for you."
+                "Per-biomarker lab results. One row per (test_id, biomarker_id). "
+                "Holds BOTH Whoop Advanced Labs panels (source='whoop') and "
+                "externally-submitted labs the user hands over directly "
+                "(source='external', written by the submit_lab_results tool). "
+                "Always join to dim_lab_biomarker for descriptions/ranges — the "
+                "get_lab_results tool composes that join for you and spans both "
+                "sources transparently."
             ),
             "grain": "1 row per (test_id, biomarker_id).",
             "columns": {
-                "value_text": "Raw value as Whoop displays it (e.g. '6.0', '293.0', '0.31').",
+                "value_text": "Raw value as displayed (e.g. '6.0', '293.0', '0.31').",
                 "value_numeric": "Parsed numeric for filtering/comparison.",
-                "status_type": "OPTIMAL | SUFFICIENT | OUT_OF_RANGE — Whoop's classification.",
-                "trend": "POSITIVE_RANGE | SUFFICIENT_BLUE | CONCERN_RANGE — UI tint hint.",
-                "indicator_percent": "Where the value sits on Whoop's range meter, 0-1.",
-                "range_meter": "JSONB of normalized meter sections + indicator. UI geometry, not absolute units.",
+                "status_type": "OPTIMAL | SUFFICIENT | OUT_OF_RANGE. For external labs without an explicit status it's derived from the supplied ranges.",
+                "source": "'whoop' (Advanced Labs) | 'external' (user-submitted, e.g. a clinic blood draw). Default 'whoop'.",
+                "lab_provider": "Free-text lab/clinic name for external results (e.g. 'Quest', 'LabCorp'). NULL for Whoop.",
+                "reference_ranges": "JSONB {optimal:{lower_endpoint,upper_endpoint}, sufficient:{...}} captured at submit time for external labs. (Whoop rows keep ranges on dim_lab_biomarker.)",
+                "trend": "POSITIVE_RANGE | SUFFICIENT_BLUE | CONCERN_RANGE — Whoop UI tint hint. NULL for external.",
+                "indicator_percent": "Where the value sits on Whoop's range meter, 0-1. NULL for external.",
+                "range_meter": "JSONB of normalized meter sections + indicator. Whoop UI geometry, not absolute units.",
             },
             "common_queries": [
-                "Out of range: SELECT biomarker_id, value_text, unit FROM fact_lab_result WHERE status_type = 'OUT_OF_RANGE'",
+                "Out of range: SELECT biomarker_id, value_text, unit, source FROM fact_lab_result WHERE status_type = 'OUT_OF_RANGE'",
                 "Hormones: prefer get_lab_results(category='Hormones').",
+                "Only externally-submitted labs: SELECT * FROM fact_lab_result WHERE source='external' ORDER BY test_date DESC",
             ],
             "gotchas": [
-                "range_meter holds 0-1 normalized positions, NOT absolute reference range bounds. For absolute ranges read dim_lab_biomarker.optimal_low/high or sufficient_low/high.",
-                "Same biomarker can appear in multiple panels over time — filter by test_id or test_date for a specific draw.",
+                "range_meter (Whoop) holds 0-1 normalized positions, NOT absolute bounds. For absolute ranges read reference_ranges (external) or dim_lab_biomarker.optimal_low/high & sufficient_low/high (Whoop).",
+                "Same biomarker can appear in multiple panels/draws over time — filter by test_id or test_date for a specific draw.",
+                "To submit an external lab, use the submit_lab_results tool (it writes raw_external_lab + dim_lab_biomarker stubs + these rows); don't INSERT by hand.",
             ],
+        },
+        "fact_imaging_study": {
+            "purpose": (
+                "Radiology / imaging studies the user submits directly (MRI, "
+                "X-ray, CT, ultrasound, DEXA, ...). Written by the "
+                "submit_imaging_study tool and read by get_imaging_studies. "
+                "Consult for any musculoskeletal / structural health question "
+                "(back pain, joint issues, the user's HLA-B27 / SI-joint "
+                "workup, etc.)."
+            ),
+            "grain": "1 row per (modality, body_region, study_date) study_id.",
+            "columns": {
+                "modality": "MRI | X-RAY | CT | ULTRASOUND | DEXA | ...",
+                "body_region": "e.g. 'lumbar spine', 'SI joints'.",
+                "impression": "The radiologist's summary/impression — usually the most useful field.",
+                "findings": "JSONB array of {location, finding, severity?}.",
+                "raw_text": "Full report text, verbatim, when the user provided it.",
+                "ordering_reason": "Why the study was ordered, if given.",
+                "source": "'external' (all imaging is user-submitted today).",
+            },
         },
         "raw_whoop_labs": {
             "purpose": "Raw JSON payloads from Whoop Advanced Labs panels. Keyed by test_id.",
@@ -560,7 +712,16 @@ SCHEMA_DOCS: dict = {
             "'Blood Count', 'Iron Metabolism', 'Vitamins & Minerals') to "
             "scope to one body system. "
             "4) Reference recovery/sleep/journal data alongside (mart_daily) "
-            "when the user asks how lifestyle correlates."
+            "when the user asks how lifestyle correlates. "
+            "5) For musculoskeletal / structural complaints (back, joints, "
+            "spine) also check get_imaging_studies — MRI/X-ray/DEXA reports "
+            "live in fact_imaging_study. "
+            "6) When the user hands you lab values that DIDN'T come from Whoop "
+            "(a clinic draw, a PDF, 'my CRP was 13.7'), port them in with "
+            "submit_lab_results(test_name, test_date, biomarkers=[...]); for a "
+            "radiology report use submit_imaging_study(...). Both land in the "
+            "same tables get_lab_results / get_imaging_studies read, so the "
+            "data is immediately queryable and correlatable."
         ),
         "self_observability": (
             "User asks 'why is the MCP slow' or 'which tools are getting called "
@@ -608,19 +769,22 @@ SCHEMA_DOCS: dict = {
         ),
         "strength_progression": (
             "User asks about lifting / sets / reps / PRs / volume / "
-            "specific-exercise progress. Tools: "
-            "1) get_strength_workouts(start, end) for a window of sessions. "
-            "2) get_exercise_progression(exercise_search='squat', start, end, "
-            "metric='top_weight'|'estimated_1rm'|...) for time-series of one "
-            "lift with a PR + 30-day-trend summary. "
-            "3) get_strength_volume_trend(start, end, granularity='week', "
-            "group_by_muscle_group=true) for push/pull-balance and weekly load. "
-            "4) get_strength_sets(...) for raw per-set data when you need "
-            "set-level detail (e.g. RPE distribution, failure-set count). "
-            "Strength sessions are also linked to Whoop's HR/strain view: "
-            "get_strength_workouts returns whoop_strain + whoop_avg_hr when "
-            "the user wore the band, and get_workouts now carries the linked "
-            "hevy_workout_id + strength rollup."
+            "specific-exercise progress. IMPORTANT: the training record has "
+            "two eras — Hevy (through ~2026-06-04) then Whoop Strength Trainer "
+            "(now). For anything that should span the FULL history, use the "
+            "Whoop-lift tools, which read the unified vw_strength_set view: "
+            "1) get_whoop_lift_progression(exercise_search='squat', metric="
+            "'top_weight'|'estimated_1rm'|'volume') — time-series + PR across "
+            "BOTH eras (matches on exercise NAME, since ids differ per source). "
+            "2) get_whoop_lift_prs() for all-time PRs (Epley 1RM). "
+            "3) get_whoop_lift_workouts(start,end) / get_whoop_lift_sets(...) "
+            "for Whoop-era sessions and exact per-set weight (lbs)/reps. "
+            "The older Hevy-only tools (get_strength_workouts, "
+            "get_exercise_progression, get_strength_volume_trend, "
+            "get_strength_sets) still work but only see the Hevy era — use "
+            "them for muscle-group volume breakdowns, otherwise prefer the "
+            "Whoop-lift tools. get_strength_workouts/get_workouts carry the "
+            "Whoop HR/strain link (whoop_strain, whoop_avg_hr) where present."
         ),
     },
     "body_image_surface": {
