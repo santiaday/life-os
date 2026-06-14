@@ -122,12 +122,28 @@ def count_statements(query: str) -> int:
     return len([seg for seg in _STMT_END_RE.split(stripped) if seg.strip()])
 
 
+def _strip_parens(s: str) -> str:
+    """Remove balanced parenthesised groups (subqueries, function args) so a
+    WHERE that lives only inside one isn't mistaken for a top-level WHERE."""
+    out: list[str] = []
+    depth = 0
+    for ch in s:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            out.append(ch)
+    return "".join(out)
+
+
 def statement_has_where(query: str) -> bool:
-    """Heuristic: does the statement contain a WHERE? Used to flag whole-table
-    UPDATE/DELETE. A WHERE inside a subquery can fool this — the execute_sql
-    affected-row backstop is what actually prevents a runaway whole-table
-    change, so this is only the first gate."""
-    return bool(_WHERE_RE.search(normalize_for_check(query)))
+    """Does the statement have a TOP-LEVEL WHERE? Used to flag whole-table
+    UPDATE/DELETE. We strip parenthesised groups first so a WHERE that only
+    appears inside a subquery (e.g. UPDATE t SET x=(SELECT .. WHERE ..)) does
+    NOT count — that statement still rewrites every row of t. The execute_sql
+    affected-row backstop is the second line of defense behind this."""
+    return bool(_WHERE_RE.search(_strip_parens(normalize_for_check(query))))
 
 
 def classify_statement(query: str) -> str:

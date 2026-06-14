@@ -38,6 +38,19 @@ def test_statement_has_where():
     assert not S.statement_has_where("DELETE FROM t")
     # 'where' inside a string literal must not count
     assert not S.statement_has_where("INSERT INTO t (note) VALUES ('no where here')")
+    # top-level WHERE with a subquery WHERE still counts
+    assert S.statement_has_where("DELETE FROM t WHERE id IN (SELECT id FROM u WHERE x=1)")
+    # WHERE ONLY inside a subquery does NOT count — this rewrites all of t
+    assert not S.statement_has_where("UPDATE t SET x = (SELECT y FROM z WHERE z.id = 1)")
+
+
+def test_subquery_only_where_is_refused():
+    # A whole-table UPDATE disguised with a subquery WHERE must be blocked.
+    with pytest.raises(S.WriteSafetyError, match="WHERE"):
+        S.validate_write("UPDATE t SET x = (SELECT max(v) FROM z WHERE z.k = 1)")
+    # ...but allowed with the explicit override
+    S.validate_write("UPDATE t SET x = (SELECT max(v) FROM z WHERE z.k = 1)",
+                     allow_no_where=True)
 
 
 # ---- count_statements ------------------------------------------------------
