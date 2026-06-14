@@ -32,8 +32,8 @@ log = get_logger(__name__)
 # under the user, e.g. users/<uid>/foods or food_logs filtered by userId. Set
 # CALAI_DIARY_COLLECTION once the Firestore read is captured.
 DIARY_COLLECTION = os.environ.get("CALAI_DIARY_COLLECTION", "")
-# Firestore field the entry is dated by (a timestamp). CONFIRM from a real doc.
-DIARY_DATE_FIELD = os.environ.get("CALAI_DIARY_DATE_FIELD", "createdAt")
+# Firestore field the entry is dated by — confirmed `date` on real Cal AI docs.
+DIARY_DATE_FIELD = os.environ.get("CALAI_DIARY_DATE_FIELD", "date")
 
 
 def _parse_ts(v) -> datetime | None:
@@ -58,18 +58,26 @@ def _extract(entry: dict) -> dict | None:
     entry_id = entry.get("id") or (name.rsplit("/", 1)[-1] if name else None)
     if not entry_id:
         return None
-    food = (entry.get("foodData") or entry.get("food") or entry.get("data")
-            or (entry if "calories" in entry else None))
-    if not isinstance(food, dict) or food.get("calories") is None:
+    # The Cal AI diary doc IS the food object (top-level servingCalories/quantity);
+    # the /v6 analysis payload nests it under foodData/food/data. Accept both.
+    def _is_food(d):
+        return isinstance(d, dict) and (d.get("calories") is not None
+                                        or d.get("servingCalories") is not None)
+    food = entry.get("foodData") or entry.get("food") or entry.get("data")
+    if not _is_food(food):
+        food = entry if _is_food(entry) else None
+    if food is None:
         return None
-    logged_at = _parse_ts(entry.get(DIARY_DATE_FIELD) or entry.get("createdAt")
-                          or entry.get("loggedAt") or entry.get("timestamp"))
+    logged_at = _parse_ts(entry.get("date") or entry.get(DIARY_DATE_FIELD)
+                          or entry.get("createdAt") or entry.get("loggedAt")
+                          or entry.get("timestamp"))
     return {
         "entry_id": str(entry_id),
         "logged_at": logged_at,
         "food": food,
-        "image_id": entry.get("imageId") or entry.get("photoId"),
-        "health_score": entry.get("healthScore") or entry.get("health_score"),
+        "image_id": entry.get("image") or entry.get("imageId") or entry.get("photoId"),
+        "health_score": (entry.get("healthRating") or entry.get("healthScore")
+                         or entry.get("health_score")),
     }
 
 

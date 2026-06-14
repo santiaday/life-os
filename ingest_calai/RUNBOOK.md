@@ -34,15 +34,30 @@ was analyzed/edited (Grilled Salmon) plus account/onboarding chatter.
   were logged. Maps cleanly onto `fact_food_log` (Cal AI even carries per-ingredient
   `ethanol` → `alcohol_g`).
 
-## ❌ What capture #1 did NOT contain (the blocker)
+## 🔎 Live Firestore probing (capture #2 token) — what we learned
 
-- **The food diary / history read.** No endpoint returns the list of logged meals
-  by date. There was **no `firestore.googleapis.com` traffic at all.** The diary is
-  almost certainly stored in **Firestore** (cloud-synced, references the storage
-  photos) and was served from the on-device offline cache during the capture — so
-  the collection path + document schema are unknown.
-- **A login** (no `identitytoolkit`/`securetoken` calls), so the **Firebase Web API
-  key** and a **refresh token** weren't captured.
+Using the still-valid ID token from the sign-in capture, I queried Firebase directly:
+- **Firebase Web API key: recovered** (`AIza…`, from the remote-config `?key=`).
+- `users/{uid}/foods` holds only **4 docs** — *saved-food templates* (`isBookmarked`,
+  `isForEditingSavedFood`) from 2025-04. The sign-in capture loaded **14 distinct
+  food photos**, so the real daily diary (≥14 entries) lives elsewhere.
+- **Confirmed Cal AI food-doc schema** (same for saved + diary): top-level
+  `name, servingCalories (per serving), quantity (multiplier), protein, carbs, fats,
+  date (ISO ts), image (photo id), healthRating, ethanolCarbRatio, ingredients[]`.
+  Consumed = per-serving × quantity. The transform now handles this AND the /v6
+  analysis shape — **verified end-to-end against the 4 real docs** (e.g. cookies
+  320×qty2 = 640 kcal). So ingestion is finalized + bulletproof; only the diary
+  LOCATION is missing.
+- The diary path can't be discovered by probing: Firestore `listCollectionIds` +
+  collection-group queries are **403** (security rules), root reads **403**, RTDB
+  (`calai-app-default-rtdb.firebaseio.com` exists) denies guessed paths, no
+  `api.calai.app/v6` diary endpoint (all 404), and the photo ids aren't doc ids.
+
+## ❌ The remaining blocker — the diary read is never on the wire
+
+The app serves the diary from its **offline cache**, so neither capture (nor a fresh
+sign-in) ever made the network read that would reveal the collection path. A
+**refresh token** also wasn't captured (no securetoken refresh fired).
 
 ---
 
@@ -66,29 +81,22 @@ Firestore collection path + date field, and `_extract()`'s diary-doc field names
 
 ---
 
-## 📸 Capture #2 — exactly what to record (≈3 min)
+## 📸 Capture #3 — the foolproof one (≈60 s): LOG A NEW FOOD
 
-Run mitmproxy (`mitmweb --listen-port 8080`, iPhone proxy → your Mac IP:8080, cert
-trusted, iCloud Private Relay/VPN OFF — see the chat for the full setup). Then, in
-the Cal AI app:
+Reads are cached, but **writes always sync to the server immediately** — so logging
+one food reveals the exact diary path no cache can hide.
 
-1. **Sign out and sign back in.** This captures the login → I get the **Firebase Web
-   API key** (the `?key=` param on the `identitytoolkit.googleapis.com` / `securetoken`
-   request) and a **refresh token** (in the login response).
-2. **Open the diary / today view, pull-to-refresh, and scroll back several weeks**
-   to days you haven't viewed recently. Signing out clears the offline cache, so the
-   first diary load *must* hit the network — watch for **`firestore.googleapis.com`**
-   flows (gRPC/`RunQuery`/`Listen`). That reveals the collection path + document schema.
-3. Open one logged meal's detail.
+Run mitmproxy (`mitmweb --listen-port 8080`, iPhone proxy → Mac IP:8080, cert trusted,
+iCloud Private Relay/VPN OFF). Then in Cal AI:
 
-Then **File → Save** the flows (filter to `firestore.googleapis.com` + `calai` +
-`googleapis` hosts if you want to trim) to `~/Documents/LifeOS/calai_flows2` and tell
-me the path.
+1. **Log one new food** — snap a photo of anything (a snack, a label). Let it save.
+2. (Same session, for the refresh token needed for daily auto-sync) **sign out and
+   back in** so a `securetoken`/`identitytoolkit` call is captured.
 
-> If `firestore.googleapis.com` still doesn't appear after a fresh login + diary
-> refresh, the SDK may be using a gRPC channel mitmproxy can't see — tell me and
-> I'll switch the capture approach (force Firestore REST/long-poll, or read the
-> diary via the app's gRPC-Web endpoint).
+The save is a network **write** — a Firestore `:commit`, an RTDB `PUT`/websocket
+frame, or an `api.calai.app` save — carrying the **collection path + full doc**.
+Save the flows to `~/Downloads` and tell me. That's the last unknown; everything
+else (auth refresh, transforms, raw→fact→daily, idempotency) is built + verified.
 
 ---
 

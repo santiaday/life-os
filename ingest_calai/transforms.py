@@ -39,13 +39,27 @@ def _mul(v, factor: float) -> float | None:
     return None if f is None else round(f * factor, 4)
 
 
+def _first(food: dict, *keys):
+    """First present, non-None value among keys — Cal AI uses different field
+    names in the /v6 analysis payload vs the stored Firestore diary doc."""
+    for k in keys:
+        v = food.get(k)
+        if v is not None:
+            return v
+    return None
+
+
 def transform_food_object(food: dict) -> dict:
     """Normalize one Cal AI food object to the consumed-macro fields used by
     fact_food_log. Multiplies the item's totals by `servings` so the result is
     what was actually eaten. Stores the rich ingredient/health detail under
     `micros`. Returns macro fields only (no identity/time — see food_to_log_row).
+
+    Handles BOTH Cal AI shapes (verified against real data):
+      * /v6 analysis payload:  calories + servings
+      * Firestore diary doc:   servingCalories + quantity (per-serving + multiplier)
     """
-    servings = _f(food.get("servings"))
+    servings = _f(_first(food, "servings", "quantity"))
     factor = servings if (servings and servings > 0) else 1.0
 
     carbs = _mul(food.get("carbs"), factor)
@@ -70,7 +84,8 @@ def transform_food_object(food: dict) -> dict:
         "food_name": food.get("name"),
         "amount": factor,
         "unit": "serving",
-        "energy_kcal": _mul(food.get("calories"), factor),
+        # diary doc: per-serving "servingCalories"; analysis payload: total "calories".
+        "energy_kcal": _mul(_first(food, "calories", "servingCalories"), factor),
         "protein_g": _mul(food.get("protein"), factor),
         "carbs_g": carbs,
         "net_carbs_g": net_carbs,
@@ -87,6 +102,7 @@ def transform_food_object(food: dict) -> dict:
             "ingredients": food.get("ingredients") or [],
             "servings": servings,
             "trace_id": food.get("traceId"),
+            "ethanol_carb_ratio": food.get("ethanolCarbRatio"),
         },
     }
 

@@ -72,6 +72,37 @@ def test_alcohol_summed_from_ingredient_ethanol():
     assert transform_food_object(_food())["alcohol_g"] is None
 
 
+def test_real_diary_doc_shape():
+    """The stored Firestore diary doc uses servingCalories + quantity (verified
+    against the user's real docs), not the analysis payload's calories+servings."""
+    doc = {"name": "Grandma's Cookies", "servingCalories": 320, "quantity": 2.0,
+           "protein": 2, "carbs": 46, "fats": 14, "ingredients": [],
+           "date": "2025-04-03T18:00:00Z", "ethanolCarbRatio": 0.0}
+    out = transform_food_object(doc)
+    assert out["energy_kcal"] == 640    # 320 per serving * quantity 2
+    assert out["protein_g"] == 4
+    assert out["carbs_g"] == 92
+    assert out["fat_g"] == 28
+    assert out["amount"] == 2.0
+
+
+def test_extract_handles_real_diary_doc():
+    from ingest_calai.ingest import _extract
+    doc = {"_name": "projects/calai-app/databases/(default)/documents/foods/ABC",
+           "id": "ABC", "name": "Bagel", "servingCalories": 210, "quantity": 1.0,
+           "protein": 7, "carbs": 42, "fats": 1, "date": "2025-04-04T15:30:00Z",
+           "image": "IMG-123", "healthRating": {"rating": 4}}
+    ex = _extract(doc)
+    assert ex is not None
+    assert ex["entry_id"] == "ABC"
+    assert ex["image_id"] == "IMG-123"
+    assert ex["health_score"] == {"rating": 4}
+    assert ex["logged_at"].year == 2025 and ex["logged_at"].month == 4
+    assert ex["food"]["servingCalories"] == 210
+    # a non-food doc is skipped
+    assert _extract({"_name": ".../x", "id": "x", "referralCode": "JYMMOU"}) is None
+
+
 def test_meal_group_buckets():
     assert meal_group_from_time(datetime(2026, 6, 14, 8, tzinfo=UTC)) == "breakfast"
     assert meal_group_from_time(datetime(2026, 6, 14, 13, tzinfo=UTC)) == "lunch"
