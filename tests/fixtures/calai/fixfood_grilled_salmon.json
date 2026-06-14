@@ -1,0 +1,24 @@
+{
+  "name": "Grilled Salmon with Roasted Potatoes and Lemon",
+  "servings": 1,
+  "calories": 752,
+  "carbs": 66,
+  "fats": 24,
+  "protein": 68,
+  "sugar": 0,
+  "fiber": 0,
+  "sodium": 0,
+  "traceId": "edc0bc80-6174-4dc4-b5e8-e11a29978102",
+  "ingredients": [
+    {"name": "Salmon", "calories": 426, "protein": 64, "carbs": 0, "fats": 18, "ethanol": 0, "mass": 0, "servings": 2,
+     "servingTypes": [{"id": "estimated", "formalName": "1 serving", "label": "serving", "metricAmount": 0, "metricUnit": "g", "numberOfUnits": 1, "calories": 213, "carbs": 0, "protein": 32, "fat": 9}]},
+    {"name": "Potato", "calories": 250, "protein": 4, "carbs": 46, "fats": 6, "ethanol": 0, "mass": 0, "servings": 2,
+     "servingTypes": [{"id": "estimated", "formalName": "1 serving", "label": "serving", "metricAmount": 0, "metricUnit": "g", "numberOfUnits": 1, "calories": 125, "carbs": 23, "protein": 2, "fat": 3}]},
+    {"name": "Balsamic Glaze", "calories": 58, "protein": 0.2, "carbs": 14, "fats": 0, "ethanol": 0, "mass": 0, "servings": 2,
+     "servingTypes": [{"id": "estimated", "formalName": "1 serving", "label": "serving", "metricAmount": 0, "metricUnit": "g", "numberOfUnits": 1, "calories": 29, "carbs": 7, "protein": 0.1, "fat": 0}]},
+    {"name": "Lemon", "calories": 18, "protein": 0, "carbs": 6, "fats": 0, "ethanol": 0, "mass": 0, "servings": 1,
+     "servingTypes": [{"id": "estimated", "formalName": "1 serving", "label": "serving", "metricAmount": 0, "metricUnit": "g", "numberOfUnits": 1, "calories": 18, "carbs": 6, "protein": 0, "fat": 0}]},
+    {"name": "Parsley", "calories": 0.08, "protein": 0, "carbs": 0.02, "fats": 0, "ethanol": 0, "mass": 0, "servings": 0.12,
+     "servingTypes": [{"id": "estimated", "formalName": "1 serving", "label": "serving", "metricAmount": 0, "metricUnit": "g", "numberOfUnits": 1, "calories": 0.67, "carbs": 0.17, "protein": 0, "fat": 0}]}
+  ]
+}

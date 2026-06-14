@@ -1,124 +1,110 @@
 # Cal AI — Reverse-Engineering & Capture Runbook
 
-Goal: make **Cal AI** (the photo-based calorie tracker) the warehouse's nutrition
-source of record, replacing Cronometer. Cal AI has no public API, so we recover
-its internal API the same way the Whoop journal was bootstrapped — a one-time
-**mitmproxy capture** from your iPhone. You run the capture and hand me the flow
-file; I reverse-engineer the auth + endpoints and finish the `ingest_calai`
-package.
-
-> **Status:** blocked on your capture. Everything below step 4 is what I build
-> *after* you provide the flow. Steps 1–3 are yours.
+Goal: make **Cal AI** the warehouse's nutrition source of record, replacing
+Cronometer (frozen at 2026-05-30). This doc tracks what the first mitmproxy
+capture revealed, what's already built + verified, and the **one** follow-up
+capture needed to go live.
 
 ---
 
-## Why a capture is needed
+## ✅ Confirmed from capture #1 (`~/Downloads/Mitmproxy Flows`)
 
-Cal AI's app talks to a private backend (most of these apps use a custom API
-behind a Firebase/Supabase/RevenueCat-issued bearer token). I can't see your
-phone's HTTPS traffic, and there's no documented API or export. A 5-minute
-mitmproxy session reveals (a) the API host, (b) how requests are authenticated,
-and (c) the food-log + daily-summary endpoints and their JSON shapes — which is
-everything I need to write a native ingester that fits this repo's
-raw → fact → mart pattern.
+Cal AI is a **Firebase** app. The capture recorded an app session where one meal
+was analyzed/edited (Grilled Salmon) plus account/onboarding chatter.
 
----
+- **Firebase project:** `calai-app`.
+- **Auth:** Firebase ID token — RS256 JWT, ~1h TTL, `iss=securetoken.google.com/calai-app`,
+  `aud=calai-app`, `sub`/`user_id=f5Q08GHjoJUdUp8jUO4u5qPZZII2`,
+  `email=santiagoaday7@gmail.com`, sign-in provider `password` (Apple/Google linked).
+  Refreshed via `securetoken.googleapis.com/v1/token?key=<WEB_API_KEY>` with a refresh token.
+- **AI / account API:** `https://api.calai.app/v6/<endpoint>` — POST, envelope
+  `{"userInfo": {...platform/userId/version...}, "data": {...}}`, `Authorization: Bearer <idToken>`,
+  UA `Cal%20AI/1779 CFNetwork/3860.600.12 Darwin/25.6.0`. Seen: `fixFood`, `health-score`,
+  `getSubscription`, `family-sharing/get-family-status`, `getReferralsData`. Responses gzip.
+- **Food photos:** Firebase Storage `calai-app.appspot.com`, path
+  `food_images_user/<uid>/<imageId>.jpg`.
+- **Food-object shape (CONFIRMED, from `fixFood`):**
+  ```json
+  {"name": "...", "servings": 1, "calories": 752, "carbs": 66, "fats": 24,
+   "protein": 68, "sugar": 0, "fiber": 0, "sodium": 0, "traceId": "...",
+   "ingredients": [{"name": "Salmon", "calories": 426, "protein": 64, "carbs": 0,
+                    "fats": 18, "ethanol": 0, "servings": 2, "servingTypes": [...]}]}
+  ```
+  Top-level totals = sum of ingredients; `servings` = how many of the whole item
+  were logged. Maps cleanly onto `fact_food_log` (Cal AI even carries per-ingredient
+  `ethanol` → `alcohol_g`).
 
-## 1. Set up mitmproxy on your Mac
+## ❌ What capture #1 did NOT contain (the blocker)
 
-```bash
-brew install mitmproxy        # if not already installed
-mitmweb                       # starts the proxy + a web UI at http://127.0.0.1:8081
-```
-
-Leave it running. Note your Mac's LAN IP (`ipconfig getifaddr en0`).
-
-## 2. Point your iPhone at the proxy + trust the CA
-
-1. iPhone → Settings → Wi-Fi → (your network) → **Configure Proxy → Manual**.
-   Server = your Mac's IP, Port = **8080**.
-2. In Safari on the iPhone, visit **http://mitm.it** and install the **iOS**
-   certificate profile.
-3. Settings → General → About → **Certificate Trust Settings** → toggle
-   **ON** for the mitmproxy cert. (This step is required — without it, TLS to
-   Cal AI fails or shows nothing.)
-
-> If Cal AI uses certificate pinning and step 3 isn't enough (you'll see
-> connection errors in the app but no Cal AI flows in mitmweb), tell me — there
-> are workarounds (a jailbroken device, Frida/objection unpinning, or grabbing
-> the token from the app container), but most of these calorie apps are **not**
-> pinned, so try the simple path first.
-
-## 3. Exercise the app, then save the flows
-
-With mitmweb capturing, in the Cal AI app:
-
-1. **Fully sign out and sign back in** (so the login/token-refresh request is
-   captured — this is the auth we need to replicate).
-2. Open your **diary / today view** so it loads logged meals.
-3. **Scroll back several days/weeks** of history (this triggers the food-log
-   list/history endpoint with date params — exactly what the ingester paginates).
-4. Open **one meal's detail** (per-item macros).
-5. Optionally log a new item so we see the write shape (we only read, but it
-   helps map fields).
-
-Then in mitmweb: **File → Save** (or filter to the Cal AI host first via the
-search bar, then save the filtered set). You'll get a binary flows file.
-
-**Hand me:** the saved flows file (or, if you'd rather not share the whole
-capture, a HAR/JSON export of just the Cal AI host's requests+responses). Put it
-somewhere I can read, e.g. `~/Documents/LifeOS/calai_flows`, and tell me the
-path.
-
-### What I'm looking for in the capture
-- The **API host** (e.g. `api.cal-ai.app`, a Supabase project URL, or similar).
-- The **auth header** on data requests (`Authorization: Bearer …`) and how it's
-  obtained/refreshed (Firebase `securetoken.googleapis.com`, Supabase
-  `/auth/v1/token`, RevenueCat, or a custom `/login`).
-- The **food-log endpoint**: how it's paginated/date-filtered, and the JSON
-  fields for each logged item (calories, protein, carbs, fat, fiber, timestamp,
-  meal type, food name, photo id).
-- The **daily-summary endpoint** if one exists (daily macro totals + targets).
+- **The food diary / history read.** No endpoint returns the list of logged meals
+  by date. There was **no `firestore.googleapis.com` traffic at all.** The diary is
+  almost certainly stored in **Firestore** (cloud-synced, references the storage
+  photos) and was served from the on-device offline cache during the capture — so
+  the collection path + document schema are unknown.
+- **A login** (no `identitytoolkit`/`securetoken` calls), so the **Firebase Web API
+  key** and a **refresh token** weren't captured.
 
 ---
 
-## 4. What I build once I have the flow (no action needed from you)
+## ✅ Already built + verified (this branch)
 
-Following the standard ingester pattern (`ingest_cronometer` / `ingest_hevy`):
+- **Migration `0034_calai_nutrition.sql`** — `source` column on `fact_food_log`/
+  `fact_food_daily`, and `raw_calai_food` (raw JSONB diary docs). Applied.
+- **`ingest_calai/transforms.py`** — `transform_food_object` / `food_to_log_row`,
+  **tested against the real captured payload** (752 kcal / 68 P / 66 C / 24 F, ingredient
+  detail preserved in `micros`, servings multiplier, NaN-safe, idempotent hash).
+- **`ingest_calai/client.py`** — `CalaiAuth` (Firebase securetoken refresh + token
+  freshness), Firestore REST `runQuery` + typed-value decoding, the `/v6` envelope
+  caller. Pure logic unit-tested.
+- **`ingest_calai/ingest.py`** — full raw→fact→daily upsert wiring, **verified
+  end-to-end against the live DB** (a synthetic diary doc wrapping the real food →
+  `raw_calai_food` + `fact_food_log` + `fact_food_daily`, idempotent).
+- **`ingest_calai/__main__.py`** — `login` + `ingest` CLI.
 
-- **`ingest_calai/`** package: `client.py` (auth + paginated fetch),
-  `transforms.py` (Cal AI JSON → fact rows), `ingest.py` (three-pass upsert +
-  `run_all` + `--backfill`), `__main__.py`, `Dockerfile`.
-- **Auth**: replicate whatever the capture shows. If it's a refreshable bearer,
-  the token bundle is stored in `oauth_tokens(service='calai')` and refreshed
-  natively (or, if it needs an iPhone bridge like Whoop, a refresh-callback
-  webhook — we'll know from the capture).
-- **Migration `0026_calai_nutrition.sql`**:
-  - `raw_calai_meal` / `raw_calai_daily` raw JSONB tables (natural keys = Cal AI
-    item/day ids).
-  - `ALTER TABLE fact_food_log / fact_food_daily ADD COLUMN IF NOT EXISTS
-    source TEXT DEFAULT 'cronometer'` so rows are source-attributable.
-- **Transforms** map Cal AI meals → `fact_food_log` (`eaten_at`, `meal_group`,
-  `food_name`, `energy_kcal`, `protein_g`, `carbs_g`, `fat_g`, `fiber_g`, …) and
-  daily totals → `fact_food_daily`, all tagged `source='calai'`. Because these
-  are the **same tables Cronometer wrote**, `mart_refresh`, `mart_daily`,
-  `mart_meal`, and every nutrition MCP tool keep working with zero changes.
-
-## 5. Cutover (after Cal AI backfill is verified)
-
-- Add Cal AI scheduler jobs (daily + weekly rebackfill), mirroring the
-  Cronometer slots in `scheduler/__main__.py`.
-- **Retire** the two Cronometer jobs (`cronometer_daily`, `cronometer_weekly`).
-  Keep the `ingest_cronometer` code and historical rows (`source='cronometer'`)
-  for archival — just stop scheduling it.
-- Run `python -m ingest_calai ingest --backfill 365` + `python -m mart_refresh`,
-  then spot-check `mart_daily.total_kcal` and `mart_meal` against the Cal AI app
-  for a few days.
+The only un-finalized spots (small, clearly marked in code): `fetch_diary()`'s
+Firestore collection path + date field, and `_extract()`'s diary-doc field names.
 
 ---
+
+## 📸 Capture #2 — exactly what to record (≈3 min)
+
+Run mitmproxy (`mitmweb --listen-port 8080`, iPhone proxy → your Mac IP:8080, cert
+trusted, iCloud Private Relay/VPN OFF — see the chat for the full setup). Then, in
+the Cal AI app:
+
+1. **Sign out and sign back in.** This captures the login → I get the **Firebase Web
+   API key** (the `?key=` param on the `identitytoolkit.googleapis.com` / `securetoken`
+   request) and a **refresh token** (in the login response).
+2. **Open the diary / today view, pull-to-refresh, and scroll back several weeks**
+   to days you haven't viewed recently. Signing out clears the offline cache, so the
+   first diary load *must* hit the network — watch for **`firestore.googleapis.com`**
+   flows (gRPC/`RunQuery`/`Listen`). That reveals the collection path + document schema.
+3. Open one logged meal's detail.
+
+Then **File → Save** the flows (filter to `firestore.googleapis.com` + `calai` +
+`googleapis` hosts if you want to trim) to `~/Documents/LifeOS/calai_flows2` and tell
+me the path.
+
+> If `firestore.googleapis.com` still doesn't appear after a fresh login + diary
+> refresh, the SDK may be using a gRPC channel mitmproxy can't see — tell me and
+> I'll switch the capture approach (force Firestore REST/long-poll, or read the
+> diary via the app's gRPC-Web endpoint).
+
+---
+
+## 🏁 Finishing once capture #2 lands (small, all verified)
+
+1. Put `CALAI_FIREBASE_API_KEY` in `.env`; `python -m ingest_calai login --refresh-token <RT> --user-id f5Q08GHjoJUdUp8jUO4u5qPZZII2`.
+2. Set `CALAI_DIARY_COLLECTION` (+ `CALAI_DIARY_DATE_FIELD` if not `createdAt`) from the
+   captured Firestore path; confirm `_extract()` field names against one real doc.
+3. `python -m ingest_calai ingest --backfill 365` → spot-check `fact_food_log` /
+   `fact_food_daily` / `mart_daily.total_kcal` against the app.
+4. Add a daily scheduler job (mirroring `whoop_private_daily`); the mart nutrition
+   fallback already prefers real `fact_food_daily` over the lossy Apple-Health path.
+5. (Optional) retire the Cronometer jobs once Cal AI history is verified.
 
 ## Notes
-- We only ever **read** from Cal AI. No writes back to their service.
-- If the capture shows the data is also written to **Apple Health** (many of
-  these apps do), that's a no-capture fallback for daily totals — but it lacks
-  per-meal/photo detail, so the direct API is preferred.
+- We only ever **read** Cal AI. No writes back.
+- Cal AI also writes daily totals to **Apple Health**, which is the current (lossy)
+  nutrition path (`fact_food_daily_apple_health`). Direct Firestore = per-meal detail
+  + ingredients + photos + health score.
