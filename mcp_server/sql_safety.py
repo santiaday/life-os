@@ -71,3 +71,128 @@ def ensure_limit(query: str, default_limit: int) -> str:
         return query
     cleaned = query.rstrip().rstrip(";")
     return f"{cleaned}\nLIMIT {default_limit}"
+
+
+# ---------------------------------------------------------------------------
+# Write-path safety. The generic write tools (execute_sql / db_*) run against
+# the ADMIN role, which can do anything — so these guards prevent *accidental*
+# catastrophe, not unauthorized access. The real backstop is that execute_sql
+# runs every statement inside a transaction and ROLLs BACK unless the affected
+# row count is within bounds (or explicitly confirmed); these string checks are
+# the fast first line of defense on top of that.
+# ---------------------------------------------------------------------------
+
+class WriteSafetyError(ValueError):
+    """Raised when a write statement trips a safety guard."""
+
+
+_WHERE_RE = re.compile(r"\bWHERE\b", re.IGNORECASE)
+_DESTRUCTIVE_RE = re.compile(
+    r"\bDROP\b|\bTRUNCATE\b|\bREVOKE\b|\bALTER\b[\s\S]*?\bDROP\b",
+    re.IGNORECASE,
+)
+# Never allowed through the tool, even with confirm_destructive — unrecoverable
+# or would disable the audit trail / migration ledger itself.
+_CATASTROPHIC_RE = re.compile(
+    r"\bDROP\s+(DATABASE|SCHEMA|ROLE|USER|TABLESPACE|OWNED|SUBSCRIPTION)\b"
+    r"|\b(?:DROP\s+TABLE|TRUNCATE)\b[\s\S]*?\b(mcp_write_audit|schema_migrations)\b",
+    re.IGNORECASE,
+)
+_LEADING_VERB_RE = re.compile(r"^\s*([A-Za-z]+)")
+_TARGET_TABLE_RE = re.compile(
+    r"\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?|"
+    r"CREATE\s+(?:TABLE|VIEW|MATERIALIZED\s+VIEW)|ALTER\s+TABLE|DROP\s+TABLE|MERGE\s+INTO)"
+    r"\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?([A-Za-z_][\w.\"]*)",
+    re.IGNORECASE,
+)
+
+_VERB_TO_OP = {
+    "INSERT": "INSERT", "UPDATE": "UPDATE", "DELETE": "DELETE",
+    "MERGE": "UPSERT", "TRUNCATE": "TRUNCATE", "DROP": "DDL_DROP",
+    "ALTER": "DDL_ALTER", "CREATE": "DDL_CREATE", "GRANT": "DCL",
+    "REVOKE": "DCL", "SELECT": "SELECT", "VALUES": "SELECT",
+    "COPY": "COPY", "VACUUM": "MAINT", "ANALYZE": "MAINT",
+    "REINDEX": "MAINT", "REFRESH": "MAINT", "COMMENT": "DDL_COMMENT",
+}
+
+
+def count_statements(query: str) -> int:
+    """Number of non-empty statements (string literals / comments stripped)."""
+    stripped = normalize_for_check(query)
+    return len([seg for seg in _STMT_END_RE.split(stripped) if seg.strip()])
+
+
+def statement_has_where(query: str) -> bool:
+    """Heuristic: does the statement contain a WHERE? Used to flag whole-table
+    UPDATE/DELETE. A WHERE inside a subquery can fool this — the execute_sql
+    affected-row backstop is what actually prevents a runaway whole-table
+    change, so this is only the first gate."""
+    return bool(_WHERE_RE.search(normalize_for_check(query)))
+
+
+def classify_statement(query: str) -> str:
+    """Best-effort operation label (INSERT|UPDATE|DELETE|UPSERT|SELECT|DDL_*|...).
+
+    For a data-modifying CTE (WITH ... DELETE/UPDATE/INSERT) we return the
+    modifying verb, not SELECT, so the write guards still apply."""
+    norm = normalize_for_check(query).strip()
+    m = _LEADING_VERB_RE.match(norm)
+    verb = (m.group(1).upper() if m else "")
+    if verb == "WITH":
+        upper = norm.upper()
+        for kw in ("DELETE", "UPDATE", "INSERT", "MERGE"):
+            if re.search(rf"\b{kw}\b", upper):
+                return _VERB_TO_OP[kw]
+        return "SELECT"
+    return _VERB_TO_OP.get(verb, "OTHER")
+
+
+def extract_target_table(query: str) -> str | None:
+    """Best-effort target table for the write-audit log (not security-critical)."""
+    m = _TARGET_TABLE_RE.search(normalize_for_check(query))
+    return m.group(1).strip('"') if m else None
+
+
+def is_destructive(query: str) -> bool:
+    """DROP / TRUNCATE / REVOKE / ALTER ... DROP — schema- or permission-level
+    loss that should require an explicit confirm."""
+    return bool(_DESTRUCTIVE_RE.search(normalize_for_check(query)))
+
+
+def validate_write(
+    query: str,
+    *,
+    allow_no_where: bool = False,
+    confirm_destructive: bool = False,
+) -> None:
+    """Raise WriteSafetyError if a write statement trips a guard.
+
+    - Single statement only (send one at a time).
+    - Catastrophic ops (DROP DATABASE/SCHEMA/ROLE, or dropping/truncating the
+      audit & migration ledgers) are refused outright.
+    - UPDATE/DELETE without WHERE requires allow_no_where=True.
+    - DROP/TRUNCATE/ALTER-DROP/REVOKE require confirm_destructive=True.
+    """
+    if not query or not query.strip():
+        raise WriteSafetyError("empty statement.")
+    if count_statements(query) > 1:
+        raise WriteSafetyError(
+            "multiple statements in one call are not allowed — send one statement "
+            "at a time so each is audited and bounded independently."
+        )
+    if _CATASTROPHIC_RE.search(normalize_for_check(query)):
+        raise WriteSafetyError(
+            "refused: catastrophic operation (DROP DATABASE/SCHEMA/ROLE, or "
+            "dropping/truncating mcp_write_audit / schema_migrations)."
+        )
+    op = classify_statement(query)
+    if op in ("UPDATE", "DELETE") and not allow_no_where and not statement_has_where(query):
+        raise WriteSafetyError(
+            f"{op} has no WHERE clause and would affect the ENTIRE table. "
+            "If that's intended, pass allow_no_where=true."
+        )
+    if is_destructive(query) and not confirm_destructive:
+        raise WriteSafetyError(
+            "destructive operation (DROP / TRUNCATE / ALTER ... DROP / REVOKE) "
+            "requires confirm_destructive=true."
+        )

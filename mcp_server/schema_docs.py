@@ -594,6 +594,28 @@ SCHEMA_DOCS: dict = {
                 "copilot_type": "Copilot's internal type field (regular | transfer | etc.).",
             },
         },
+        "mcp_write_audit": {
+            "purpose": (
+                "Forensic log of every generic DB write Claude makes via the "
+                "db_* / execute_sql tools — including dry-runs, blocked attempts, "
+                "and failures. The semantic write tools (log_food etc.) are not "
+                "logged here; only the generic write layer is. Use get_write_audit "
+                "to review or reconstruct changes."
+            ),
+            "grain": "1 row per write-tool call.",
+            "columns": {
+                "tool": "execute_sql | db_insert | db_update | db_delete | db_upsert.",
+                "operation": "INSERT | UPDATE | DELETE | UPSERT | DDL_* | TRUNCATE | …",
+                "target_table": "Best-effort table the statement touched.",
+                "statement": "The exact SQL sent (with %s placeholders).",
+                "params": "JSONB summary of the bound params (truncated).",
+                "affected_rows": "cur.rowcount after execution.",
+                "dry_run": "True if previewed-and-rolled-back.",
+                "committed": "True only if the change was actually applied.",
+                "ok": "False if the statement errored or was refused by a guard.",
+                "result_sample": "Sample of RETURNING rows, if any.",
+            },
+        },
     },
     "metric_glossary": {
         "hrv_rmssd_ms": "Root mean square of successive differences between heartbeats during the last slow-wave sleep period, in milliseconds. Whoop's headline recovery input.",
@@ -618,6 +640,43 @@ SCHEMA_DOCS: dict = {
         "refresh — historical data doesn't change."
     ),
     "write_workflows": {
+        "write_to_the_database": (
+            "Claude can READ and WRITE any table directly. READ with ask_sql "
+            "(arbitrary SELECT, read-only role). WRITE with the generic db_* "
+            "tools — no per-table tool needed. Prefer the dedicated semantic "
+            "tools (log_food, update_transaction, submit_lab_results, "
+            "log_strength_workout, …) when one fits — they handle source "
+            "side-effects and downstream sync. Drop to the generic tools when "
+            "no semantic tool covers the table. "
+            "RECOMMENDED FLOW for any direct write: "
+            "1) db_list_tables(pattern='…') to find the table if unsure. "
+            "2) db_describe_table(table) to get real column names + NOT NULL / "
+            "FK / unique constraints (do this FIRST — don't guess columns). "
+            "3) Make the change with the narrowest tool: "
+            "   • db_insert(table, rows=[{col:val,…}], returning='id') — new rows. "
+            "   • db_upsert(table, rows, conflict_columns=[…]) — idempotent insert-or-update. "
+            "   • db_update(table, set_values={col:val}, where='col = %s', where_params=[v]) — edits. "
+            "   • db_delete(table, where='col = %s', where_params=[v]) — removals. "
+            "   • execute_sql(statement, params=[…]) — DDL (CREATE/ALTER), CTEs, "
+            "     ON CONFLICT, or anything structured tools don't cover. "
+            "4) Preview risky changes with dry_run=true first (it runs then ROLLS "
+            "BACK and reports the affected row count); re-run with dry_run=false "
+            "(the default) to commit. "
+            "5) Verify with ask_sql, and review history with get_write_audit. "
+            "SAFETY (these are guards against accidents, not permissions — Claude "
+            "has full write access): UPDATE/DELETE require a WHERE (override with "
+            "allow_no_where=true on execute_sql); a write touching > max_affected "
+            "rows (default 1000) is rolled back unless confirm_large=true; "
+            "DROP/TRUNCATE/ALTER-DROP/REVOKE require confirm_destructive=true; "
+            "DROP DATABASE/SCHEMA/ROLE and any op on mcp_write_audit / "
+            "schema_migrations are refused outright. Every write is logged to "
+            "mcp_write_audit. ALWAYS parameterize values with %s + params — never "
+            "string-concatenate user values into SQL. "
+            "PERSISTENCE: ad-hoc DDL via execute_sql changes the LIVE database "
+            "immediately but is NOT saved as a migration, so a fresh rebuild "
+            "won't recreate it — if a new table/column must survive a rebuild, "
+            "tell the user to add a db/migrations/NNNN_*.sql file for it."
+        ),
         "auto_categorize": (
             "User asks to categorize uncategorized transactions: "
             "1) `get_transactions(start_date, end_date)` filtered to where "

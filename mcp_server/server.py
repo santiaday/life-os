@@ -23,6 +23,7 @@ from lifeos_core.db import close_pools, conn
 from lifeos_core.logging import configure_logging, get_logger
 from lifeos_core.settings import settings
 from mcp_server import cronometer_write_tools as CW
+from mcp_server import db_write_tools as DBW
 from mcp_server import hevy_write_tools as HW
 from mcp_server import labs_write_tools as LW
 from mcp_server import tools as T
@@ -82,7 +83,13 @@ mcp = FastMCP(
         "/ body_image_photo_quality against alcohol_g, sleep_consistency_pct, "
         "etc. Log interventions inline with log_body_image_intervention "
         "when the user mentions starting/stopping something. "
-        "Use ask_sql only when no semantic tool fits."
+        "You can READ and WRITE the warehouse directly: ask_sql for any SELECT, "
+        "and the generic write tools (db_describe_table, db_insert, db_update, "
+        "db_delete, db_upsert, execute_sql) for any mutation or DDL — prefer a "
+        "dedicated semantic tool when one fits, else use these. See the "
+        "get_schema_docs write_workflows.write_to_the_database guide for the "
+        "safe flow (describe → dry_run → apply → verify). "
+        "Use ask_sql / the db_* tools only when no semantic tool fits."
     ),
     # The streamable-HTTP route lives at the *root* of the inner ASGI app so
     # FastAPI can mount it at /mcp without requiring the awkward
@@ -677,13 +684,153 @@ def ask_sql(
     return T.ask_sql(query, max_rows, timeout_ms=timeout_ms, explain=explain)
 
 
+# ---- generic DB write + introspection (counterpart to ask_sql) ------------
+# These let Claude write to ANY table and evolve the schema, with guardrails:
+# every statement runs in a transaction and is rolled back for dry-runs or
+# over-budget row counts; UPDATE/DELETE need a WHERE; DROP/TRUNCATE need
+# confirm_destructive; catastrophic ops are refused; everything is logged to
+# mcp_write_audit. Recommended flow: db_describe_table -> (dry_run=true) -> apply.
+@_tool(description=(
+    "List tables/views in the warehouse with approx row counts + column counts. "
+    "`pattern` is an ILIKE name filter (e.g. 'fact_%', '%whoop%'). Start here to "
+    "find a table, then db_describe_table for its columns. Read-only."
+))
+def db_list_tables(
+    schema: str = "public",
+    pattern: str | None = None,
+    include_views: bool = True,
+) -> dict:
+    return DBW.db_list_tables(schema, pattern, include_views)
+
+
+@_tool(description=(
+    "Describe one table: columns (type/nullable/default), primary key, unique "
+    "constraints, foreign keys, indexes, approx row count, comment. ALWAYS call "
+    "this before writing to a table so you use real column names and respect NOT "
+    "NULL / FK / unique constraints. Read-only."
+))
+def db_describe_table(table: str) -> dict:
+    return DBW.db_describe_table(table)
+
+
+@_tool(description=(
+    "Insert row(s) into a table. `rows` = list of column->value dicts (all rows "
+    "share the same columns); dict/list values become JSONB. "
+    "on_conflict_do_nothing=true skips unique-violation rows. `returning` echoes "
+    "a column (e.g. 'id'). dry_run=true previews without committing. Column names "
+    "are validated against the live schema. Parameterized — injection-safe."
+))
+def db_insert(
+    table: str,
+    rows: list[dict],
+    on_conflict_do_nothing: bool = False,
+    returning: str | None = None,
+    dry_run: bool = False,
+) -> dict:
+    return DBW.db_insert(table, rows, on_conflict_do_nothing, returning, dry_run)
+
+
+@_tool(description=(
+    "Update rows. `set_values` = column->new-value (dicts/lists become JSONB). "
+    "`where` is a SQL predicate WITHOUT the word WHERE (e.g. 'id = %s AND day >= "
+    "%s'); pass its %s values as `where_params`. WHERE is REQUIRED. Rolled back "
+    "if it would touch more than max_affected rows (default 1000) unless "
+    "confirm_large=true. Use dry_run=true to preview the count first."
+))
+def db_update(
+    table: str,
+    set_values: dict,
+    where: str,
+    where_params: list | None = None,
+    returning: str | None = None,
+    dry_run: bool = False,
+    max_affected: int = DBW.DEFAULT_MAX_AFFECTED,
+    confirm_large: bool = False,
+) -> dict:
+    return DBW.db_update(table, set_values, where, where_params, returning,
+                         dry_run, max_affected, confirm_large)
+
+
+@_tool(description=(
+    "Delete rows matching `where` (a predicate WITHOUT the word WHERE; pass %s "
+    "values as `where_params`). WHERE is REQUIRED. Rolled back if it would delete "
+    "more than max_affected rows (default 1000) unless confirm_large=true. Use "
+    "dry_run=true or returning='id' to see exactly what would be removed first."
+))
+def db_delete(
+    table: str,
+    where: str,
+    where_params: list | None = None,
+    returning: str | None = None,
+    dry_run: bool = False,
+    max_affected: int = DBW.DEFAULT_MAX_AFFECTED,
+    confirm_large: bool = False,
+) -> dict:
+    return DBW.db_delete(table, where, where_params, returning, dry_run,
+                         max_affected, confirm_large)
+
+
+@_tool(description=(
+    "Upsert: insert rows, updating on conflict (INSERT ... ON CONFLICT DO UPDATE). "
+    "`conflict_columns` must form a unique index/constraint; `update_columns` "
+    "defaults to all non-conflict columns. The idempotent write — safe to re-run. "
+    "dict/list values become JSONB. dry_run=true previews."
+))
+def db_upsert(
+    table: str,
+    rows: list[dict],
+    conflict_columns: list[str],
+    update_columns: list[str] | None = None,
+    returning: str | None = None,
+    dry_run: bool = False,
+) -> dict:
+    return DBW.db_upsert(table, rows, conflict_columns, update_columns, returning, dry_run)
+
+
+@_tool(description=(
+    "Run an arbitrary write statement (INSERT/UPDATE/DELETE/DDL/CTE/ON CONFLICT) "
+    "— the write counterpart to ask_sql. Prefer the db_* tools for simple row "
+    "edits; use this for DDL (CREATE/ALTER) or anything they don't cover. "
+    "ALWAYS parameterize values with %s + `params`. Runs in a transaction: "
+    "dry_run=true executes then rolls back (preview the row count); affected > "
+    "max_affected rolls back unless confirm_large=true; UPDATE/DELETE without "
+    "WHERE needs allow_no_where=true; DROP/TRUNCATE/ALTER-DROP need "
+    "confirm_destructive=true; DROP DATABASE/SCHEMA/ROLE are always refused. One "
+    "statement per call; every call is logged to mcp_write_audit. (DDL hits the "
+    "LIVE DB but isn't saved as a migration — tell the user to add a "
+    "db/migrations/*.sql file if it must survive a rebuild.)"
+))
+def execute_sql(
+    statement: str,
+    params: list | None = None,
+    dry_run: bool = False,
+    confirm_destructive: bool = False,
+    allow_no_where: bool = False,
+    max_affected: int = DBW.DEFAULT_MAX_AFFECTED,
+    confirm_large: bool = False,
+    timeout_ms: int = DBW.WRITE_TIMEOUT_MS,
+) -> dict:
+    return DBW.execute_sql(statement, params, dry_run, confirm_destructive,
+                           allow_no_where, max_affected, confirm_large, timeout_ms)
+
+
+@_tool(description=(
+    "Recent DB write history from mcp_write_audit: what was written, when, the "
+    "exact SQL, row counts, and whether it committed. Filter by target `table`. "
+    "Use to review or reconstruct changes made via the write tools."
+))
+def get_write_audit(limit: int = 50, table: str | None = None) -> dict:
+    return DBW.get_write_audit(limit, table)
+
+
 # ---- write / refresh tools ------------------------------------------------
 @_tool(description=(
     "Pull fresh data from one or all sources, then rebuild the mart. Call "
     "this at the START of a chat session if the user is asking about recent "
     "data so analysis isn't on stale numbers. Default source='all' refreshes "
-    "Whoop, Calendar, Cronometer, Copilot, then mart. Pass a single source "
-    "name (whoop|calendar|cronometer|copilot|hevy|pushpress|mart) to scope it."
+    "Whoop (public + private), Whoop journal, Calendar, Cronometer, Copilot, "
+    "then mart. Pass a single source name (whoop|whoop_journal|whoop_private|"
+    "calendar|cronometer|copilot|mart) to scope it."
 ))
 def refresh_data(source: str = "all") -> dict:
     return W.refresh_data(source)
