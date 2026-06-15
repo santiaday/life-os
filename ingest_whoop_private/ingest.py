@@ -208,7 +208,16 @@ def ingest_lifts(client: WhoopPrivateClient, *, backfill_days: int | None = None
     fact_whoop_lift_workout (aggregate) + fact_whoop_lift_set (one row per set).
     Incremental covers the last 7 days; backfill covers `backfill_days`."""
     cutoff = _local_today() - timedelta(days=backfill_days if backfill_days else 7)
+    today = _local_today()
     with ingestion_run("whoop_private", "lift", since=cutoff.isoformat()) as run:
+        errors: dict[str, str] = {}
+        # Discover strength workouts from BOTH sources so lifts sync regardless of
+        # the public OAuth token's health:
+        #   (a) fact_workout (public OAuth) — when alive, carries strain + duration.
+        #   (b) the PRIVATE strain deep-dive per day — keeps working when the public
+        #       token is dead (the failure mode that stalled strength syncing).
+        # Keyed by activity_id; (a) wins on overlap (it has strain/duration).
+        discovered: dict[str, dict] = {}
         with tx() as c, c.cursor() as cur:
             cur.execute(
                 """
@@ -217,17 +226,32 @@ def ingest_lifts(client: WhoopPrivateClient, *, backfill_days: int | None = None
                 FROM fact_workout
                 WHERE (sport_name ILIKE %s OR sport_name ILIKE %s)
                   AND day >= %s
-                ORDER BY day
                 """,
                 ["%weight%", "%strength%", cutoff],
             )
-            workouts = cur.fetchall()
+            for w in cur.fetchall():
+                discovered[str(w["workout_id"])] = {
+                    "day": w["day"], "strain": _safe_num(w["strain"]),
+                    "dur_min": round(w["dur_min"], 1) if w["dur_min"] else None,
+                }
+        # Private discovery for recent days. Capped (older history is already in
+        # fact_workout from when public was alive) so a 365-day backfill doesn't
+        # fan out into 365 feed calls.
+        lookback = min(backfill_days if backfill_days else 7, 21)
+        d = today - timedelta(days=lookback)
+        while d <= today:
+            try:
+                for aid in transforms.extract_activity_ids(client.day_strain(d)):
+                    discovered.setdefault(aid, {"day": d, "strain": None, "dur_min": None})
+            except WhoopAuthExpired:
+                raise
+            except Exception as e:
+                errors[f"day_strain:{d.isoformat()}"] = f"{type(e).__name__}: {e}"
+            d += timedelta(days=1)
 
         fetched = 0
-        errors: dict[str, str] = {}
         parsed: list[tuple[str, dict, list[dict], dict]] = []  # (aid, wk_row, set_rows, slim_raw)
-        for w in workouts:
-            aid = str(w["workout_id"])  # fact_workout.workout_id is uuid; our tables key on text
+        for aid, meta in discovered.items():
             try:
                 payload = client.cardio_details(aid)
             except WhoopAuthExpired:
@@ -239,11 +263,11 @@ def ingest_lifts(client: WhoopPrivateClient, *, backfill_days: int | None = None
             if not wcd:
                 continue  # not a strength workout, or no breakdown
             fetched += 1
-            wk_row, set_rows = transforms.transform_cardio_details(payload, aid, w["day"])
+            wk_row, set_rows = transforms.transform_cardio_details(payload, aid, meta["day"])
             if wk_row is None:
                 continue
-            wk_row["strain"] = _safe_num(w["strain"])
-            wk_row["duration_minutes"] = round(w["dur_min"], 1) if w["dur_min"] else None
+            wk_row["strain"] = meta["strain"]
+            wk_row["duration_minutes"] = meta["dur_min"]
             parsed.append((aid, wk_row, set_rows, {"weightlifting_cardio_details": wcd}))
 
         total_sets = 0

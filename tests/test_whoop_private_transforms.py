@@ -239,3 +239,26 @@ def test_transform_cardio_details_sets():
 def test_transform_cardio_details_non_strength():
     # A cardio-only workout has no weightlifting breakdown.
     assert transforms.transform_cardio_details({"graph_response": {}}, "a", date(2026, 6, 6)) == (None, [])
+
+
+def test_extract_activity_ids_from_strain_feed():
+    # Mirrors the real deep-dive/strain SDUI shape: activity ids on tile destinations.
+    payload = {
+        "sections": [
+            {"items": [{"content": {"destination": {"parameters": {
+                "activity_id": "a939d74a-bfa2-4383-89bb-ebda43e84bbe"}}}}]},
+            {"items": [
+                {"content": {"destination": {"parameters": {
+                    "activity_id": "0e8da92e-4df2-49c2-83f9-d1e3ad9d3979"}}}},
+                # duplicate should be collapsed
+                {"content": {"destination": {"parameters": {
+                    "activity_id": "a939d74a-bfa2-4383-89bb-ebda43e84bbe"}}}},
+            ]},
+        ]
+    }
+    ids = transforms.extract_activity_ids(payload)
+    assert ids == ["a939d74a-bfa2-4383-89bb-ebda43e84bbe",
+                   "0e8da92e-4df2-49c2-83f9-d1e3ad9d3979"]
+    assert transforms.extract_activity_ids({}) == []
+    # non-uuid 'activity_id' values are ignored
+    assert transforms.extract_activity_ids({"activity_id": "not-a-uuid"}) == []

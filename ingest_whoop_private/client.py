@@ -139,6 +139,16 @@ class WhoopPrivateClient:
             "/core-details-bff/v1/cardio-details", params={"activityId": activity_id}
         )
 
+    def day_strain(self, day: date) -> dict:
+        """The strain deep-dive for a date. Its SDUI payload lists that day's
+        workouts (each carries an activity_id), so strength workouts can be
+        discovered straight from the PRIVATE API — no dependency on the public
+        OAuth activity feed (fact_workout), which dies whenever the public token
+        is revoked. Returns {} on 404."""
+        return self._get(
+            "/home-service/v1/deep-dive/strain", params={"date": day.isoformat()}
+        )
+
     def labs_tests(self) -> dict:
         """List of Advanced Labs tests: {records:[{id, test_source, test_date,
         display_name, upload_source, panel_id, ...}], next_token}."""

@@ -368,6 +368,31 @@ def _parse_clock_seconds(s) -> int | None:
     return sec
 
 
+def extract_activity_ids(payload: dict) -> list[str]:
+    """Pull every workout activity_id out of a day's strain deep-dive SDUI
+    payload (they sit on tile destinations, e.g.
+    sections[].items[].content.destination.parameters.activity_id). Order-
+    preserving + de-duplicated. Used to discover that day's workouts from the
+    PRIVATE API without the public-OAuth activity feed."""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def walk(o) -> None:
+        if isinstance(o, dict):
+            v = o.get("activity_id") or o.get("activityId")
+            if isinstance(v, str) and len(v) == 36 and v not in seen:
+                seen.add(v)
+                out.append(v)
+            for x in o.values():
+                walk(x)
+        elif isinstance(o, list):
+            for x in o:
+                walk(x)
+
+    walk(payload or {})
+    return out
+
+
 def transform_cardio_details(payload: dict, activity_id: str, day: date) -> tuple[dict | None, list[dict]]:
     """Parse /core-details-bff/v1/cardio-details for a strength workout into
     (workout_aggregate_row, [per_set_rows]).
