@@ -362,9 +362,12 @@ def _safe_num(v) -> float | None:
         return None
 
 
-def run_all(*, backfill_days: int | None = None, data_type: str | None = None) -> dict:
+def run_all(
+    *, backfill_days: int | None = None, data_type: str | list[str] | None = None
+) -> dict:
     """Run every pipeline, returning per-type counts. Failures in one pipeline
-    don't abort the others — each is its own ingestion_run."""
+    don't abort the others — each is its own ingestion_run. `data_type` may be a
+    single type or a list (e.g. ['workout','lift'] for the frequent light sync)."""
     results: dict[str, int | str] = {}
     pipelines: list[tuple[str, Callable[[WhoopPrivateClient], int]]] = [
         ("trend", lambda c: ingest_trends(c, backfill_days=backfill_days)),
@@ -375,9 +378,10 @@ def run_all(*, backfill_days: int | None = None, data_type: str | None = None) -
         ("labs", lambda c: labs_mod.ingest_labs(c)),
     ]
     if data_type:
-        pipelines = [(n, f) for n, f in pipelines if n == data_type]
+        wanted = {data_type} if isinstance(data_type, str) else set(data_type)
+        pipelines = [(n, f) for n, f in pipelines if n in wanted]
         if not pipelines:
-            return {"error": f"unknown data_type: {data_type}"}
+            return {"error": f"unknown data_type(s): {data_type}"}
 
     auth = WhoopAuth()
     auth.ensure_fresh()  # fail fast before opening any runs

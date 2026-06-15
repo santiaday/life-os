@@ -94,9 +94,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument(
         "--data-type",
-        choices=["trend", "sleep_need", "behavior_impact", "lift", "labs"],
+        action="append",
+        choices=["trend", "sleep_need", "behavior_impact", "workout", "lift", "labs"],
         default=None,
-        help="Limit to one pipeline. Omit to run all.",
+        help="Limit to these pipeline(s) (repeatable). Omit to run all.",
     )
     p.add_argument(
         "--metric", action="append", default=None, metavar="METRIC",

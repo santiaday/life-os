@@ -118,6 +118,21 @@ def build() -> BlockingScheduler:
         max_instances=1,
         coalesce=True,
     )
+    # Every 2h: a LIGHT sync of just the intra-day-changing data — workouts +
+    # strength lifts — so a session shows up within ~2h instead of next morning.
+    # Deliberately excludes trends/sleep/recovery/labs (those only update once a
+    # day and each trend call drags a 182-day window), keeping API load minimal
+    # and safe. The daily 5:50 job remains the full pull. chain_mart updates the
+    # mart strength columns right after.
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(hour="*/2", minute=20),
+        args=["ingest_whoop_private", "ingest", "--data-type", "workout", "--data-type", "lift"],
+        id="whoop_private_frequent",
+        name="Whoop private 2-hourly workout + lift sync",
+        max_instances=1,
+        coalesce=True,
+    )
 
     # ---- Calendar (Phase 3) ------------------------------------------------
     sched.add_job(
