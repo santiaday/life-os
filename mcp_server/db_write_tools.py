@@ -64,8 +64,12 @@ RETURNING_SAMPLE = 50              # cap RETURNING rows echoed back / audited
 # helpers
 # ---------------------------------------------------------------------------
 def _coerce_param(v: Any) -> Any:
-    """JSON-wrap dict/list params so JSONB columns accept them naturally."""
-    if isinstance(v, (dict, list)):
+    """Adapt a param to Postgres. A dict is unambiguously JSON -> wrap as JSONB.
+    A list is left NATIVE so it adapts to a Postgres array column (text[]/int[]);
+    wrapping every list in JSONB would corrupt native array columns. To write a
+    top-level JSON array into a jsonb column, pass it wrapped in a dict, or use
+    execute_sql with an explicit ::jsonb cast."""
+    if isinstance(v, dict):
         return Jsonb(v)
     return v
 

@@ -155,10 +155,10 @@ def test_split_table():
     assert _split_table('"Weird".tbl') == ("Weird", "tbl")
 
 
-def test_coerce_param_wraps_json():
+def test_coerce_param_wraps_dict_not_list():
     from psycopg.types.json import Jsonb
-    assert isinstance(_coerce_param({"a": 1}), Jsonb)
-    assert isinstance(_coerce_param([1, 2]), Jsonb)
+    assert isinstance(_coerce_param({"a": 1}), Jsonb)   # object -> JSONB
+    assert _coerce_param([1, 2]) == [1, 2]               # list stays native (array column)
     assert _coerce_param("plain") == "plain"
     assert _coerce_param(5) == 5
     assert _coerce_param(None) is None

@@ -268,6 +268,11 @@ def ingest_lifts(client: WhoopPrivateClient, *, backfill_days: int | None = None
                 for s in set_rows:
                     s["raw_id"] = rid
                     s["updated_at"] = now
+                # Clean DELETE+INSERT per workout: a re-fetch reporting fewer sets
+                # for an exercise must not leave stale higher-index sets behind
+                # (plain upsert-on-conflict can't remove rows that no longer exist).
+                with c.cursor() as cur:
+                    cur.execute("DELETE FROM fact_whoop_lift_set WHERE activity_id = %s", [aid])
                 if set_rows:
                     upsert_rows(
                         "fact_whoop_lift_set", set_rows,
