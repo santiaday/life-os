@@ -24,6 +24,7 @@ from ingest_calai.transforms import food_to_log_row
 from lifeos_core.db import tx
 from lifeos_core.logging import get_logger
 from lifeos_core.runs import ingestion_run
+from lifeos_core.tz import local_date
 from lifeos_core.upsert import upsert_rows
 
 log = get_logger(__name__)
@@ -93,15 +94,22 @@ def ingest_diary_entries(entries: list[dict], *, user_id: str | None = None) -> 
         ex = _extract(entry)
         if ex is None:
             continue
-        la = ex["logged_at"]
-        d = (la.astimezone().date() if la else now.date())
+        row = food_to_log_row(ex["food"], entry_id=ex["entry_id"], logged_at=ex["logged_at"],
+                              image_id=ex["image_id"], health_score=ex["health_score"])
+        # fact_food_log.eaten_at and food_name are NOT NULL — skip (don't crash the
+        # whole batch on) an entry missing either.
+        if row.get("eaten_at") is None or not row.get("food_name"):
+            log.warning("calai.skip_incomplete_entry", entry_id=ex["entry_id"],
+                        has_time=ex["logged_at"] is not None, has_name=bool(row.get("food_name")))
+            continue
+        # Bucket the day in LOCAL time (America/New_York), not the process tz, so
+        # late-night entries land on the right calendar day and match mart_daily.
+        d = local_date(ex["logged_at"])
         days.add(d)
         raw_rows.append({
-            "entry_id": ex["entry_id"], "user_id": user_id, "logged_at": la,
+            "entry_id": ex["entry_id"], "user_id": user_id, "logged_at": ex["logged_at"],
             "day": d, "payload": Jsonb(entry), "fetched_at": now,
         })
-        row = food_to_log_row(ex["food"], entry_id=ex["entry_id"], logged_at=la,
-                              image_id=ex["image_id"], health_score=ex["health_score"])
         row["micros"] = Jsonb(row["micros"])
         fact_rows.append(row)
 

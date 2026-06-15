@@ -64,7 +64,9 @@ def test_whoop_private_is_monitored():
     """The resilience backbone must be in the threshold list, or it can die silently."""
     monitored = {src for src, _label, _hrs in alerts.SOURCE_THRESHOLDS}
     assert "whoop_private" in monitored
-    assert "whoop_labs" in monitored
+    # whoop_labs is intentionally NOT monitored — native labs run under whoop_private,
+    # and no recurring job writes source='whoop_labs' (would alert forever).
+    assert "whoop_labs" not in monitored
 
 
 def test_fresh_source_not_flagged(monkeypatch):
@@ -90,10 +92,10 @@ def test_stale_source_flagged_with_hours(monkeypatch):
 def test_never_succeeded_flagged(monkeypatch):
     now = datetime.now(UTC)
     fresh = {src: now - timedelta(minutes=1) for src, _l, _h in alerts.SOURCE_THRESHOLDS}
-    fresh["whoop_labs"] = None  # no successful run on record
+    fresh["whoop_journal"] = None  # no successful run on record
     _patch(monkeypatch, fresh)
     stale = alerts._stale_sources(now=now)
-    assert [s["source"] for s in stale] == ["whoop_labs"]
+    assert [s["source"] for s in stale] == ["whoop_journal"]
     assert stale[0]["last_success"] is None
     assert stale[0]["hours_stale"] is None
 

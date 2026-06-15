@@ -176,12 +176,15 @@ food_agg AS (
 spend_agg AS (
   SELECT
     t.date AS day,
+    -- All spend buckets filter amount > 0 (drop refunds/income, per the Copilot
+    -- positive=expense convention) so a category refund doesn't net a bucket down
+    -- inconsistently with total_spend.
     SUM(amount) FILTER (WHERE NOT is_excluded AND amount > 0)                       AS total_spend,
-    SUM(amount) FILTER (WHERE NOT is_excluded AND c.name ILIKE 'Food%%')            AS food_spend,
-    SUM(amount) FILTER (WHERE NOT is_excluded AND c.name ILIKE 'Restaurants%%')     AS restaurant_spend,
-    SUM(amount) FILTER (WHERE NOT is_excluded AND c.name ILIKE 'Groceries%%')       AS groceries_spend,
-    SUM(amount) FILTER (WHERE NOT is_excluded AND c.name ILIKE 'Trans%%')           AS transportation_spend,
-    SUM(amount) FILTER (WHERE NOT is_excluded AND c.name ILIKE 'Alcohol%%')         AS alcohol_spend,
+    SUM(amount) FILTER (WHERE NOT is_excluded AND amount > 0 AND c.name ILIKE 'Food%%')        AS food_spend,
+    SUM(amount) FILTER (WHERE NOT is_excluded AND amount > 0 AND c.name ILIKE 'Restaurants%%') AS restaurant_spend,
+    SUM(amount) FILTER (WHERE NOT is_excluded AND amount > 0 AND c.name ILIKE 'Groceries%%')   AS groceries_spend,
+    SUM(amount) FILTER (WHERE NOT is_excluded AND amount > 0 AND c.name ILIKE 'Trans%%')       AS transportation_spend,
+    SUM(amount) FILTER (WHERE NOT is_excluded AND amount > 0 AND c.name ILIKE 'Alcohol%%')     AS alcohol_spend,
     SUM(amount) FILTER (
       WHERE NOT is_excluded AND amount > 0 AND (
         c.name ILIKE 'Bars%%' OR c.name ILIKE 'Nightlife%%'
@@ -283,12 +286,12 @@ habit_pivot AS (
     BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'morning-sunlight') AS morning_sunlight,
     BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'sexual-activity') AS sexual_activity,
     BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'stretching')      AS stretching,
-    BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'rest-day')        AS rest_day,
+    BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'rest_day')        AS rest_day,
     BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'magnesium')       AS took_magnesium,
     BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'vitamin-d')       AS took_vitamin_d,
     BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'creatine')        AS took_creatine,
     BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'l-theanine')      AS took_l_theanine,
-    BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'joint-pain')      AS joint_pain,
+    BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'joint-pain-or-stiffness') AS joint_pain,
     BOOL_OR(answered_yes) FILTER (WHERE habit_key = 'headache')        AS headache
   FROM fact_habit_log
   GROUP BY day
@@ -472,7 +475,7 @@ WITH per_day AS (
   SELECT
     date_trunc('day', p.created_at)::date AS day,
     p.user_id,
-    r.source, r.dimensions, r.overall
+    p.id AS photo_id, r.source, r.dimensions, r.overall
   FROM body_image_photo p
   JOIN body_image_rating r ON r.photo_id = p.id
 )
@@ -496,7 +499,7 @@ SELECT
   AVG((d.dimensions->>'symmetry_score')::numeric)        FILTER (WHERE d.source = 'geometry') AS body_image_symmetry,
   AVG((d.dimensions->>'gonial_angle_deg')::numeric)      FILTER (WHERE d.source = 'geometry') AS body_image_gonial_angle,
   AVG((d.dimensions->>'bigonial_bizygomatic_ratio')::numeric) FILTER (WHERE d.source = 'geometry') AS body_image_jaw_ratio,
-  COUNT(DISTINCT (d.day, d.user_id)) FILTER (WHERE d.source NOT IN ('geometry'))::int AS body_image_photo_count,
+  COUNT(DISTINCT d.photo_id) FILTER (WHERE d.source NOT IN ('geometry'))::int AS body_image_photo_count,
   COUNT(*)::int AS body_image_rating_count,
   now()
 FROM per_day d

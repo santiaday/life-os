@@ -108,11 +108,13 @@ def transform_food_object(food: dict) -> dict:
 
 
 def meal_group_from_time(logged_at: datetime | None) -> str:
-    """Heuristic meal bucket from local hour, used only if Cal AI doesn't carry
-    an explicit meal type on the diary entry (confirm against a real doc)."""
+    """Heuristic meal bucket from LOCAL hour, used only if Cal AI doesn't carry
+    an explicit meal type on the diary entry. logged_at is UTC; convert to the
+    warehouse-local tz first or an 8pm dinner (00:00 UTC) buckets as breakfast."""
     if logged_at is None:
         return "uncategorized"
-    h = logged_at.hour
+    from lifeos_core.tz import local_tz
+    h = logged_at.astimezone(local_tz()).hour if logged_at.tzinfo else logged_at.hour
     if h < 11:
         return "breakfast"
     if h < 16:

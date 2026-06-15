@@ -57,6 +57,7 @@ def parse_servings(csv_text: str) -> list[dict]:
     a non-Gold tier — in that case eaten_at gets coerced to noon-local.
     """
     rows: list[dict] = []
+    seen: dict[tuple, int] = {}  # ordinal per (day, meal, food) for genuine repeats
     reader = csv.DictReader(io.StringIO(csv_text))
     for r in reader:
         day_str = (r.get("Day") or "").strip()
@@ -98,8 +99,16 @@ def parse_servings(csv_text: str) -> list[dict]:
         for col in FOOD_LOG_TYPED.values():
             row.setdefault(col, None)
 
+        # Key on IMMUTABLE identity only — NOT amount/unit/macros. Editing a
+        # serving's quantity in Cronometer must UPDATE the row in place, not
+        # insert a stale duplicate (the fact_biometric bug class; see 0035).
+        # An ordinal disambiguates genuinely-repeated (day, meal, food) entries.
+        meal_group = row["meal_group"]
+        _key = (day_str, meal_group, food_name)
+        ordinal = seen.get(_key, 0)
+        seen[_key] = ordinal + 1
         row["source_row_hash"] = hashlib.sha256(
-            f"{day_str}|{time_str}|{food_name}|{amount}|{unit}".encode()
+            f"cronometer|{day_str}|{meal_group}|{food_name}|{ordinal}".encode()
         ).hexdigest()
         rows.append(row)
     return rows

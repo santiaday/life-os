@@ -121,4 +121,13 @@ def refresh_all() -> dict:
         total_rows = sum(v["rows"] for v in out.values() if "rows" in v)
         run.upserted(total_rows)
         run.add_metadata(per_table=out)
+        # Per-table isolation above lets every table attempt a refresh, but a
+        # partial failure must NOT report the run as 'success' (it would hide a
+        # broken mart behind a green ingestion_run + dodge staleness alerting).
+        # Raise after the loop so the run is marked 'failure'.
+        failed = {n: v["error"] for n, v in out.items() if "error" in v}
+        if failed:
+            raise RuntimeError(
+                f"mart refresh: {len(failed)} table(s) failed: " + "; ".join(failed)
+            )
     return out

@@ -33,7 +33,10 @@ SOURCE_THRESHOLDS = (
     # so if it goes dark the warehouse silently loses its safety net. Daily job.
     ("whoop_private", "Whoop (private API)", 30),
     ("whoop_journal", "Whoop journal", 30),  # daily journal/behavior pull
-    ("whoop_labs", "Whoop labs", 30),         # daily fetch (data only changes on a new panel)
+    # Native Advanced Labs now run UNDER whoop_private (data_type='labs'), so the
+    # whoop_private threshold already covers lab freshness. There is no recurring
+    # job writing source='whoop_labs' (that was the deprecated curated catalog),
+    # so a 'whoop_labs' threshold here would alert forever — intentionally omitted.
     ("calendar", "Calendar", 6),    # 30-min job, alert after 6h dark
     ("calendar_sync", "Calendar sync", 6),
     ("cronometer", "Cronometer", 36),  # daily job, allow margin

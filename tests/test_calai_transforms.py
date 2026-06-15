@@ -104,15 +104,16 @@ def test_extract_handles_real_diary_doc():
 
 
 def test_meal_group_buckets():
-    assert meal_group_from_time(datetime(2026, 6, 14, 8, tzinfo=UTC)) == "breakfast"
-    assert meal_group_from_time(datetime(2026, 6, 14, 13, tzinfo=UTC)) == "lunch"
-    assert meal_group_from_time(datetime(2026, 6, 14, 19, tzinfo=UTC)) == "dinner"
-    assert meal_group_from_time(datetime(2026, 6, 14, 23, tzinfo=UTC)) == "snack"
+    # UTC inputs are bucketed by LOCAL hour (America/New_York, EDT = UTC-4 in June)
+    assert meal_group_from_time(datetime(2026, 6, 14, 12, tzinfo=UTC)) == "breakfast"  # 8am EDT
+    assert meal_group_from_time(datetime(2026, 6, 14, 17, tzinfo=UTC)) == "lunch"      # 1pm EDT
+    assert meal_group_from_time(datetime(2026, 6, 14, 23, tzinfo=UTC)) == "dinner"     # 7pm EDT
+    assert meal_group_from_time(datetime(2026, 6, 15, 3, tzinfo=UTC)) == "snack"       # 11pm EDT
     assert meal_group_from_time(None) == "uncategorized"
 
 
 def test_food_to_log_row_idempotent_hash_and_shape():
-    when = datetime(2026, 6, 14, 19, 30, tzinfo=UTC)
+    when = datetime(2026, 6, 14, 23, 30, tzinfo=UTC)  # 7:30pm EDT -> dinner
     row = food_to_log_row(_food(), entry_id="abc123", logged_at=when, image_id="IMG1")
     assert row["source"] == "calai"
     assert row["meal_group"] == "dinner"

@@ -104,7 +104,9 @@ def transform_sleep(api: dict) -> dict:
 def transform_workout(api: dict) -> dict:
     """fact_workout row from /v2/activity/workout record."""
     score = api.get("score") or {}
-    zones = score.get("zone_duration") or {}
+    # Whoop v2 nests HR-zone durations under "zone_durations" (plural). The old
+    # singular key never matched, leaving all six fact_workout zone_*_min NULL.
+    zones = score.get("zone_durations") or score.get("zone_duration") or {}
     return {
         "workout_id": api["id"],
         "start_ts": _parse_ts(api.get("start")),
