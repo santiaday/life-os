@@ -313,6 +313,47 @@ def ingest_lifts(client: WhoopPrivateClient, *, backfill_days: int | None = None
         return total_sets
 
 
+def ingest_workouts(client: WhoopPrivateClient, *, backfill_days: int | None = None) -> int:
+    """Populate fact_workout (sport / strain / start-end) for ALL workouts from
+    the PRIVATE strain feed, so the activity record keeps flowing without the
+    public OAuth (which dies when its token is revoked). Per-workout HR / zones /
+    kJ are left to whatever the public ingester provided (or NULL); the per-set
+    strength detail still comes from ingest_lifts. Idempotent on workout_id;
+    update_cols are limited to the private-provided fields so richer public data
+    on existing rows is preserved."""
+    today = _local_today()
+    lookback = min(backfill_days if backfill_days else 7, 30)
+    since = today - timedelta(days=lookback)
+    with ingestion_run("whoop_private", "workout", since=since.isoformat()) as run:
+        rows_by_id: dict[str, dict] = {}
+        errors: dict[str, str] = {}
+        d = since
+        while d <= today:
+            try:
+                for w in transforms.transform_strain_feed_workouts(client.day_strain(d)):
+                    # fact_workout.day is a GENERATED column (from start_ts) — don't set it.
+                    w["updated_at"] = _now()
+                    rows_by_id[w["workout_id"]] = w
+            except WhoopAuthExpired:
+                raise
+            except Exception as e:
+                errors[f"day:{d.isoformat()}"] = f"{type(e).__name__}: {e}"
+            d += timedelta(days=1)
+        rows = list(rows_by_id.values())
+        if rows:
+            with tx() as c:
+                upsert_rows(
+                    "fact_workout", rows, conflict_cols=["workout_id"],
+                    update_cols=["sport_name", "strain", "start_ts", "end_ts", "updated_at"],
+                    connection=c,
+                )
+        run.fetched(len(rows))
+        run.upserted(len(rows))
+        if errors:
+            run.add_metadata(errors=errors)
+        return len(rows)
+
+
 # ---- orchestration ---------------------------------------------------------
 def _safe_num(v) -> float | None:
     try:
@@ -329,6 +370,7 @@ def run_all(*, backfill_days: int | None = None, data_type: str | None = None) -
         ("trend", lambda c: ingest_trends(c, backfill_days=backfill_days)),
         ("sleep_need", lambda c: ingest_sleep_need(c)),
         ("behavior_impact", lambda c: ingest_behavior_impact(c)),
+        ("workout", lambda c: ingest_workouts(c, backfill_days=backfill_days)),
         ("lift", lambda c: ingest_lifts(c, backfill_days=backfill_days)),
         ("labs", lambda c: labs_mod.ingest_labs(c)),
     ]

@@ -27,7 +27,9 @@ log = get_logger(__name__)
 
 # (source, label, max_staleness_hours) — adjust per source cadence.
 SOURCE_THRESHOLDS = (
-    ("whoop", "Whoop (public OAuth)", 8),  # hourly job; now best-effort (private API covers it)
+    # NOTE: the public Whoop OAuth source ('whoop') is RETIRED (no recurring job;
+    # everything moved to the private API), so it's intentionally NOT monitored —
+    # a threshold here would alert forever on a source nothing writes anymore.
     # Private Whoop iOS API — the RESILIENCE BACKBONE. mart_daily recovery/HRV/RHR/
     # strain/steps/calories/weight all fall back to this when public OAuth breaks,
     # so if it goes dark the warehouse silently loses its safety net. Daily job.

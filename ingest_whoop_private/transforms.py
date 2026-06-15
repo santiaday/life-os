@@ -15,7 +15,7 @@ anchor in case a future format defeats the numeric parser.
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime
 
 # Segment keys on the trend payload, finest/freshest first so day-level dedup
 # prefers the most recently recomputed window.
@@ -391,6 +391,59 @@ def extract_activity_ids(payload: dict) -> list[str]:
 
     walk(payload or {})
     return out
+
+
+def _parse_iso_ts(s):
+    """Parse Whoop's ISO timestamps (e.g. '2026-06-15T10:34:27.899+0000')."""
+    if not isinstance(s, str):
+        return None
+    s = s.strip()
+    # normalize '+0000' -> '+00:00' for fromisoformat, and trailing Z
+    s = s.replace("Z", "+00:00")
+    m = re.match(r"^(.*[+-]\d{2})(\d{2})$", s)
+    if m:
+        s = f"{m.group(1)}:{m.group(2)}"
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def transform_strain_feed_workouts(payload: dict) -> list[dict]:
+    """Build fact_workout rows from a day's strain deep-dive. Each workout tile
+    carries clean fields (no SDUI text parsing): activity_v2_id, internal_name
+    (sport), score_display (strain), and during.{lower,upper}_endpoint (start/end).
+    HR/zones/kJ are NOT here — they stay whatever the public ingester left, or
+    NULL for privately-discovered workouts (the per-set strength detail still
+    comes from the lift pipeline). De-duplicated by workout_id."""
+    rows: list[dict] = []
+    seen: set[str] = set()
+
+    def walk(o) -> None:
+        if isinstance(o, dict):
+            aid = o.get("activity_v2_id")
+            if (isinstance(aid, str) and len(aid) == 36 and aid not in seen
+                    and o.get("during") and (o.get("internal_name") or o.get("score_display"))):
+                during = o.get("during") or {}
+                start = _parse_iso_ts(during.get("lower_endpoint"))
+                end = _parse_iso_ts(during.get("upper_endpoint"))
+                if start and end:
+                    seen.add(aid)
+                    rows.append({
+                        "workout_id": aid,
+                        "sport_name": o.get("internal_name"),
+                        "strain": _safe_num(o.get("score_display")),
+                        "start_ts": start,
+                        "end_ts": end,
+                    })
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    walk(payload or {})
+    return rows
 
 
 def transform_cardio_details(payload: dict, activity_id: str, day: date) -> tuple[dict | None, list[dict]]:

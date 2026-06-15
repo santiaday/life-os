@@ -49,25 +49,15 @@ def run_subprocess(module: str, *args: str, chain_mart: bool = True) -> None:
 def build() -> BlockingScheduler:
     sched = BlockingScheduler(timezone=settings.LOCAL_TZ)
 
-    # ---- Whoop (Phase 2) ---------------------------------------------------
-    sched.add_job(
-        run_subprocess,
-        CronTrigger(minute=15),
-        args=["ingest_whoop", "ingest"],
-        id="whoop_hourly",
-        name="Whoop hourly incremental",
-        max_instances=1,
-        coalesce=True,
-    )
-    sched.add_job(
-        run_subprocess,
-        CronTrigger(hour=6, minute=0),
-        args=["ingest_whoop", "ingest", "--backfill", "3"],
-        id="whoop_daily_backfill",
-        name="Whoop daily 3-day re-pull (Whoop back-edits older recoveries)",
-        max_instances=1,
-        coalesce=True,
-    )
+    # ---- Whoop public OAuth: RETIRED ---------------------------------------
+    # The public developer-OAuth ingester (ingest_whoop) is no longer scheduled.
+    # Its refresh token rotates and dies, requiring a manual browser re-auth, and
+    # everything it provided now comes from the self-refreshing PRIVATE API
+    # (ingest_whoop_private): recovery/HRV/RHR/strain/steps/calories via trends,
+    # sleep performance/efficiency/consistency via trends, workouts via the strain
+    # feed, and per-set strength via the lift pipeline. The ingest_whoop code is
+    # kept for archival + manual use; re-add a job here if the public API is ever
+    # re-authorized for the richer per-night detail (REM/SWS split, HR zones).
 
     # ---- Whoop journal (iPhone-bridge architecture) ------------------------
     # iPhone Shortcut runs at 5:30 AM, POSTs fresh tokens to the webhook.

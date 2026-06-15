@@ -262,3 +262,24 @@ def test_extract_activity_ids_from_strain_feed():
     assert transforms.extract_activity_ids({}) == []
     # non-uuid 'activity_id' values are ignored
     assert transforms.extract_activity_ids({"activity_id": "not-a-uuid"}) == []
+
+
+def test_transform_strain_feed_workouts():
+    payload = {"sections": [{"items": [
+        {"content": {
+            "activity_v2_id": "a939d74a-bfa2-4383-89bb-ebda43e84bbe",
+            "internal_name": "weightlifting_msk", "score_display": "13.1",
+            "during": {"lower_endpoint": "2026-06-15T10:34:27.899+0000",
+                       "upper_endpoint": "2026-06-15T10:54:23.768+0000"}}},
+        # a non-workout tile (no during) is ignored
+        {"content": {"activity_v2_id": "x", "title": "no-during"}},
+    ]}]}
+    out = transforms.transform_strain_feed_workouts(payload)
+    assert len(out) == 1
+    w = out[0]
+    assert w["workout_id"] == "a939d74a-bfa2-4383-89bb-ebda43e84bbe"
+    assert w["sport_name"] == "weightlifting_msk"
+    assert w["strain"] == 13.1
+    assert w["start_ts"].hour == 10 and w["start_ts"].minute == 34
+    assert "day" not in w  # fact_workout.day is generated
+    assert transforms.transform_strain_feed_workouts({}) == []

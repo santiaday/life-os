@@ -586,6 +586,8 @@ UPDATE mart_daily md SET
     resting_heart_rate    = COALESCE(md.resting_heart_rate, s.rhr),
     strain                = COALESCE(md.strain, s.day_strain),
     sleep_performance_pct = COALESCE(md.sleep_performance_pct, s.sleep_perf),
+    sleep_efficiency_pct  = COALESCE(md.sleep_efficiency_pct, s.sleep_eff),
+    sleep_consistency_pct = COALESCE(md.sleep_consistency_pct, s.sleep_cons),
     weight_kg             = COALESCE(md.weight_kg, ROUND((s.weight_lb * 0.45359237)::numeric, 2))
   FROM (
     SELECT day,
@@ -594,6 +596,8 @@ UPDATE mart_daily md SET
       MAX(value) FILTER (WHERE metric = 'RHR')               AS rhr,
       MAX(value) FILTER (WHERE metric = 'DAY_STRAIN')        AS day_strain,
       MAX(value) FILTER (WHERE metric = 'SLEEP_PERFORMANCE') AS sleep_perf,
+      MAX(value) FILTER (WHERE metric = 'SLEEP_EFFICIENCY')  AS sleep_eff,
+      MAX(value) FILTER (WHERE metric = 'SLEEP_CONSISTENCY') AS sleep_cons,
       MAX(value) FILTER (WHERE metric = 'WEIGHT')            AS weight_lb
     FROM fact_whoop_metric_daily
     GROUP BY day
