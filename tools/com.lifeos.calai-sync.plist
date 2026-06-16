@@ -1,22 +1,18 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  LaunchAgent: refresh Cal AI nutrition from the iPhone backup.
+  LaunchAgent: nightly Cal AI nutrition sync from the iPhone (fully unattended).
+
+  Backs up the phone with libimobiledevice into a non-TCC dir (no Full Disk
+  Access needed), extracts Cal AI's Model.sqlite, and ingests the diary
+  (idempotent). The first backup is a full mirror; nightly runs are incremental.
 
   Install:
     cp tools/com.lifeos.calai-sync.plist ~/Library/LaunchAgents/
     launchctl load ~/Library/LaunchAgents/com.lifeos.calai-sync.plist
+  Logs: ~/Library/Logs/calai_sync*.log
 
-  Two trigger modes are wired below:
-    * StartCalendarInterval — runs nightly at 02:30 (fully unattended if you set
-      CALAI_USE_IDEVICEBACKUP=1 and have libimobiledevice; the phone must be
-      reachable/trusted).
-    * WatchPaths — also runs within seconds whenever a NEW Finder backup lands,
-      so a manual "Back Up Now" auto-ingests.
-
-  Full Disk Access: if you DON'T use idevicebackup (i.e. you read the protected
-  MobileSync dir), grant Full Disk Access to the python binary referenced in
-  ProgramArguments. Using CALAI_USE_IDEVICEBACKUP=1 with a custom CALAI_BACKUP_ROOT
-  avoids that entirely.
+  Requires: brew install libimobiledevice; the iPhone paired + reachable
+  (USB or Wi-Fi sync) and unlocked at run time; backup encryption OFF.
 -->
 <plist version="1.0">
 <dict>
@@ -29,24 +25,18 @@
     <string>/Users/santiagoaday/Documents/LifeOS/tools/calai_sync.sh</string>
   </array>
 
-  <!-- Uncomment to enable the fully-unattended libimobiledevice backup path:
   <key>EnvironmentVariables</key>
   <dict>
     <key>CALAI_USE_IDEVICEBACKUP</key><string>1</string>
     <key>CALAI_BACKUP_ROOT</key><string>/Users/santiagoaday/CalAIBackups</string>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
   </dict>
-  -->
 
   <key>StartCalendarInterval</key>
   <dict>
     <key>Hour</key><integer>2</integer>
     <key>Minute</key><integer>30</integer>
   </dict>
-
-  <key>WatchPaths</key>
-  <array>
-    <string>/Users/santiagoaday/Library/Application Support/MobileSync/Backup</string>
-  </array>
 
   <key>StandardOutPath</key>
   <string>/Users/santiagoaday/Library/Logs/calai_sync.out.log</string>

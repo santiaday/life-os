@@ -16,6 +16,9 @@
 # Idempotent — only new/changed meals are written (keyed on Cal AI's entry id).
 set -euo pipefail
 
+# launchd starts with a minimal PATH; ensure Homebrew (idevicebackup2) is found.
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+
 REPO="${LIFEOS_REPO:-/Users/santiagoaday/Documents/LifeOS}"
 PY="${LIFEOS_PY:-$REPO/.venv/bin/python}"
 USER_ID="${CALAI_USER_ID:-f5Q08GHjoJUdUp8jUO4u5qPZZII2}"
