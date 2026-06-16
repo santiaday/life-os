@@ -66,3 +66,9 @@ JSON Formatter and Validator.txt
 # scratch files from audit/analysis agents
 _audit*.py
 _tmp*.py
+
+# Cal AI personal CoreData store (extracted from device backup — never commit)
+Model.sqlite
+Model.sqlite-*
+*.sqlite-wal
+*.sqlite-shm

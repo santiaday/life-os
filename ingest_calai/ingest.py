@@ -72,9 +72,14 @@ def _extract(entry: dict) -> dict | None:
     logged_at = _parse_ts(entry.get("date") or entry.get(DIARY_DATE_FIELD)
                           or entry.get("createdAt") or entry.get("loggedAt")
                           or entry.get("timestamp"))
+    # Prefer Cal AI's explicit meal type (CoreData ZMEALCATEGORY / Firestore
+    # mealCategory) over the time-of-day heuristic. None -> derived downstream.
+    meal = (entry.get("mealCategory") or entry.get("mealType")
+            or entry.get("meal") or entry.get("meal_group"))
     return {
         "entry_id": str(entry_id),
         "logged_at": logged_at,
+        "meal_group": str(meal).strip().lower() if meal else None,
         "food": food,
         "image_id": entry.get("image") or entry.get("imageId") or entry.get("photoId"),
         "health_score": (entry.get("healthRating") or entry.get("healthScore")
@@ -95,6 +100,7 @@ def ingest_diary_entries(entries: list[dict], *, user_id: str | None = None) -> 
         if ex is None:
             continue
         row = food_to_log_row(ex["food"], entry_id=ex["entry_id"], logged_at=ex["logged_at"],
+                              meal_group=ex.get("meal_group"),
                               image_id=ex["image_id"], health_score=ex["health_score"])
         # fact_food_log.eaten_at and food_name are NOT NULL — skip (don't crash the
         # whole batch on) an entry missing either.

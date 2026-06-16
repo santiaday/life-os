@@ -1,9 +1,46 @@
 # Cal AI — Reverse-Engineering & Capture Runbook
 
 Goal: make **Cal AI** the warehouse's nutrition source of record, replacing
-Cronometer (frozen at 2026-05-30). This doc tracks what the first mitmproxy
-capture revealed, what's already built + verified, and the **one** follow-up
-capture needed to go live.
+Cronometer (frozen at 2026-05-30).
+
+---
+
+## ✅ RESOLVED (2026-06-16) — diary ingested from the on-device CoreData store
+
+The mitmproxy/Firestore-REST approach below was a **dead end**: Cal AI is
+**local-first**, Firestore is **cert-pinned** (iOS) and the Android app is
+**Pairip-encrypted**, and the diary syncs to a Firestore location the user token
+**cannot read over REST** (verified by brute-forcing ~400 collection names, the
+real entry GUIDs, collection-group queries, and the entity name `FoodEntity`).
+The Firestore offline cache is **excluded from iOS backups**, so the path can't
+be recovered at rest either.
+
+**What works instead — the iOS backup → CoreData path:**
+
+1. Make an **unencrypted** Finder/iTunes backup of the iPhone.
+2. `python -m ingest_calai local --from-backup` — locates the newest backup,
+   pulls Cal AI's `Model.sqlite` from `Manifest.db`, reads table **`ZFOODENTITY`**
+   (the authoritative diary: full macros, explicit `ZMEALCATEGORY`, NSKeyedArchiver
+   -JSON ingredients, `ZID` = the meal-photo UUID), maps each row to the
+   Firestore-diary dict shape, and runs it through the **same**
+   `ingest_diary_entries()` → `raw_calai_food`/`fact_food_log`/`fact_food_daily`
+   (source='calai'). Idempotent on the entry UUID.
+   - Reading the default `~/Library/.../MobileSync/Backup` needs **Full Disk
+     Access** for the runner.
+3. Verified live: 74 meals (2026-05-30 onward), `mart_daily` + `mart_meal`
+   nutrition populated, daily totals match the app.
+
+**Auth (SOLVED, permanent):** Firebase **email-link** sign-in done via REST;
+refresh token in `oauth_tokens('calai')`, `CALAI_FIREBASE_API_KEY` in `.env`.
+`api.calai.app/v6` is analyze-only (fixFood/health-score) — no diary endpoint.
+
+**Ongoing sync:** re-run the local backfill after each backup (idempotent).
+`tools/calai_sync.sh` wraps it; set `CALAI_USE_IDEVICEBACKUP=1` (needs
+`brew install libimobiledevice`, writes to a non-TCC dir so **no Full Disk
+Access needed**) for a fully-unattended path, scheduled by
+`tools/com.lifeos.calai-sync.plist` (nightly + on-new-backup).
+
+The historical capture/Firestore notes below are kept for reference only.
 
 ---
 
