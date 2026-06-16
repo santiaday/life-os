@@ -34,11 +34,13 @@ be recovered at rest either.
 refresh token in `oauth_tokens('calai')`, `CALAI_FIREBASE_API_KEY` in `.env`.
 `api.calai.app/v6` is analyze-only (fixFood/health-score) — no diary endpoint.
 
-**Ongoing sync:** re-run the local backfill after each backup (idempotent).
-`tools/calai_sync.sh` wraps it; set `CALAI_USE_IDEVICEBACKUP=1` (needs
-`brew install libimobiledevice`, writes to a non-TCC dir so **no Full Disk
-Access needed**) for a fully-unattended path, scheduled by
-`tools/com.lifeos.calai-sync.plist` (nightly + on-new-backup).
+**Ongoing sync — no clean automatic path exists.** Cal AI silos the data: the
+Firestore sync target is unreadable with the user token (verified), Apple Health
+gets only lossy fragments, and iOS won't back up a locked phone (so scheduled
+device backups are out). Refresh is therefore **on demand**: make an unencrypted
+Finder backup, then `python -m ingest_calai local --from-backup` (idempotent,
+needs Full Disk Access to read MobileSync). Don't rebuild scheduled-backup
+automation — it was tried and removed as fragile.
 
 The historical capture/Firestore notes below are kept for reference only.
 
