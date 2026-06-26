@@ -38,6 +38,37 @@ def test_transform_transaction_grocery_expense(fx):
     assert row["notes"] == "Weekly grocery run"
 
 
+def test_transfer_detection_excludes_transfers_not_real_expenses():
+    # Genuine transfers/payments → excluded from spend totals.
+    for name in (
+        "Payment Thank You-mobile",
+        "Withdrawal To Expense Account Xxxxxxx",
+        "Capital One (account ) Money In Deposit",
+        "Wealthfront Brokerag",
+        "Kalshi",
+        "Withdrawal To Joint Savings Xxxxxxx",
+    ):
+        assert transforms._is_transfer(name) is True, name
+    # Copilot mislabels these as INTERNAL_TRANSFER, but they are real spend —
+    # must NOT be excluded. Also P2P payments stay in.
+    for name in (
+        "Slack",
+        "Ideal Nutrition",
+        "El Cielo Miami",
+        "Withdrawal To Paulina Income Xxxxxxx",
+        "Whole Foods Market",
+    ):
+        assert transforms._is_transfer(name) is False, name
+
+
+def test_transform_transaction_transfer_sets_excluded():
+    api = {
+        "id": "txn_xfer", "amount": 500.0, "date": "2026-05-01",
+        "name": "Payment Thank You-mobile", "accountId": "acct_chase",
+    }
+    assert transforms.transform_transaction(api)["is_excluded"] is True
+
+
 def test_transform_transaction_pending(fx):
     api = _txn(fx)[1]
     row = transforms.transform_transaction(api)

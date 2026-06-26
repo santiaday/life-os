@@ -44,6 +44,48 @@ def transform_category(api: dict) -> dict:
     }
 
 
+# Copilot removed per-transaction "exclude from totals" from its GraphQL
+# schema (read AND write) as of ~2026-06, and its `type=INTERNAL_TRANSFER`
+# is unreliable (it mislabels real merchants like Slack / restaurants as
+# transfers). So we can't trust Copilot for exclusion. Instead we derive
+# is_excluded from the merchant NAME using a conservative allow-list of
+# genuine transfer/payment merchants — credit-card payments, brokerage and
+# savings transfers, etc. These substrings were verified against the full
+# transaction history to match ONLY transfers (no real expenses). Keeping
+# this here means every sync re-applies it, so transfers stay out of spend
+# totals durably and automatically for future transactions too.
+_TRANSFER_NAME_PATTERNS = (
+    "thank",                          # Payment Thank You / Autopay Payment - Thank You / ...
+    "withdrawal to expense account",  # Wealthfront cash withdrawal
+    "chase credit crd",
+    "synchrony bank",
+    "applecard",
+    "barclaycard",
+    "citi card online",
+    "capital one (account",           # Capital One inter-account moves
+    "capital one bank",
+    "wealthfront",
+    "kalshi",
+    "robinhood",
+    "joint savings",                  # Withdrawal To / Deposit From Joint Savings
+    "house savings",
+    "cross_account_transfer",
+    "ssbtrustops",
+    "returned payment",
+    "payment escrow",
+    "check deposit",
+)
+
+
+def _is_transfer(name: str | None) -> bool:
+    """True if the merchant name is a genuine transfer/payment that should be
+    excluded from spend totals. Name-based (not Copilot's unreliable type)."""
+    if not name:
+        return False
+    n = name.lower()
+    return any(p in n for p in _TRANSFER_NAME_PATTERNS)
+
+
 def transform_transaction(api: dict) -> dict:
     """Map Copilot Transaction → fact_transaction row."""
     tags = api.get("tags") or []
@@ -59,9 +101,8 @@ def transform_transaction(api: dict) -> dict:
         "account_id": _nonempty(api.get("accountId")),
         "is_pending": bool(api.get("isPending")),
         "is_recurring": api.get("recurringId") is not None,
-        # Per-transaction "exclude from totals" isn't in the new Copilot
-        # schema; categories carry isExcluded instead.
-        "is_excluded": False,
+        # Derived transfer exclusion — see _is_transfer / _TRANSFER_NAME_PATTERNS.
+        "is_excluded": _is_transfer(api.get("name")),
         "notes": api.get("userNotes"),
         # 0007 metadata (Copilot per-transaction extras).
         "tags": [t.get("name") for t in tags if t.get("name")],
