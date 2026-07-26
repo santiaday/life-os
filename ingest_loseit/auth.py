@@ -4,18 +4,26 @@
 login it looks like -- probing it bare answers `missing grant_type`. It accepts
 form-encoded (not JSON) requests on two grants:
 
-    grant_type=password        username + password        -> new token pair
-    grant_type=refresh_token   access_token + refresh_token -> new token pair
+    grant_type=password        username + password           -> Set-Cookie
+    grant_type=refresh_token   access_token + refresh_token  -> Set-Cookie
 
-That second grant is what makes this source self-sustaining. The `liauth`
-session cookie is an ES384-signed JWT with a 14-day lifetime; it cannot be
-minted or extended locally (the signature needs Lose It's private key), so the
-only options were a human re-copying it from DevTools every other week, or
-asking Lose It for a new one. This asks.
+The `liauth` session cookie is an ES384-signed JWT with a 14-day lifetime. It
+cannot be minted or extended locally (the signature needs Lose It's private
+key), so the only options were a human re-copying it from DevTools every other
+week, or asking Lose It for a new one. This asks.
 
-Note the unusual parameter naming: the refresh grant wants BOTH the current
-`access_token` and the `refresh_token`, where most OAuth servers want only the
-latter.
+Two things about this endpoint are not what they look like:
+
+  * The token is NOT in the response body. A successful password grant answers
+    200 with `{"user_id": ..., "username": ...}` and delivers the JWT via
+    `Set-Cookie: liauth` (and an identical `fn_auth`). Parsing only the body
+    makes a perfectly good login look like a malformed response.
+  * The refresh grant wants BOTH the current `access_token` and the
+    `refresh_token`, where most OAuth servers want only the latter.
+
+In practice the refresh grant is unnecessary: the password grant works
+unconditionally and credentials don't expire, so re-logging in is the simplest
+correct thing to do when the token is close to death.
 
 Precedence when a token is needed:
 
@@ -85,7 +93,19 @@ def jwt_expiry(token: str) -> datetime | None:
         return None
 
 
+# Cookies the token endpoint sets, in the order we'd rather have them. Both
+# carry the same JWT; `liauth` is the one the export endpoint authenticates on.
+TOKEN_COOKIES = ("liauth", "fn_auth")
+
+
 def _post(data: dict) -> dict:
+    """POST the token endpoint and return a normalized token payload.
+
+    The response body is NOT where the token lives. A successful password
+    grant answers 200 with `{"user_id": ..., "username": ...}` and delivers
+    the JWT as a Set-Cookie. Reading only the body makes a perfectly good
+    login look like a malformed response.
+    """
     with httpx.Client(timeout=30, headers=TOKEN_HEADERS) as c:
         r = c.post(TOKEN_URL, data=data)      # form-encoded; JSON is rejected
     if r.status_code == 429:
@@ -93,10 +113,24 @@ def _post(data: dict) -> dict:
     if r.status_code != 200:
         raise LoseItAuthError(
             f"token request failed: HTTP {r.status_code} {r.text[:200]}")
+
+    body: dict = {}
     try:
-        return r.json()
-    except ValueError as e:
-        raise LoseItAuthError(f"token endpoint returned non-JSON: {r.text[:200]}") from e
+        parsed = r.json()
+        if isinstance(parsed, dict):
+            body = parsed
+    except ValueError:
+        pass    # a cookie-only response is still a success
+
+    out = dict(body)
+    if not out.get("access_token"):
+        for name in TOKEN_COOKIES:
+            val = r.cookies.get(name)
+            if val:
+                out["access_token"] = val
+                out["_token_from_cookie"] = name
+                break
+    return out
 
 
 def _persist(payload: dict) -> str:
@@ -108,7 +142,9 @@ def _persist(payload: dict) -> str:
     access = payload.get("access_token")
     refresh = payload.get("refresh_token")
     if not access:
-        raise LoseItAuthError(f"token response had no access_token: {sorted(payload)}")
+        raise LoseItAuthError(
+            "token response carried no token in the body or in a "
+            f"{'/'.join(TOKEN_COOKIES)} cookie: {sorted(payload)}")
 
     expires_at = jwt_expiry(access)
     if expires_at is None and payload.get("expires_in"):
@@ -124,7 +160,8 @@ def _persist(payload: dict) -> str:
     )
     log.info("loseit.token.stored",
              expires_at=expires_at.isoformat() if expires_at else None,
-             rotated_refresh=bool(refresh))
+             rotated_refresh=bool(refresh),
+             from_cookie=payload.get("_token_from_cookie"))
     return access
 
 
