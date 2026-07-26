@@ -97,10 +97,21 @@ class Settings(BaseSettings):
     HEVY_API_KEY: str | None = None
 
     # ---- Lose It! ----------------------------------------------------------
-    # The `liauth` browser cookie. Lose It issues it as a 14-DAY JWT, so this
-    # expires roughly every other week and the sync stops until it's replaced.
-    # ingest_loseit exits 2 with an actionable message when that happens, and
-    # lifeos_core.alerts raises it so the failure is loud rather than silent.
+    # api.loseit.com/account/login is an OAuth 2.0 token endpoint supporting
+    # `password` and `refresh_token` grants, so this source can keep itself
+    # alive. Set EITHER of these and the 14-day cookie stops mattering:
+    #
+    #   LOSEIT_EMAIL + LOSEIT_PASSWORD  most robust — credentials don't expire,
+    #                                   same pattern as Cronometer/PushPress.
+    #   LOSEIT_REFRESH_TOKEN            no password stored; survives as long as
+    #                                   the refresh token stays valid.
+    #
+    # LOSEIT_SESSION_COOKIE (the `liauth` JWT) is a bootstrap only: it seeds
+    # the token store once and expires 14 days later with no way to renew
+    # itself, because it carries no refresh half.
+    LOSEIT_EMAIL: str | None = None
+    LOSEIT_PASSWORD: str | None = None
+    LOSEIT_REFRESH_TOKEN: str | None = None
     LOSEIT_SESSION_COOKIE: str | None = None
 
     # ---- PushPress ---------------------------------------------------------

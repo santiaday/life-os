@@ -58,9 +58,19 @@ def ingest(keep_dir: str | None = None) -> dict:
 
 
 def check() -> dict:
+    """Verify auth end to end and report whether it can renew itself."""
+    from ingest_loseit.auth import status
+
+    auth = status()
     with LoseItClient() as client:
         blob = client.fetch_export()
-    return {"ok": True, "bytes": len(blob)}
+    if not auth["self_sustaining"]:
+        auth["warning"] = (
+            "This token cannot renew itself and will stop working on "
+            f"{(auth.get('expires_at') or '?')[:10]}. Set LOSEIT_EMAIL and "
+            "LOSEIT_PASSWORD (or LOSEIT_REFRESH_TOKEN) to make it automatic."
+        )
+    return {"ok": True, "bytes": len(blob), "auth": auth}
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -171,6 +171,16 @@ def _expiring_credentials(now: datetime | None = None) -> list[dict]:
     now = now or datetime.now(UTC)
     out: list[dict] = []
 
+    # If Lose It can renew itself (credentials or a refresh token configured),
+    # the expiry is a non-event and alerting on it would be noise.
+    try:
+        from ingest_loseit.auth import status as _loseit_status
+
+        if _loseit_status().get("self_sustaining"):
+            return out
+    except Exception:
+        pass    # ingest_loseit isn't in every image; fall through to the check
+
     cookie = settings.LOSEIT_SESSION_COOKIE
     if cookie:
         try:

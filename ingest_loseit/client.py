@@ -14,10 +14,14 @@ nothing but a valid session cookie. So the ongoing sync downloads that bundle
 and feeds it through the exact same loader used for the manual export
 (`ingest_files.loseit`), which is idempotent by construction.
 
-Auth: Lose It's session lives in the `liauth` cookie. It is long-lived but not
-eternal. Put it in LOSEIT_SESSION_COOKIE. When it expires the export endpoint
-answers with an HTML login page instead of a zip, which this client detects and
-reports as `LoseItAuthError` rather than writing garbage to the warehouse.
+Auth lives in `ingest_loseit.auth`, which resolves a token per request --
+refreshing or re-logging-in as needed. This client just carries whatever it is
+handed as the `liauth` cookie.
+
+When a token is rejected the export endpoint answers with an HTML login page
+instead of a zip. That is detected here and raised as `LoseItAuthError`, rather
+than letting an HTML blob reach the CSV parser and land garbage in the
+warehouse.
 """
 
 from __future__ import annotations
@@ -62,16 +66,21 @@ class LoseItAuthError(LoseItError):
 class LoseItClient:
     def __init__(self, session_cookie: str | None = None,
                  timeout: float = 120.0) -> None:
-        # Read through settings, not os.environ: every other service in this
-        # repo does, and pydantic-settings is what loads .env when the process
-        # wasn't started by docker-compose.
-        self.session_cookie = session_cookie or settings.LOSEIT_SESSION_COOKIE
-        if not self.session_cookie:
-            raise LoseItAuthError(
-                "LOSEIT_SESSION_COOKIE is not set. Sign in at loseit.com, copy the "
-                "value of the `liauth` cookie from your browser's dev tools, and put "
-                "it in .env as LOSEIT_SESSION_COOKIE."
-            )
+        # Resolve through ingest_loseit.auth, which refreshes or re-logs-in as
+        # needed and persists the result. Falling back to the raw env cookie
+        # keeps the client usable when the DB isn't reachable (tests, probes).
+        if session_cookie:
+            self.session_cookie = session_cookie
+        else:
+            try:
+                from ingest_loseit.auth import access_token
+
+                self.session_cookie = access_token()
+            except Exception as e:
+                self.session_cookie = settings.LOSEIT_SESSION_COOKIE
+                if not self.session_cookie:
+                    raise LoseItAuthError(str(e)) from e
+                log.warning("loseit.auth.fell_back_to_env_cookie", error=str(e))
         self._client = httpx.Client(
             base_url=BASE,
             timeout=timeout,
@@ -110,8 +119,10 @@ class LoseItClient:
             head = body[:400].decode("utf-8", "replace").lower()
             if "login" in head or "sign in" in head or "<!doctype html" in head:
                 raise LoseItAuthError(
-                    f"{path} returned an HTML page, not a zip -- the LOSEIT_SESSION_COOKIE "
-                    f"has expired. Re-copy the `liauth` cookie from loseit.com."
+                    f"{path} returned an HTML page, not a zip -- the token was "
+                    f"rejected. Set LOSEIT_EMAIL/LOSEIT_PASSWORD (or "
+                    f"LOSEIT_REFRESH_TOKEN) so the token can renew itself, or "
+                    f"paste a fresh `liauth` cookie into LOSEIT_SESSION_COOKIE."
                 )
             errors.append(f"{path}: unexpected content-type "
                           f"{resp.headers.get('content-type')!r}")
