@@ -113,6 +113,43 @@ class WhoopPrivateClient:
         except ValueError:
             return {}
 
+    def delete(self, path: str) -> dict:
+        """DELETE a private resource. Returns {'status': <code>} plus any JSON
+        body the server sends.
+
+        Deliberately NOT retried. The GET/POST paths retry on transport errors,
+        which is safe because they're idempotent from the caller's side. A
+        delete that times out mid-flight may well have succeeded, and retrying
+        it turns an ambiguous outcome into a second destructive call against
+        whatever now occupies that id. One attempt, and the caller verifies.
+
+        404 is returned rather than raised: for a delete, "it isn't there" is
+        the desired end state, and callers want to distinguish that from a
+        failure.
+        """
+        resp = self._client.delete(path, headers=self._auth.headers())
+        if resp.status_code == 401:
+            log.warning("whoop_private.client.401", path=path)
+            raise WhoopAuthExpired(
+                f"Whoop private API rejected the access token at {path}. "
+                f"Re-run `python -m ingest_whoop_private login`."
+            )
+        out: dict = {"status": resp.status_code}
+        if resp.status_code == 404:
+            out["already_absent"] = True
+            return out
+        if resp.status_code >= 400:
+            raise WhoopPrivateAPIError(
+                f"Whoop private DELETE {resp.status_code} {path}: {resp.text[:400]}"
+            )
+        try:
+            body = resp.json()
+            if isinstance(body, dict):
+                out |= body
+        except ValueError:
+            pass
+        return out
+
     # ---- public surface ----------------------------------------------------
     def trend(self, metric: str, end_date: date) -> dict:
         """Graph BFF for one metric ending at end_date. Carries week / month /

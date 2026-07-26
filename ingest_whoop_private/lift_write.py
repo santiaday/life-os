@@ -231,3 +231,63 @@ def create_custom_exercise(
                 "base_exercise_id": base_exercise_id, "will_create_id": new_id}
     client.post(CUSTOM_EXERCISE_PATH, body)
     return {"ok": True, "created": True, "exercise_id": new_id, "name": name}
+
+
+# ---------------------------------------------------------------------------
+# Deleting a logged workout
+# ---------------------------------------------------------------------------
+
+# Whoop does not document this surface, so the delete path is a candidate list
+# rather than a constant. They are ordered most- to least-conventional; the
+# first that answers anything other than 404/405 is the real one.
+#
+# Probing is safe in this order precisely BECAUSE a wrong guess 404s: the id is
+# a UUID that exists in exactly one collection, so a path that doesn't own it
+# cannot delete something else by accident.
+DELETE_ACTIVITY_PATHS = (
+    "/weightlifting-service/v2/weightlifting-workout/activity/{id}",
+    "/weightlifting-service/v2/weightlifting-workout/{id}",
+    "/weightlifting-service/v3/weightlifting-workout/activity/{id}",
+    "/activity-service/v1/activity/{id}",
+)
+
+
+def delete_workout(client, activity_id: str, *, dry_run: bool = True) -> dict:
+    """Delete a logged Strength Trainer workout from Whoop.
+
+    Irreversible: Whoop has no undo and the warehouse copy is deleted too, so
+    the only recovery is re-logging it by hand. dry_run is the default, and the
+    caller has to opt out deliberately.
+    """
+    if not activity_id or len(activity_id) != 36:
+        return {"ok": False,
+                "error": f"activity_id must be a 36-char UUID, got {activity_id!r}"}
+
+    if dry_run:
+        return {"ok": True, "dry_run": True, "activity_id": activity_id,
+                "would_try_paths": [p.format(id=activity_id)
+                                    for p in DELETE_ACTIVITY_PATHS]}
+
+    attempts: list[dict] = []
+    for template in DELETE_ACTIVITY_PATHS:
+        path = template.format(id=activity_id)
+        try:
+            res = client.delete(path)
+        except Exception as e:
+            attempts.append({"path": path, "error": f"{type(e).__name__}: {e}"})
+            continue
+        status = res.get("status")
+        attempts.append({"path": path, "status": status})
+        # 404 here means "this collection doesn't own that id" — keep looking.
+        # 405 means the path exists but doesn't accept DELETE.
+        if status in (404, 405):
+            continue
+        if 200 <= status < 300:
+            log.info("whoop_private.lift.deleted", activity_id=activity_id, path=path)
+            return {"ok": True, "deleted": True, "activity_id": activity_id,
+                    "path": path, "status": status, "attempts": attempts}
+
+    return {"ok": False, "deleted": False, "activity_id": activity_id,
+            "error": "no delete endpoint accepted this activity — it may "
+                     "already be gone, or Whoop moved the route",
+            "attempts": attempts}

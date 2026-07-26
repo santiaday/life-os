@@ -270,6 +270,20 @@ def ingest_lifts(client: WhoopPrivateClient, *, backfill_days: int | None = None
             wk_row["duration_minutes"] = meta["dur_min"]
             parsed.append((aid, wk_row, set_rows, {"weightlifting_cardio_details": wcd}))
 
+        # Drop anything the user has explicitly deleted. Without this the
+        # 2-hourly sync would resurrect it within the hour, making a delete
+        # look like it silently failed.
+        with tx() as c, c.cursor() as cur:
+            cur.execute("SELECT source_id FROM activity_suppression "
+                        "WHERE source = 'whoop_lift'")
+            suppressed = {r["source_id"] for r in cur.fetchall()}
+        if suppressed:
+            before = len(parsed)
+            parsed = [p for p in parsed if p[0] not in suppressed]
+            if before != len(parsed):
+                log.info("whoop_private.lift.suppressed_skipped",
+                         skipped=before - len(parsed))
+
         total_sets = 0
         now = _now()
         with tx() as c:

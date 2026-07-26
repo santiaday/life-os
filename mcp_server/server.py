@@ -484,6 +484,41 @@ def log_whoop_workout(
     return LWT.log_whoop_workout(exercises, name, start, end, dry_run)
 
 
+@_tool(description=(
+    "WRITE: remove a Strength Trainer workout from the WAREHOUSE and stop the "
+    "2-hourly sync re-importing it. Does NOT delete it from Whoop — their "
+    "private API exposes no delete route for strength workouts, so delete it "
+    "in the Whoop app too if you want it gone there. Reversible via "
+    "restore_whoop_lift_workout. Previews unless dry_run=false AND confirm=true "
+    "— both are required, so one flipped flag can't destroy data. Get the "
+    "activity_id from get_activity(source='whoop_lift') or "
+    "get_whoop_lift_workouts."
+))
+def delete_whoop_lift_workout(
+    activity_id: str,
+    reason: str | None = None,
+    dry_run: bool = True,
+    confirm: bool = False,
+) -> dict:
+    return LWT.delete_whoop_lift_workout(activity_id, reason, dry_run, confirm)
+
+
+@_tool(description=(
+    "WRITE: undo delete_whoop_lift_workout — drops the suppression tombstone "
+    "so the next Whoop sync re-imports the workout."
+))
+def restore_whoop_lift_workout(activity_id: str) -> dict:
+    return LWT.restore_whoop_lift_workout(activity_id)
+
+
+@_tool(description=(
+    "Every activity currently withheld from the warehouse by a suppression "
+    "tombstone, with the reason and when it was set."
+))
+def list_suppressed_activities() -> dict:
+    return LWT.list_suppressed_activities()
+
+
 @_tool(description=T.TOOLS["get_exercise_progression"]["description"])
 def get_exercise_progression(
     exercise_search: str,
