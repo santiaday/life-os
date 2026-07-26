@@ -132,7 +132,13 @@ GOTCHAS = {
     ),
     "pushpress_is_programming": (
         "PushPress rows are the gym's published workout-of-the-day, not "
-        "attendance. Never present them as training he performed."
+        "attendance. Never present them as training he performed. class_date "
+        "runs into the FUTURE — it publishes ahead — so a healthy lag is "
+        "negative, and get_pushpress_upcoming is the tool for 'what's "
+        "tomorrow'. Stored RAW and unparsed by explicit choice: the LLM parser "
+        "in coach/ is retired and must not be reintroduced. Read title and "
+        "raw_text directly; parsed_at / parser_confidence are NULL on "
+        "everything ingested after 2026-06-07 and that is correct, not a gap."
     ),
     "loseit_times_are_fabricated": (
         "The Lose It export has no clock time, only a meal name. Entries sit at "

@@ -202,15 +202,36 @@ def build() -> BlockingScheduler:
         coalesce=True,
     )
 
-    # ---- Hevy / PushPress / coach — DEPRECATED ----------------------------
-    # Strength training is now sourced from Whoop's Strength Trainer (see the
-    # `lift` pipeline in ingest_whoop_private and mart_daily.strength_*). The
-    # Hevy ingester, PushPress programmed-workout ingester, and the coach
-    # parser/load-recommender were retired here. Their packages, historical
-    # tables, and read-only MCP tools are kept for querying past data; only the
-    # cron jobs (hevy_daily, hevy_weekly_rebackfill, pushpress_daily,
-    # coach_daily, coach_recompute_hourly, the Sunday coach triple-fire) and the
-    # write/coach MCP tools were removed.
+    # ---- PushPress: RESTORED 2026-07-26 ------------------------------------
+    # Retired 2026-06-13 alongside Hevy and coach, on the reasoning that
+    # strength now comes from Whoop's Strength Trainer. That reasoning confused
+    # two different things: Whoop records what he PERFORMED, PushPress publishes
+    # what the gym PROGRAMMED. Whoop cannot answer "what's tomorrow's workout"
+    # or "was I under-recovered for what was on the board", so deleting this job
+    # silently ended forward-looking programming — six weeks of it before anyone
+    # noticed.
+    #
+    # Nothing was broken: auth still worked the whole time (the refresh token
+    # outlives the access-token expiry recorded in oauth_tokens). Only the cron
+    # entry was missing. It is registered in source_health now, so a repeat
+    # would surface in get_data_freshness within a day instead of by chance.
+    #
+    # PushPress publishes ahead, so the window straddles today; twice daily is
+    # plenty for programming that changes at most once a day.
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(hour="6,18", minute=5),
+        args=["ingest_pushpress", "ingest"],
+        id="pushpress_twice_daily",
+        name="PushPress programmed workouts (06:05 / 18:05)",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # ---- Hevy / coach — still deprecated -----------------------------------
+    # Hevy's per-set history ends 2026-06-04 and is unified into fact_activity;
+    # the coach parser/load-recommender was retired with it. Their packages,
+    # tables and read-only MCP tools remain for querying past data.
 
     # ---- Copilot (Phase 7) ------------------------------------------------
     sched.add_job(

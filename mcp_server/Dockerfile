@@ -73,6 +73,10 @@ COPY mart_refresh ./mart_refresh
 # Both imports are lazy, so omitting this package lets the server start and
 # then fail at call time — copy it.
 COPY unify ./unify
+# refresh_data('loseit'|'all') runs the Lose It sync from inside this container,
+# and that pulls in the shared file loader.
+COPY ingest_files ./ingest_files
+COPY ingest_loseit ./ingest_loseit
 
 EXPOSE 8080
 ENTRYPOINT ["python", "-m", "mcp_server"]

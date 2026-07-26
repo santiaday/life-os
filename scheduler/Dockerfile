@@ -49,10 +49,12 @@ COPY ingest_copilot ./ingest_copilot
 COPY ingest_whoop_journal ./ingest_whoop_journal
 COPY ingest_whoop_private ./ingest_whoop_private
 COPY ingest_whoop_labs ./ingest_whoop_labs
-# Hevy / PushPress / coach were deprecated — their packages are no longer
-# scheduled, so they're not bundled into the scheduler image. Historical data
-# and the read-only MCP tools live on; only the cron-driven ingest/coach
-# subprocesses were removed.
+# PushPress is scheduled again (programmed workouts — distinct from Whoop's
+# record of what was performed), so its package has to be in this image.
+COPY ingest_pushpress ./ingest_pushpress
+# Hevy / coach remain deprecated: their per-set history ends 2026-06-04 and is
+# unified into fact_activity. Historical data and the read-only MCP tools live
+# on; only the cron-driven subprocesses were removed.
 COPY mart_refresh ./mart_refresh
 COPY calendar_sync ./calendar_sync
 # Unified layer: the `unify all` job runs 4-hourly and nightly, before the mart

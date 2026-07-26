@@ -35,24 +35,35 @@ def refresh_data(source: str = "all") -> dict:
     """Pull fresh data from one or all sources, then rebuild the mart.
 
     `source` ∈ {all, whoop, whoop_journal, whoop_private, calendar, cronometer,
-    copilot, mart}. Default 'all' re-runs every live ingester and the mart. Use
-    this at session start to ensure you're not analyzing stale data.
+    copilot, pushpress, loseit, unify, mart}. Default 'all' re-runs every live
+    ingester, the unified projection, and the mart. Use this at session start to
+    ensure you're not analyzing stale data.
 
     whoop_private covers the private-API pull (daily trends incl. recovery/HRV/
     strain/steps/calories, sleep-need, behavior-impact, Strength Trainer lifts,
-    AND native Advanced Labs) — it's the resilience backbone. The retired Hevy/
-    PushPress/coach ingesters are no longer run here."""
+    AND native Advanced Labs) — it's the resilience backbone.
+
+    pushpress pulls the gym's PROGRAMMED workouts (a forward-looking window —
+    it publishes ahead), which is a different question from what Whoop recorded
+    as performed. Hevy/coach remain retired.
+
+    unify re-projects every source into the canonical tables and must run before
+    the mart, which reads its views. 'all' orders this correctly."""
     valid = {"all", "whoop", "whoop_journal", "whoop_private",
-             "calendar", "cronometer", "copilot", "mart"}
+             "calendar", "cronometer", "copilot", "pushpress", "loseit",
+             "unify", "mart"}
     if source not in valid:
         return _err("refresh_data", ValueError(f"source must be one of {sorted(valid)}"))
 
     out: dict[str, Any] = {}
     targets = (
         ("whoop", "whoop_journal", "whoop_private",
-         "calendar", "cronometer", "copilot")
+         "calendar", "cronometer", "copilot", "pushpress", "loseit")
         if source == "all" else (source,)
     )
+    # unify reads what the ingesters just wrote, so it runs after them and
+    # before the mart rebuild below.
+    run_unify = source in ("all", "unify")
 
     if source != "mart":
         for name in targets:
@@ -77,9 +88,25 @@ def refresh_data(source: str = "all") -> dict:
                     out[name] = cron_ingest.run_all()
                 elif name == "copilot":
                     out[name] = copilot_ingest.run_all()
+                elif name == "pushpress":
+                    from ingest_pushpress import ingest as pp_ingest
+                    out[name] = pp_ingest.run_all()
+                elif name == "loseit":
+                    from ingest_loseit.__main__ import ingest as loseit_ingest
+                    out[name] = loseit_ingest()
+                elif name == "unify":
+                    pass    # handled below, after every source has landed
             except Exception as e:
                 out[name] = f"FAILED: {type(e).__name__}: {e}"
                 log.exception("refresh_data.source_failed", source=name)
+
+    if run_unify:
+        try:
+            from unify.__main__ import run_all as unify_all
+            out["unify"] = unify_all()
+        except Exception as e:
+            out["unify"] = f"FAILED: {type(e).__name__}: {e}"
+            log.exception("refresh_data.unify_failed")
 
     # Always rebuild mart unless caller explicitly wants only one source's
     # raw refresh (in which case we still rebuild — it's cheap and keeps
