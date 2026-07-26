@@ -131,9 +131,21 @@ def project_labs(conn: psycopg.Connection) -> dict[str, int]:
 
 def cluster_panels(conn: psycopg.Connection) -> dict[str, int]:
     """Two panels are the same draw when they share a collection date and the
-    same physical lab. The one with more resolved biomarkers wins; its
-    measurements stay primary and the duplicate's are demoted so trend queries
-    don't count a value twice."""
+    same physical lab.
+
+    Deduplication happens per ANALYTE, not per panel. Demoting the whole
+    smaller panel looked right until the 2026-07-22 draw arrived twice: Whoop
+    Advanced Labs reported 73 markers and the lab's own PDF reported 59, but
+    the PDF carried the two testosterone results Whoop had omitted. Demoting
+    the PDF wholesale would have silently dropped them, leaving testosterone
+    with a January reading and no July one.
+
+    So the panel-level cluster_id still records "these are the same draw", but
+    `is_primary` on each measurement is decided within (collected_on,
+    biomarker_key): the best panel wins that analyte, and an analyte only one
+    panel measured stays visible. The result is the union of the draw, with no
+    value counted twice.
+    """
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -148,37 +160,66 @@ def cluster_panels(conn: psycopg.Connection) -> dict[str, int]:
         )
         panels = cur.fetchall()
 
-    def norm_provider(p: str | None) -> str:
-        s = (p or "").lower()
-        for needle in ("quest", "labcorp", "whoop", "function", "biograph"):
-            if needle in s:
-                return needle
-        return s[:20] or "unknown"
-
+    # The draw is identified by its collection date alone, not by the provider
+    # string. Grouping on a normalized provider looked reasonable and was
+    # wrong: the 2026-07-22 blood draw is labelled "Quest Diagnostics" on the
+    # lab's own report and "WHOOP_TEST" in Whoop Advanced Labs, so the two
+    # records of one needle landed in separate clusters. One collection date is
+    # one draw.
     groups: dict[tuple, list[dict]] = {}
     for p in panels:
-        groups.setdefault((p["collected_on"], norm_provider(p["provider"])), []).append(p)
+        groups.setdefault((p["collected_on"],), []).append(p)
 
-    updates_panel, updates_meas = [], []
-    for i, ((_, _), members) in enumerate(sorted(groups.items(),
-                                                 key=lambda kv: kv[0][0]), start=1):
-        members.sort(key=lambda p: p["mapped_count"], reverse=True)
-        primary = members[0]
-        for m in members:
-            is_primary = m["panel_uid"] == primary["panel_uid"]
-            updates_panel.append((i, is_primary, m["panel_uid"]))
-            updates_meas.append((is_primary, m["panel_uid"]))
+    # Panel rank inside a draw: the lab's own report outranks an app's
+    # re-presentation of it, then richer panels, then more recent ingest.
+    SOURCE_RANK = {"external": 2, "manual": 3}
+
+    updates_panel = []
+    panel_rank: dict[str, tuple] = {}
+    for i, (_, members) in enumerate(sorted(groups.items(), key=lambda kv: kv[0][0]),
+                                     start=1):
+        members.sort(
+            key=lambda p: (SOURCE_RANK.get(p["source"], 1), p["mapped_count"]),
+            reverse=True,
+        )
+        for rank, m in enumerate(members):
+            panel_rank[m["panel_uid"]] = (rank, m["panel_uid"])
+            # Panel-level is_primary still means "the best panel for this draw";
+            # it is provenance, not a filter on which values are visible.
+            updates_panel.append((i, rank == 0, m["panel_uid"]))
 
     with conn.cursor() as cur:
         cur.executemany(
             "UPDATE fact_lab_panel SET cluster_id = %s, is_primary = %s, "
             "updated_at = now() WHERE panel_uid = %s", updates_panel)
-        cur.executemany(
-            "UPDATE fact_lab_measurement SET is_primary = %s, updated_at = now() "
-            "WHERE panel_uid = %s", updates_meas)
+
+        # Per-analyte winner within each draw.
+        cur.execute(
+            """
+            WITH ranked AS (
+              SELECT m.measurement_uid,
+                     ROW_NUMBER() OVER (
+                       PARTITION BY m.collected_on,
+                                    COALESCE(m.biomarker_key, m.vendor_key)
+                       ORDER BY p.is_primary DESC NULLS LAST,
+                                (m.value_numeric IS NOT NULL) DESC,
+                                m.measurement_uid
+                     ) AS rn
+                FROM fact_lab_measurement m
+                LEFT JOIN fact_lab_panel p ON p.panel_uid = m.panel_uid
+            )
+            UPDATE fact_lab_measurement m
+               SET is_primary = (r.rn = 1), updated_at = now()
+              FROM ranked r
+             WHERE r.measurement_uid = m.measurement_uid
+               AND m.is_primary <> (r.rn = 1)
+            """
+        )
+        demoted = cur.rowcount
 
     multi = sum(1 for m in groups.values() if len(m) > 1)
-    log.info("labs.cluster", groups=len(groups), duplicate_draws=multi)
+    log.info("labs.cluster", groups=len(groups), duplicate_draws=multi,
+             measurement_flips=demoted)
     return {"draws": len(groups), "duplicate_draws": multi}
 
 

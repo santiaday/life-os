@@ -23,13 +23,13 @@ reports as `LoseItAuthError` rather than writing garbage to the warehouse.
 from __future__ import annotations
 
 import io
-import os
 import zipfile
 from pathlib import Path
 
 import httpx
 
 from lifeos_core.logging import get_logger
+from lifeos_core.settings import settings
 
 log = get_logger(__name__)
 
@@ -62,7 +62,10 @@ class LoseItAuthError(LoseItError):
 class LoseItClient:
     def __init__(self, session_cookie: str | None = None,
                  timeout: float = 120.0) -> None:
-        self.session_cookie = session_cookie or os.environ.get("LOSEIT_SESSION_COOKIE")
+        # Read through settings, not os.environ: every other service in this
+        # repo does, and pydantic-settings is what loads .env when the process
+        # wasn't started by docker-compose.
+        self.session_cookie = session_cookie or settings.LOSEIT_SESSION_COOKIE
         if not self.session_cookie:
             raise LoseItAuthError(
                 "LOSEIT_SESSION_COOKIE is not set. Sign in at loseit.com, copy the "

@@ -44,7 +44,15 @@ SOURCE_THRESHOLDS = (
     ("cronometer", "Cronometer", 36),  # daily job, allow margin
     ("copilot", "Copilot", 12),     # 4-hourly job
     ("mart", "Mart refresh", 36),
+    ("unify", "Unified layer", 8),  # 4-hourly job
+    ("loseit", "Lose It", 8),       # 2-hourly job
 )
+
+# Lose It authenticates with a browser cookie that Lose It issues as a 14-DAY
+# JWT. Unlike every other source here, this one is guaranteed to break on a
+# schedule, and the only fix is a human re-copying the cookie. Warn while
+# there's still time to act rather than after the sync has already gone dark.
+LOSEIT_COOKIE_WARN_DAYS = 4
 
 
 def _stale_sources(now: datetime | None = None) -> list[dict]:
@@ -149,6 +157,57 @@ def _stale_hosts(now: datetime | None = None, max_minutes: int = 45) -> list[dic
     return out
 
 
+def _expiring_credentials(now: datetime | None = None) -> list[dict]:
+    """Credentials with a known expiry that a human has to renew by hand.
+
+    Only Lose It qualifies today: its `liauth` cookie is a 14-day JWT, so the
+    sync is guaranteed to stop roughly every other week. Every other source
+    here either self-refreshes or fails for reasons a threshold already catches.
+    Reading the `exp` claim costs nothing and turns a silent two-week data hole
+    into four days' notice.
+    """
+    from lifeos_core.settings import settings
+
+    now = now or datetime.now(UTC)
+    out: list[dict] = []
+
+    cookie = settings.LOSEIT_SESSION_COOKIE
+    if cookie:
+        try:
+            import base64
+            import json as _json
+
+            claims_b64 = cookie.split(".")[1]
+            claims_b64 += "=" * (-len(claims_b64) % 4)
+            exp = _json.loads(base64.urlsafe_b64decode(claims_b64))["exp"]
+            expires_at = datetime.fromtimestamp(exp, UTC)
+            days_left = (expires_at - now).total_seconds() / 86400
+            if days_left <= LOSEIT_COOKIE_WARN_DAYS:
+                out.append({
+                    "key": "loseit_cookie",
+                    "label": "Lose It session cookie",
+                    "expires_at": expires_at.isoformat(),
+                    "days_left": round(days_left, 1),
+                    "detail": (
+                        f"expires {expires_at:%Y-%m-%d} ({days_left:.1f} days). "
+                        "Re-copy the `liauth` cookie from loseit.com into "
+                        "LOSEIT_SESSION_COOKIE and restart the scheduler."
+                        if days_left > 0 else
+                        f"EXPIRED {expires_at:%Y-%m-%d}. Lose It sync is dark until "
+                        "the `liauth` cookie is replaced."
+                    ),
+                })
+        except Exception as e:
+            # A malformed cookie is itself worth surfacing — it means the sync
+            # cannot possibly be working.
+            out.append({
+                "key": "loseit_cookie", "label": "Lose It session cookie",
+                "expires_at": None, "days_left": None,
+                "detail": f"could not be parsed ({type(e).__name__}); sync will fail",
+            })
+    return out
+
+
 def check_and_alert() -> dict:
     """Survey ingest + host freshness. Send an alert if anything is stale.
     Returns the survey result for logging/debugging."""
@@ -159,17 +218,23 @@ def check_and_alert() -> dict:
     swept = sweep_orphaned_runs()
     stale_sources = _stale_sources()
     stale_hosts = _stale_hosts()
-    if not stale_sources and not stale_hosts:
-        return {"ok": True, "stale_sources": [], "stale_hosts": [], "swept_orphans": swept}
+    expiring = _expiring_credentials()
+    if not stale_sources and not stale_hosts and not expiring:
+        return {"ok": True, "stale_sources": [], "stale_hosts": [],
+                "expiring_credentials": [], "swept_orphans": swept}
 
     parts = []
     if stale_sources:
         parts.append(f"{len(stale_sources)} stale source(s)")
     if stale_hosts:
         parts.append(f"{len(stale_hosts)} silent host(s)")
+    if expiring:
+        parts.append(f"{len(expiring)} expiring credential(s)")
     title = "life-os: " + ", ".join(parts)
 
     body_lines = []
+    for e in expiring:
+        body_lines.append(f"- {e['label']}: {e['detail']}")
     for s in stale_sources:
         body_lines.append(
             f"- {s['label']}: "
@@ -196,6 +261,7 @@ def check_and_alert() -> dict:
         "ok": False,
         "stale_sources": stale_sources,
         "stale_hosts": stale_hosts,
+        "expiring_credentials": expiring,
         "delivered": delivered,
         "swept_orphans": swept,
     }

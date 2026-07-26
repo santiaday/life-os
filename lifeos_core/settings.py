@@ -96,6 +96,13 @@ class Settings(BaseSettings):
     # env rather than oauth_tokens.
     HEVY_API_KEY: str | None = None
 
+    # ---- Lose It! ----------------------------------------------------------
+    # The `liauth` browser cookie. Lose It issues it as a 14-DAY JWT, so this
+    # expires roughly every other week and the sync stops until it's replaced.
+    # ingest_loseit exits 2 with an actionable message when that happens, and
+    # lifeos_core.alerts raises it so the failure is loud rather than silent.
+    LOSEIT_SESSION_COOKIE: str | None = None
+
     # ---- PushPress ---------------------------------------------------------
     # Optional credentials used as a fallback when the cached refresh token
     # in oauth_tokens(service='pushpress') has expired (60-day lifetime). When
