@@ -17,7 +17,10 @@ from datetime import UTC, date, datetime
 from psycopg.types.json import Jsonb
 
 from lifeos_core.db import tx
+from lifeos_core.logging import get_logger
 from lifeos_core.upsert import upsert_rows
+
+log = get_logger(__name__)
 
 
 def _slug(s: str | None) -> str:
@@ -138,6 +141,8 @@ def submit_lab_results(
             connection=c,
         )
 
+    unified = _project_labs_now()
+
     return {
         "ok": True,
         "test_id": test_id,
@@ -145,7 +150,36 @@ def submit_lab_results(
         "test_date": td.isoformat(),
         "biomarkers_written": len(fact_rows),
         "skipped": skipped,
+        "unified": unified,
     }
+
+
+def _project_labs_now() -> dict:
+    """Push the write straight through to fact_lab_panel / fact_lab_measurement.
+
+    Without this the panel sits in fact_lab_result until the next scheduled
+    `unify` run, so a panel uploaded in chat would be invisible to
+    get_lab_values for up to four hours -- and the obvious follow-up question
+    ("how does this compare to May?") would silently miss the panel that was
+    just uploaded.
+
+    Never raises: the source-of-truth write already committed, and a failure
+    here only means the unified copy waits for the scheduled run.
+    """
+    try:
+        from lifeos_core.db import tx as _tx
+        from unify.sources import labs as _labs
+
+        with _tx() as c:
+            _labs.seed_biomarkers(c)
+            out = _labs.project_labs(c)
+            out.update(_labs.cluster_panels(c))
+        return out
+    except Exception as e:
+        log.warning("labs.unified_projection_failed", error=str(e))
+        return {"projected": False, "error": f"{type(e).__name__}: {e}",
+                "note": "landed in fact_lab_result; the next `unify` run will "
+                        "pick it up"}
 
 
 def submit_imaging_study(
@@ -197,6 +231,18 @@ def submit_imaging_study(
             [study_id, sd, modality, body_region, provider, ordering_reason,
              impression, json.dumps(findings or [], default=str), raw_text, raw_id],
         )
+    # Same reasoning as _project_labs_now: make the study visible to
+    # get_imaging immediately rather than at the next scheduled unify run.
+    unified = False
+    try:
+        from unify.sources import labs as _labs
+
+        with tx() as c:
+            _labs.project_imaging(c)
+        unified = True
+    except Exception as e:
+        log.warning("imaging.unified_projection_failed", error=str(e))
+
     return {"ok": True, "study_id": study_id, "modality": modality,
             "body_region": body_region, "study_date": sd.isoformat(),
-            "findings_count": len(findings or [])}
+            "findings_count": len(findings or []), "unified": unified}

@@ -214,6 +214,17 @@ def test_biomarker_aliases_converge(vendor, expected):
     assert key == expected
 
 
+@pytest.mark.parametrize("vendor", [
+    "vitamin_d_25_oh",       # slug of "Vitamin D, 25-OH" — the spelling a chat
+    "vitamin_d_25oh",        # upload produces, which an alias list missed
+    "vitamin_d_25_hydroxy",
+    "VITAMIN D 25 OH",
+])
+def test_punctuation_variants_of_one_analyte_converge(vendor):
+    key, known = biomarkers.resolve(vendor)
+    assert known and key == "vitamin_d_25oh"
+
+
 def test_unknown_biomarker_is_not_invented():
     key, known = biomarkers.resolve("some_novel_assay")
     assert key is None and known is False

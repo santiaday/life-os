@@ -306,15 +306,36 @@ for _k, _vals in _ALIASES.items():
         ALIAS_TO_KEY[_v] = _k
 
 
+def _compact(s: str) -> str:
+    """Strip every separator: 'vitamin_d_25_oh' and 'vitamin_d_25oh' both
+    become 'vitamind25oh'.
+
+    Lab reports punctuate the same analyte a dozen ways -- "Vitamin D, 25-OH",
+    "Vitamin D 25 Hydroxy", "VITAMIN_D_25OH" -- and the difference is never
+    meaningful. Matching on the compacted form catches those without needing an
+    alias entry per punctuation variant. Enumerating them by hand is how
+    `vitamin_d_25_oh` slipped through and would have started a second,
+    disconnected vitamin-D series.
+    """
+    return s.replace("_", "")
+
+
+COMPACT_TO_KEY: dict[str, str] = {}
+for _alias, _key in ALIAS_TO_KEY.items():
+    COMPACT_TO_KEY.setdefault(_compact(_alias), _key)
+
+
 def resolve(vendor_key: str, display_name: str | None = None) -> tuple[str | None, bool]:
     """Vendor slug/label -> (canonical key, is_known). Returns (None, False)
     when nothing matches, so the caller can keep the vendor key and surface it
     for review rather than inventing a biomarker."""
-    for cand in (normalize(vendor_key), normalize(display_name or "")):
-        if not cand:
-            continue
-        hit = ALIAS_TO_KEY.get(cand)
-        if hit:
+    candidates = [normalize(vendor_key), normalize(display_name or "")]
+    for cand in candidates:
+        if cand and (hit := ALIAS_TO_KEY.get(cand)):
+            return hit, True
+    # Fall back to punctuation-insensitive matching before giving up.
+    for cand in candidates:
+        if cand and (hit := COMPACT_TO_KEY.get(_compact(cand))):
             return hit, True
     return None, False
 
