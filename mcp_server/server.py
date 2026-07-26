@@ -27,6 +27,7 @@ from mcp_server import db_write_tools as DBW
 from mcp_server import hevy_write_tools as HW
 from mcp_server import labs_write_tools as LW
 from mcp_server import tools as T
+from mcp_server import unified_tools as U
 from mcp_server import whoop_lift_write_tools as LWT
 from mcp_server import write_tools as W
 from mcp_server.auth import (
@@ -133,6 +134,196 @@ def _tool(description: str):
 @_tool(description=T.TOOLS["get_schema_docs"]["description"])
 def get_schema_docs(table_name: str | None = None) -> dict:
     return T.get_schema_docs(table_name)
+
+
+# ===========================================================================
+# Unified data layer.
+#
+# Prefer these over the per-source tools below. Each reads the deduplicated,
+# SI-unit, quality-filtered canonical tables, so one call covers Whoop,
+# Garmin, Hevy, Cronometer, Lose It, Cal AI and Zero at once. The older tools
+# still work but each sees only its own vendor's slice.
+# ===========================================================================
+
+@_tool(description=(
+    "Per-source freshness: last row date, lag, SLA, and status "
+    "(ok/lagging/stale/historical/retired). CALL THIS FIRST in any analytical "
+    "session -- it is the only way to tell a dead sync from a source that "
+    "legitimately ended. Pass problems_only=true for just the broken ones."
+))
+def get_data_freshness(domain: str | None = None,
+                       problems_only: bool = False) -> dict:
+    return U.get_data_freshness(domain, problems_only)
+
+
+@_tool(description=(
+    "One row per training session across every source, deduplicated. Replaces "
+    "get_workouts / get_strength_workouts / get_whoop_lift_workouts. Includes "
+    "hard_minutes (zone 4+5), strain, HR, and strength volume in one row. "
+    "activity_type is one of strength|conditioning|run|cycle|swim|racquet|"
+    "walk|mobility|sport|other."
+))
+def get_activity(start_date: date, end_date: date,
+                 activity_type: str | None = None,
+                 source: str | None = None,
+                 resistance_only: bool = False,
+                 include_flagged: bool = False) -> dict:
+    return U.get_activity(start_date, end_date, activity_type, source,
+                          resistance_only, include_flagged)
+
+
+@_tool(description=(
+    "Per-exercise volume across every source, on canonical movement names. "
+    "Use this rather than get_activity_sets for Dec 2024 - Aug 2025: Garmin "
+    "exported per-exercise aggregates only, never individual sets. "
+    "exclude_spinal_flexion=true filters loaded lumbar flexion."
+))
+def get_activity_exercises(start_date: date, end_date: date,
+                           exercise: str | None = None,
+                           muscle: str | None = None,
+                           exclude_spinal_flexion: bool = False) -> dict:
+    return U.get_activity_exercises(start_date, end_date, exercise, muscle,
+                                    exclude_spinal_flexion)
+
+
+@_tool(description=(
+    "True per-set detail (reps, load, RPE, per-set HR) across Whoop Strength "
+    "Trainer and Hevy. Garmin has no per-set data -- use get_activity_exercises "
+    "for that window."
+))
+def get_activity_sets(start_date: date, end_date: date,
+                      exercise: str | None = None) -> dict:
+    return U.get_activity_sets(start_date, end_date, exercise)
+
+
+@_tool(description=(
+    "Rolling training adherence: sessions/week over 4, 12 and 26 weeks, current "
+    "streak, longest gap, and below_floor. The 12-week rate is the variable that "
+    "moved first before each abandoned training block, so this is an early "
+    "warning rather than a retrospective."
+))
+def get_adherence(weeks: int = 12, as_of: date | None = None) -> dict:
+    return U.get_adherence(weeks, as_of)
+
+
+@_tool(description=(
+    "Weight and body composition with the measurement METHOD attached "
+    "(dxa|bodpod|bioimpedance|calipers|tape|scale|manual). daily=true gives one "
+    "best reading per day, ranking DXA above everything. daily=false gives every "
+    "raw reading, which is how you check whether a day's sources disagree."
+))
+def get_body_composition(start_date: date, end_date: date,
+                         method: str | None = None,
+                         daily: bool = True,
+                         include_flagged: bool = False) -> dict:
+    return U.get_body_composition(start_date, end_date, method, daily,
+                                  include_flagged)
+
+
+@_tool(description=(
+    "Record a body-composition measurement. This is where a DXA scan goes: "
+    "method='dxa' outranks every other method on read, so it immediately becomes "
+    "the authoritative body-fat number for its date. Accepts weight in kg or lb, "
+    "plus optional lean/fat mass, bone mineral, visceral fat and a regional "
+    "breakdown."
+))
+def log_body_composition(measured_on: str, method: str,
+                         weight_kg: float | None = None,
+                         weight_lb: float | None = None,
+                         body_fat_pct: float | None = None,
+                         lean_mass_kg: float | None = None,
+                         fat_mass_kg: float | None = None,
+                         bone_mineral_kg: float | None = None,
+                         visceral_fat: float | None = None,
+                         region: dict | None = None,
+                         notes: str | None = None) -> dict:
+    return U.log_body_composition(measured_on, method, weight_kg, weight_lb,
+                                  body_fat_pct, lean_mass_kg, fat_mass_kg,
+                                  bone_mineral_kg, visceral_fat, region, notes)
+
+
+@_tool(description=(
+    "Nutrition across Cronometer, Lose It, Cal AI and Apple Health. Daily "
+    "totals by default, every logged item with per_item=true. Each row names "
+    "the source it came from. A missing day means nothing was logged anywhere "
+    "-- check get_data_freshness before reading it as a low-intake day."
+))
+def get_nutrition(start_date: date, end_date: date,
+                  per_item: bool = False,
+                  source: str | None = None) -> dict:
+    return U.get_nutrition(start_date, end_date, per_item, source)
+
+
+@_tool(description=(
+    "Blood draws. One row per physical collection; the same draw reported by "
+    "both Whoop Advanced Labs and the lab's own report is collapsed to one."
+))
+def get_lab_panels(start_date: date | None = None,
+                   end_date: date | None = None,
+                   include_duplicates: bool = False) -> dict:
+    return U.get_lab_panels(start_date, end_date, include_duplicates)
+
+
+@_tool(description=(
+    "Lab values on canonical biomarker keys, so a trend query sees one series "
+    "even when sources spell the analyte differently (alt vs "
+    "alanine_aminotransferase). Filter by biomarker or by category "
+    "(liver|kidney|lipid|metabolic|hematology|thyroid|hormone|inflammation|"
+    "vitamin|electrolyte|autoimmune|muscle). Prefer this over get_lab_results, "
+    "which reads the raw per-source table and will show the same draw twice."
+))
+def get_lab_values(biomarker: str | None = None,
+                   category: str | None = None,
+                   start_date: date | None = None,
+                   end_date: date | None = None,
+                   include_duplicates: bool = False) -> dict:
+    return U.get_lab_results(biomarker, category, start_date, end_date,
+                             include_duplicates)
+
+
+@_tool(description=(
+    "Radiology studies: MRI, CT, X-ray, ultrasound, DEXA -- with impression "
+    "and structured findings."
+))
+def get_imaging(start_date: date | None = None,
+                modality: str | None = None) -> dict:
+    return U.get_imaging(start_date, modality)
+
+
+@_tool(description=(
+    "Day-by-day data coverage per domain (activity, sleep, nutrition, weight) "
+    "plus the contiguous stretches with nothing at all. Use this to find what "
+    "is genuinely missing versus what simply wasn't logged."
+))
+def get_coverage(domain: str | None = None, min_gap_days: int = 4,
+                 start_date: date | None = None) -> dict:
+    return U.get_coverage(domain, min_gap_days, start_date)
+
+
+@_tool(description=(
+    "Readings the quality rules judged implausible -- out-of-range values, "
+    "same-day dispersion, impossible rates of change. Nothing is deleted; these "
+    "rows still exist and are excluded from read paths by default."
+))
+def get_data_quality_flags(start_date: date | None = None,
+                           table_name: str | None = None,
+                           rule: str | None = None) -> dict:
+    return U.get_data_quality_flags(start_date, table_name, rule)
+
+
+@_tool(description=(
+    "Flag a row as suspect by hand. Manual flags survive the automatic "
+    "re-flagging pass, which only clears its own verdicts."
+))
+def flag_data_quality(table_name: str, row_key: str, reason: str,
+                      day: str | None = None, metric: str | None = None,
+                      severity: str = "warn") -> dict:
+    return U.flag_data_quality(table_name, row_key, reason, day, metric, severity)
+
+
+@_tool(description="Clear a data-quality flag -- the reading was real after all.")
+def resolve_data_quality_flag(flag_id: int) -> dict:
+    return U.resolve_data_quality_flag(flag_id)
 
 
 @_tool(description=T.TOOLS["get_daily_summary"]["description"])

@@ -92,6 +92,12 @@ def refresh_mart_whoop_private() -> int:
         return n
 
 
+def _refresh_unified_overlay() -> int:
+    from mart_refresh.unified import refresh_unified_overlay
+
+    return sum(refresh_unified_overlay().values())
+
+
 def refresh_all() -> dict:
     """Returns per-table rowcounts and timings."""
     out: dict = {}
@@ -101,6 +107,12 @@ def refresh_all() -> dict:
             # whoop_private patch must come AFTER mart_daily so it updates a
             # freshly-rebuilt row set.
             ("mart_daily_whoop_private", refresh_mart_whoop_private),
+            # The unified overlay comes after both: it extends the day spine
+            # back to the earliest unified row and rewrites the training,
+            # sleep, nutrition and body columns from the cross-source,
+            # deduplicated, quality-filtered views. Everything the earlier
+            # steps wrote outside those domains is preserved.
+            ("mart_daily_unified", _refresh_unified_overlay),
             ("mart_meal", refresh_mart_meal),
             # mart_body_image_daily must come AFTER mart_daily so the
             # UPDATE step patches a freshly-rebuilt mart_daily row set.

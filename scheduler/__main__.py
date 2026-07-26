@@ -49,15 +49,36 @@ def run_subprocess(module: str, *args: str, chain_mart: bool = True) -> None:
 def build() -> BlockingScheduler:
     sched = BlockingScheduler(timezone=settings.LOCAL_TZ)
 
-    # ---- Whoop public OAuth: RETIRED ---------------------------------------
-    # The public developer-OAuth ingester (ingest_whoop) is no longer scheduled.
-    # Its refresh token rotates and dies, requiring a manual browser re-auth, and
-    # everything it provided now comes from the self-refreshing PRIVATE API
-    # (ingest_whoop_private): recovery/HRV/RHR/strain/steps/calories via trends,
-    # sleep performance/efficiency/consistency via trends, workouts via the strain
-    # feed, and per-set strength via the lift pipeline. The ingest_whoop code is
-    # kept for archival + manual use; re-add a job here if the public API is ever
-    # re-authorized for the richer per-night detail (REM/SWS split, HR zones).
+    # ---- Whoop public OAuth: RESTORED 2026-07-26 ---------------------------
+    # This was retired on the belief that the refresh token dies and needs a
+    # manual browser re-auth. It doesn't -- it refreshes cleanly, and retiring
+    # it is what caused GAP-2: the private strain feed carries sport, strain and
+    # start/end but NOT avg/max HR, kilojoules, or the six-bucket zone split, so
+    # every fact_workout row written while this job was off has NULL zone
+    # minutes. Zone 4+5 minutes were the single most discriminating training
+    # variable in the fat-loss analysis, so that is not an acceptable loss.
+    #
+    # The private API remains the resilience backbone: if this job starts
+    # failing, workouts still land, just without HR detail, and source_health
+    # will show whoop.activity going stale.
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(hour="*/3", minute=10),
+        args=["ingest_whoop", "ingest", "--backfill", "3"],
+        id="whoop_public_3hourly",
+        name="Whoop public API (HR + zone detail) every 3h",
+        max_instances=1,
+        coalesce=True,
+    )
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(day_of_week="sun", hour=6, minute=10),
+        args=["ingest_whoop", "ingest", "--backfill", "400"],
+        id="whoop_public_weekly_backfill",
+        name="Whoop public API Sunday 400-day rebackfill",
+        max_instances=1,
+        coalesce=True,
+    )
 
     # ---- Whoop journal (iPhone-bridge architecture) ------------------------
     # iPhone Shortcut runs at 5:30 AM, POSTs fresh tokens to the webhook.
@@ -207,6 +228,70 @@ def build() -> BlockingScheduler:
         args=["ingest_copilot", "ingest", "--backfill", "1825"],
         id="copilot_nightly",
         name="Copilot nightly 5-year refresh",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # ---- Lose It (export-driven sync) --------------------------------------
+    # Food logging in Lose It stopped 2025-09-05, but weigh-ins continue -- as
+    # of the last export it is the freshest weight source in the warehouse.
+    # The job downloads the account's CSV export and feeds it through the same
+    # loader the manual import used, so it is idempotent by construction.
+    # Deliberately NOT a GWT-RPC client: that surface is pinned to Lose It's
+    # web build and breaks silently on every deploy.
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(hour="*/2", minute=35),
+        args=["ingest_loseit", "ingest"],
+        kwargs={"chain_mart": False},
+        id="loseit_2hourly",
+        name="Lose It export sync (every 2h)",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # ---- Cronometer deep history convergence ------------------------------
+    # Cronometer's mobile API throttles hard and, when throttled, answers 200
+    # with an EMPTY diary rather than an error -- indistinguishable from a day
+    # with nothing logged. --skip-known means each weekly run only spends
+    # requests on days still holding nothing, so successive runs converge
+    # instead of re-paying for the whole range.
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(day_of_week="sat", hour=2, minute=0),
+        args=["ingest_cronometer.history", "--start", "2023-08-01",
+              "--skip-known", "--delay", "1.4"],
+        kwargs={"chain_mart": False},
+        id="cronometer_history_weekly",
+        name="Cronometer history convergence (Saturdays)",
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # ---- Unified layer projection -----------------------------------------
+    # Re-derives fact_activity / fact_sleep_session / fact_nutrition_* /
+    # fact_body_composition / fact_daily_metric from every source, then
+    # deduplicates, flags quality, and refreshes source_health. Must run BEFORE
+    # the mart rebuild, which reads the unified views.
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(hour=4, minute=15),
+        args=["unify", "all"],
+        kwargs={"chain_mart": False},
+        id="unify_nightly",
+        name="Nightly unified-layer projection",
+        max_instances=1,
+        coalesce=True,
+    )
+    # Light intra-day pass so a session logged this morning shows up in the
+    # unified tables the same day.
+    sched.add_job(
+        run_subprocess,
+        CronTrigger(hour="*/4", minute=40),
+        args=["unify", "all"],
+        kwargs={"chain_mart": False},
+        id="unify_4hourly",
+        name="Unified-layer projection (every 4h)",
         max_instances=1,
         coalesce=True,
     )

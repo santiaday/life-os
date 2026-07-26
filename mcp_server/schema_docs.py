@@ -632,12 +632,28 @@ SCHEMA_DOCS: dict = {
         "preferred_table_for_daily_grain": "Always start with mart_daily for any daily-grain question. fact_* tables are for per-event detail.",
     },
     "session_prelude": (
+        "CALL `get_data_freshness()` FIRST in any analytical session. It "
+        "returns one row per source with its last row date, lag, SLA and "
+        "status, and it is the only way to tell a broken sync from a source "
+        "that legitimately ended. Reading a nutrition gap as 'he barely ate' "
+        "when the real answer is 'nothing was logged that week' is the single "
+        "most expensive mistake available here. "
+        "\n\n"
+        "Then prefer the UNIFIED tools — get_activity, get_activity_sets, "
+        "get_activity_exercises, get_nutrition, get_body_composition, "
+        "get_lab_values, get_adherence — over the per-source ones "
+        "(get_workouts, get_strength_workouts, get_whoop_lift_*, get_food_log). "
+        "The unified tools read cross-source, deduplicated, quality-filtered "
+        "tables; the per-source tools each see one vendor's slice and will "
+        "double-count a session or a blood draw recorded by two systems. "
+        "See get_schema_docs()['unified_layer'] for the full map. "
+        "\n\n"
         "If the user asks about RECENT data (today, this week, latest, "
-        "current balance, etc.) call `refresh_data(source='all')` BEFORE "
-        "anything else. The cron only runs every few hours, so without a "
-        "refresh you may be analyzing stale data. For purely historical "
-        "questions (e.g. 'how was my recovery in March?') you can skip the "
-        "refresh — historical data doesn't change."
+        "current balance, etc.) call `refresh_data(source='all')` too. The "
+        "cron only runs every few hours, so without a refresh you may be "
+        "analyzing stale data. For purely historical questions (e.g. 'how was "
+        "my recovery in March?') you can skip the refresh — historical data "
+        "doesn't change."
     ),
     "write_workflows": {
         "write_to_the_database": (
@@ -907,8 +923,66 @@ SCHEMA_DOCS: dict = {
             "(lag 1). Use correlate_metrics with lag_range=[0,7]."
         ),
     },
+    "unified_layer": {
+        "read_this_first": (
+            "Every health/training/nutrition source now lands in ONE canonical "
+            "schema in SI units (kg, meters, seconds), tagged with its source. "
+            "Prefer the unified tables and their vw_* views over the per-source "
+            "fact_* tables — the per-source tables each hold one vendor's slice "
+            "and will show the same session or blood draw more than once."
+        ),
+        "start_every_session_with": (
+            "get_data_freshness(). It is the only way to distinguish a broken "
+            "sync from a source that legitimately ended. `mode` says which: "
+            "live = should keep flowing, historical = a completed one-time "
+            "import (never stale), retired = the source no longer exists."
+        ),
+        "tables": {
+            "fact_activity": "One row per training session, any source. Cluster-deduped: rows describing the same real session share cluster_id and exactly one has is_primary. The primary is enriched with every non-NULL field its siblings have, so it is strictly richer than any single source. Read vw_activity, not this.",
+            "fact_activity_exercise": "Per-exercise rollup. granularity='set' means derived from real per-set rows (Whoop/Hevy); granularity='exercise' means the vendor only exported aggregates (Garmin, Dec 2024 – Aug 2025).",
+            "fact_activity_set": "True per-set rows: reps, weight_kg, rpe, per-set HR. Only Whoop Strength Trainer and Hevy populate this.",
+            "fact_sleep_session": "One row per sleep or nap, any source. Main sleeps cluster by wake day; naps cluster by overlap.",
+            "fact_nutrition_entry": "Per food item across Cronometer, Lose It, Cal AI.",
+            "fact_nutrition_daily": "Daily totals per source. vw_nutrition_daily picks one source per day by precedence.",
+            "fact_body_composition": "Weight/body fat with the METHOD that produced it (dxa|bodpod|bioimpedance|calipers|tape|scale|manual). A DXA and a wrist bioimpedance reading are not interchangeable and are never averaged.",
+            "fact_daily_metric": "Long-format daily metrics (steps, resting_hr, hrv, vo2_max, calories, stress, spo2) per source. vw_daily_metric picks the best source per (day, metric).",
+            "fact_fast": "Fasting windows from Zero.",
+            "fact_lab_panel / fact_lab_measurement": "One row per blood draw, one per analyte, on canonical biomarker_key. The same draw reported by two systems is collapsed.",
+            "fact_imaging": "MRI/CT/X-ray/ultrasound/DEXA with impression and structured findings.",
+            "raw_import": "Immutable JSONB landing for every file import, keyed (source, entity, natural_key). Never transformed. Every canonical table is a pure function of this plus the source fact tables, so `python -m unify all --rebuild` is always safe.",
+            "source_health": "Per-stream registry: mode, SLA, coverage window, last row. Drives vw_data_freshness.",
+            "data_quality_flag": "Implausible readings. Flagged, never deleted — a 239.4 lb reading among eight 176-179 lb readings says something about the scale, and deleting it destroys that evidence. Read paths exclude flagged rows by default.",
+        },
+        "views": {
+            "vw_activity": "One row per real session. Use this, not fact_workout.",
+            "vw_activity_exercise / vw_activity_set": "Cross-source exercise and set detail with canonical movement names, muscle group, and is_spinal_flexion.",
+            "vw_sleep_daily": "One main sleep per day, best source, with naps summarized.",
+            "vw_nutrition_daily": "One row per day, best source, with source_count so you can see when sources disagree.",
+            "vw_body_daily": "One weight + body-fat reading per day. DXA outranks BodPod outranks scale outranks bioimpedance.",
+            "vw_daily_metric": "One value per (day, metric), best source.",
+            "vw_adherence": "Rolling 4/12/26-week sessions per week plus below_floor.",
+            "vw_data_freshness": "Per-source status: ok | lagging | stale | historical | retired | no_data.",
+            "vw_coverage_daily": "Day-by-day booleans for has_activity / has_sleep / has_nutrition / has_weight, with the contributing sources.",
+        },
+        "units": (
+            "Canonical tables are SI: kilograms, meters, seconds. Views expose "
+            "convenience columns (duration_min, weight_lb, asleep_hours) for "
+            "display. Vendor units were converted once, at the adapter boundary: "
+            "Garmin exports grams, milliseconds and CENTIMETERS; Whoop trends "
+            "report weight in pounds; Zero is UTC seconds."
+        ),
+        "gotchas": {
+            "garmin_has_no_sets": "Garmin's export carries per-exercise aggregates only. For Dec 2024 – Aug 2025 use get_activity_exercises; get_activity_sets will be empty.",
+            "whoop_body_composition": "Whoop's BODY_COMPOSITION trend is LEAN MASS percentage, not body fat. It is converted on ingest (body_fat = 100 - lean).",
+            "cronometer_throttling": "Cronometer's mobile API answers HTTP 200 with an EMPTY diary when rate-limited, which looks identical to a day with nothing logged. The history backfill throttles deliberately and converges over repeated runs.",
+            "loseit_times_are_fabricated": "Lose It's export has no clock time, only a meal name. Entries are placed at a representative hour per meal; ordering within a day is real, the minute is not.",
+            "zero_rhr_is_empty": "All 1,707 Zero resting-HR records export as 0, and every caloric_intake timestamp is zeroed to 0001-01-01. Both are vendor export defects; the rows are landed in raw_import but not projected.",
+            "nutrition_gaps_are_real": "A missing nutrition day means nothing was logged anywhere, not that a sync broke. Confirm with get_data_freshness before reading it as a low-intake day.",
+        },
+    },
     "performance_tips": {
-        "prefer_mart_daily": "For any daily-grain question (recovery, sleep, spend trends), mart_daily already has the joins done — one query, no expression-evaluation overhead.",
+        "prefer_unified_views": "For training, sleep, nutrition and body questions, read vw_activity / vw_sleep_daily / vw_nutrition_daily / vw_body_daily. They are already deduplicated across sources and exclude quality-flagged rows.",
+        "prefer_mart_daily": "For any daily-grain question (recovery, sleep, spend trends), mart_daily already has the joins done — one query, no expression-evaluation overhead. Its training/sleep/nutrition/body columns are now written from the unified views and carry provenance columns (activity_sources, sleep_source, nutrition_source, weight_method).",
         "lag_sweeps_in_one_call": "Use correlate_metrics with lag_range=[min,max] (up to 21 lags) instead of N separate calls. Returns the best-magnitude lag plus per-lag stats.",
         "narrow_with_account": "Spending questions about specific cards: pass account_id (exact) or account=substring on get_spending / get_transactions instead of pulling all transactions and filtering client-side.",
         "use_compute_couple_owed": "For 'who owes whom on these specific cards' questions, compute_couple_owed is one call. Don't combine list_account_owners + get_transactions + Python.",
