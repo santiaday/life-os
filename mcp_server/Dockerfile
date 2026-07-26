@@ -67,6 +67,12 @@ COPY ingest_hevy ./ingest_hevy
 COPY ingest_pushpress ./ingest_pushpress
 COPY coach ./coach
 COPY mart_refresh ./mart_refresh
+# The unified data layer. get_coverage reads unify.coverage, and the lab/imaging
+# write tools project straight through via unify.sources.labs so a panel
+# uploaded in chat is queryable immediately rather than at the next unify run.
+# Both imports are lazy, so omitting this package lets the server start and
+# then fail at call time — copy it.
+COPY unify ./unify
 
 EXPOSE 8080
 ENTRYPOINT ["python", "-m", "mcp_server"]

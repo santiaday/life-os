@@ -55,6 +55,13 @@ COPY ingest_whoop_labs ./ingest_whoop_labs
 # subprocesses were removed.
 COPY mart_refresh ./mart_refresh
 COPY calendar_sync ./calendar_sync
+# Unified layer: the `unify all` job runs 4-hourly and nightly, before the mart
+# rebuild that reads its views.
+COPY unify ./unify
+# ingest_loseit downloads the account's CSV export and hands it to the same
+# loader the manual import used, so it needs ingest_files alongside it.
+COPY ingest_files ./ingest_files
+COPY ingest_loseit ./ingest_loseit
 COPY scheduler ./scheduler
 
 ENTRYPOINT ["python", "-m", "scheduler"]
