@@ -99,10 +99,9 @@ def main() -> int:
     set_env_values(env, values)
     print(f"local .env updated ({env})")
 
-    if not args.local_only:
-        if push_to_droplet(values) != 0:
-            print("droplet update FAILED — local .env was still updated")
-            return 1
+    if not args.local_only and push_to_droplet(values) != 0:
+        print("droplet update FAILED — local .env was still updated")
+        return 1
 
     print("\nlocal check:")
     check(local=True)
