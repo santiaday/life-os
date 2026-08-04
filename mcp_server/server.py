@@ -1061,15 +1061,27 @@ def get_write_audit(limit: int = 50, table: str | None = None) -> dict:
 
 # ---- write / refresh tools ------------------------------------------------
 @_tool(description=(
-    "Pull fresh data from one or all sources, then rebuild the mart. Call "
-    "this at the START of a chat session if the user is asking about recent "
-    "data so analysis isn't on stale numbers. Default source='all' refreshes "
-    "Whoop (public + private), Whoop journal, Calendar, Cronometer, Copilot, "
-    "then mart. Pass a single source name (whoop|whoop_journal|whoop_private|"
-    "calendar|cronometer|copilot|mart) to scope it."
+    "Pull fresh data from one or all sources, then rebuild the unified layer "
+    "and mart. Runs in the BACKGROUND and returns a job_id immediately — poll "
+    "get_refresh_status(job_id). source ∈ all|whoop|whoop_journal|"
+    "whoop_private|calendar|cronometer|copilot|pushpress|loseit|unify|mart. "
+    "'all' takes several minutes. CHECK get_data_freshness() FIRST — the "
+    "scheduler already refreshes everything every few hours, so most sessions "
+    "need no refresh at all, and a targeted single source beats 'all'. "
+    "wait=true blocks up to timeout_seconds (max 120) for a single fast source."
 ))
-def refresh_data(source: str = "all") -> dict:
-    return W.refresh_data(source)
+def refresh_data(source: str = "all", wait: bool = False,
+                 timeout_seconds: int = 60) -> dict:
+    return W.refresh_data(source, wait, timeout_seconds)
+
+
+@_tool(description=(
+    "Progress of a background refresh started by refresh_data: which leg it is "
+    "on, and the per-source result once finished. Omit job_id for the 5 most "
+    "recent jobs."
+))
+def get_refresh_status(job_id: str | None = None) -> dict:
+    return W.get_refresh_status(job_id)
 
 
 # ---- PushPress (programmed gym workouts) ----------------------------------

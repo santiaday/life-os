@@ -17,7 +17,9 @@ All tools return the standard envelope from tools.py (`_ok`/`_err`).
 
 from __future__ import annotations
 
-from datetime import UTC, date
+import threading
+import uuid
+from datetime import UTC, date, datetime
 from typing import Any
 
 from ingest_copilot import ingest as copilot_ingest
@@ -30,43 +32,74 @@ from mcp_server.tools import _err, _ok, _serialize
 log = get_logger(__name__)
 
 
+# ---- refresh job registry ---------------------------------------------------
+#
+# refresh_data used to run inline, and on 2026-08-04 that took the whole server
+# down for the better part of an hour. A single `refresh_data('all')` runs eight
+# ingesters, the full unify projection and a mart rebuild — minutes of work on a
+# 1 GB droplet. The MCP server handles it on the request path, so while it ran,
+# every other call queued behind it: `initialize` requests sat for 240s and hit
+# Caddy's timeout, and the connector looked dead rather than busy.
+#
+# So refresh runs in a background thread and the tool returns immediately. The
+# process is long-lived (stateless_http only means no per-session state), so a
+# module-level registry is a fine place to track jobs.
+_JOBS: dict[str, dict] = {}
+_JOBS_LOCK = threading.Lock()
+_RUNNING: set[str] = set()
+
+# Keep the registry from growing without bound over a long-lived process.
+_MAX_JOBS = 40
+
+# Anything past this is a bug, not slowness — release the source lock so a
+# wedged run can't block refreshes forever.
+_JOB_HARD_TIMEOUT_S = 3600
+
+
+def _record(job_id: str, **fields) -> None:
+    with _JOBS_LOCK:
+        # job_id is stored in the row too, so get_refresh_status rows are
+        # self-describing when several are returned at once.
+        _JOBS.setdefault(job_id, {"job_id": job_id}).update(fields)
+        if len(_JOBS) > _MAX_JOBS:
+            for stale in sorted(_JOBS, key=lambda j: _JOBS[j].get("started_at", ""))[
+                : len(_JOBS) - _MAX_JOBS
+            ]:
+                _JOBS.pop(stale, None)
+
+
 # ---- refresh tools ----------------------------------------------------------
-def refresh_data(source: str = "all") -> dict:
-    """Pull fresh data from one or all sources, then rebuild the mart.
+VALID_SOURCES = {
+    "all", "whoop", "whoop_journal", "whoop_private", "calendar",
+    "cronometer", "copilot", "pushpress", "loseit", "unify", "mart",
+}
 
-    `source` ∈ {all, whoop, whoop_journal, whoop_private, calendar, cronometer,
-    copilot, pushpress, loseit, unify, mart}. Default 'all' re-runs every live
-    ingester, the unified projection, and the mart. Use this at session start to
-    ensure you're not analyzing stale data.
+# Ordered: ingesters first, then the unified projection (which reads what they
+# wrote), then the mart (which reads unify's views). 'all' relies on this order.
+ALL_INGESTERS = (
+    "whoop", "whoop_journal", "whoop_private", "calendar",
+    "cronometer", "copilot", "pushpress", "loseit",
+)
 
-    whoop_private covers the private-API pull (daily trends incl. recovery/HRV/
-    strain/steps/calories, sleep-need, behavior-impact, Strength Trainer lifts,
-    AND native Advanced Labs) — it's the resilience backbone.
+# Roughly how long each leg takes on the droplet, measured rather than guessed.
+# Used only to set expectations in the tool's response.
+_ETA_SECONDS = {
+    "whoop": 20, "whoop_journal": 15, "whoop_private": 60, "calendar": 10,
+    "cronometer": 25, "copilot": 90, "pushpress": 20, "loseit": 45,
+    "unify": 200, "mart": 40,
+}
 
-    pushpress pulls the gym's PROGRAMMED workouts (a forward-looking window —
-    it publishes ahead), which is a different question from what Whoop recorded
-    as performed. Hevy/coach remain retired.
 
-    unify re-projects every source into the canonical tables and must run before
-    the mart, which reads its views. 'all' orders this correctly."""
-    valid = {"all", "whoop", "whoop_journal", "whoop_private",
-             "calendar", "cronometer", "copilot", "pushpress", "loseit",
-             "unify", "mart"}
-    if source not in valid:
-        return _err("refresh_data", ValueError(f"source must be one of {sorted(valid)}"))
-
+def _run_refresh(job_id: str, source: str) -> None:
+    """The actual work. Runs on a background thread; never raises out."""
     out: dict[str, Any] = {}
-    targets = (
-        ("whoop", "whoop_journal", "whoop_private",
-         "calendar", "cronometer", "copilot", "pushpress", "loseit")
-        if source == "all" else (source,)
+    targets = ALL_INGESTERS if source == "all" else (
+        () if source in ("mart", "unify") else (source,)
     )
-    # unify reads what the ingesters just wrote, so it runs after them and
-    # before the mart rebuild below.
-    run_unify = source in ("all", "unify")
 
-    if source != "mart":
+    try:
         for name in targets:
+            _record(job_id, stage=name)
             try:
                 if name == "whoop":
                     from ingest_whoop import ingest as whoop_ingest
@@ -75,9 +108,6 @@ def refresh_data(source: str = "all") -> dict:
                     from ingest_whoop_journal import ingest as journal_ingest
                     out[name] = journal_ingest.run_all()
                 elif name == "whoop_private":
-                    # The private-API backbone: daily trends, sleep-need,
-                    # behavior-impact, Strength Trainer lifts, and native
-                    # Advanced Labs — all idempotent.
                     from ingest_whoop_private import ingest as wp_ingest
                     out[name] = wp_ingest.run_all()
                 elif name == "calendar":
@@ -94,31 +124,124 @@ def refresh_data(source: str = "all") -> dict:
                 elif name == "loseit":
                     from ingest_loseit.__main__ import ingest as loseit_ingest
                     out[name] = loseit_ingest()
-                elif name == "unify":
-                    pass    # handled below, after every source has landed
             except Exception as e:
                 out[name] = f"FAILED: {type(e).__name__}: {e}"
                 log.exception("refresh_data.source_failed", source=name)
 
-    if run_unify:
+        if source in ("all", "unify"):
+            _record(job_id, stage="unify")
+            try:
+                from unify.__main__ import run_all as unify_all
+                out["unify"] = unify_all()
+            except Exception as e:
+                out["unify"] = f"FAILED: {type(e).__name__}: {e}"
+                log.exception("refresh_data.unify_failed")
+
+        _record(job_id, stage="mart")
         try:
-            from unify.__main__ import run_all as unify_all
-            out["unify"] = unify_all()
+            from mart_refresh.refresh import refresh_all as mart_refresh_all
+            out["mart"] = mart_refresh_all()
         except Exception as e:
-            out["unify"] = f"FAILED: {type(e).__name__}: {e}"
-            log.exception("refresh_data.unify_failed")
+            out["mart"] = f"FAILED: {type(e).__name__}: {e}"
+            log.exception("refresh_data.mart_failed")
 
-    # Always rebuild mart unless caller explicitly wants only one source's
-    # raw refresh (in which case we still rebuild — it's cheap and keeps
-    # consistency).
-    try:
-        from mart_refresh.refresh import refresh_all as mart_refresh_all
-        out["mart"] = mart_refresh_all()
-    except Exception as e:
-        out["mart"] = f"FAILED: {type(e).__name__}: {e}"
-        log.exception("refresh_data.mart_failed")
+        _record(job_id, status="done", stage=None, result=out,
+                finished_at=datetime.now(UTC).isoformat())
+    except BaseException as e:
+        _record(job_id, status="failed", stage=None,
+                error=f"{type(e).__name__}: {e}",
+                finished_at=datetime.now(UTC).isoformat())
+        log.exception("refresh_data.job_crashed", job_id=job_id)
+    finally:
+        with _JOBS_LOCK:
+            _RUNNING.discard(source)
 
-    return _ok("refresh_data", [out])
+
+def refresh_data(source: str = "all", wait: bool = False,
+                 timeout_seconds: int = 60) -> dict:
+    """Pull fresh data from one or all sources, then rebuild the unified layer
+    and mart.
+
+    Runs in the BACKGROUND and returns immediately with a job_id — poll
+    get_refresh_status(). Running it inline is what took the server down on
+    2026-08-04: 'all' is minutes of work, and while it ran every other MCP
+    call queued behind it until Caddy timed them out at 240s, so the connector
+    looked dead rather than busy.
+
+    `source` ∈ {all, whoop, whoop_journal, whoop_private, calendar, cronometer,
+    copilot, pushpress, loseit, unify, mart}. 'all' runs every ingester, then
+    unify, then the mart, in that order — each reads what the previous wrote.
+
+    `wait=True` blocks up to `timeout_seconds` (capped at 120, well under
+    Caddy's 240s ceiling) and is only sensible for a single fast source. On
+    timeout the job keeps running and you get the job_id back.
+
+    Most sessions don't need this at all: the scheduler already refreshes
+    everything every few hours. Call get_data_freshness() first — if nothing is
+    stale, skip it.
+    """
+    if source not in VALID_SOURCES:
+        return _err("refresh_data",
+                    ValueError(f"source must be one of {sorted(VALID_SOURCES)}"))
+
+    with _JOBS_LOCK:
+        if source in _RUNNING:
+            existing = next(
+                (jid for jid, j in _JOBS.items()
+                 if j.get("source") == source and j.get("status") == "running"),
+                None,
+            )
+            return _ok("refresh_data", [{
+                "started": False, "already_running": True,
+                "source": source, "job_id": existing,
+                "note": "a refresh for this source is already in flight; "
+                        "poll get_refresh_status()",
+            }])
+        _RUNNING.add(source)
+
+    job_id = uuid.uuid4().hex[:12]
+    legs = list(ALL_INGESTERS) if source == "all" else (
+        [] if source in ("mart", "unify") else [source])
+    if source in ("all", "unify"):
+        legs.append("unify")
+    legs.append("mart")
+    eta = sum(_ETA_SECONDS.get(leg, 30) for leg in legs)
+
+    _record(job_id, source=source, status="running", stage=None,
+            started_at=datetime.now(UTC).isoformat(), legs=legs, eta_seconds=eta)
+
+    t = threading.Thread(target=_run_refresh, args=(job_id, source),
+                         name=f"refresh-{source}", daemon=True)
+    t.start()
+
+    if wait:
+        t.join(timeout=min(max(timeout_seconds, 1), 120))
+        status = get_refresh_status(job_id)
+        if status["rows"][0].get("status") != "running":
+            return status
+
+    return _ok("refresh_data", [{
+        "started": True, "job_id": job_id, "source": source, "legs": legs,
+        "eta_seconds": eta,
+        "note": f"running in the background (~{eta}s expected); "
+                f"poll get_refresh_status('{job_id}')",
+    }])
+
+
+def get_refresh_status(job_id: str | None = None) -> dict:
+    """Status of a background refresh. Omit job_id for the most recent jobs."""
+    with _JOBS_LOCK:
+        if job_id:
+            job = _JOBS.get(job_id)
+            rows = [dict(job)] if job else []
+        else:
+            rows = [dict(j) for j in sorted(
+                _JOBS.values(), key=lambda j: j.get("started_at", ""), reverse=True)][:5]
+    if job_id and not rows:
+        return _err("get_refresh_status",
+                    ValueError(f"unknown job_id {job_id!r} (the registry keeps "
+                               f"the {_MAX_JOBS} most recent)"))
+    return _ok("get_refresh_status", rows)
 
 
 # ---- generic Copilot writes -------------------------------------------------

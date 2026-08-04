@@ -161,6 +161,15 @@ GOTCHAS = {
         "and apple_health.metric go stale with it — one broken link, three "
         "stale streams. Don't debug them separately."
     ),
+    "dont_refresh_reflexively": (
+        "refresh_data('all') is minutes of work — eight ingesters, the unify "
+        "projection, then the mart. It runs in the background and returns a "
+        "job_id, but it still loads a 1 GB droplet. The scheduler already "
+        "refreshes everything every few hours, so check get_data_freshness() "
+        "FIRST and refresh only the source that is actually stale. On "
+        "2026-08-04 an inline refresh_data held the whole MCP server for the "
+        "better part of an hour and every other call timed out behind it."
+    ),
     "whoop_cycles_are_not_days": (
         "Whoop cycles run bedtime-to-bedtime. mart_daily re-buckets each cycle "
         "to the local date of its midpoint. Don't join raw cycle timestamps to "
