@@ -594,13 +594,94 @@ SCHEMA_DOCS: dict = {
                 "copilot_type": "Copilot's internal type field (regular | transfer | etc.).",
             },
         },
+        "dim_possession": {
+            "purpose": (
+                "Every physical possession — clothing, footwear, bags, tech, "
+                "toiletries and gear in ONE table. A charger and a t-shirt "
+                "both need 'where is it' and 'did I take it'. Prefer the view "
+                "mart_possession_summary, which adds wear counts and cost per "
+                "wear."
+            ),
+            "grain": "1 row per owned item.",
+            "columns": {
+                "kind": "possession_kind enum: top | bottom | outerwear | footwear | headwear | accessory | bag | tech | toiletry | gear | other.",
+                "subcategory": "Controlled per kind via a composite FK to dim_possession_subcategory, so 'running shoe' can only attach to footwear.",
+                "primary_color / secondary_color": "FK to dim_color. A value outside the vocabulary is REJECTED, not coerced — call get_possession_vocab before writing.",
+                "colorway": "Free text: the manufacturer's colour name as sold ('Alloy/Ivory'). Not a second guess at primary_color.",
+                "formality": "1 gym/lounge, 2 casual, 3 smart casual, 4 business, 5 formal. Items where it doesn't apply are 2.",
+                "warmth": "1 hot-weather only, 3 three-season, 5 deep winter. Items with no thermal role are 1.",
+                "weather_tags": "text[] of rain | wind | cold | heat | humid — what the item is BUILT for, not what it tolerates.",
+                "status": "possession_status enum: active | purge_candidate | listed | donated | sold | retired. Nothing is deleted; a donated item keeps its wear history so cost-per-wear stays honest.",
+                "cost_cents": "Nullable and left NULL when unknown. A fabricated price poisons cost_per_wear for every item that has a real one.",
+                "photo_original / photo_cutout / photo_thumb": "Supabase Storage paths, never blobs. Originals are kept forever so segmentation can be re-run with a better model.",
+                "photo_hash": "sha256 of the original bytes. UNIQUE — this is what makes re-running the batch ingest a no-op instead of a second closet.",
+                "tag_confidence": "jsonb {field: 0..1} from the vision tagger. Drives which fields the review queue asks a human to check.",
+                "reviewed": "FALSE until a human confirmed the auto-tags. Treat brand/colour/material on unreviewed rows as provisional and SAY SO.",
+            },
+        },
+        "mart_possession_summary": {
+            "purpose": (
+                "Per-possession wear economics. A view over dim_possession + "
+                "fact_wear. Read this rather than joining fact_wear by hand."
+            ),
+            "grain": "1 row per possession.",
+            "columns": {
+                "wear_count_30 / _90 / _365 / _all": "Wear counts over trailing windows.",
+                "last_worn_on, days_since_worn": "NULL when never worn — which is the strongest purge signal there is, not missing data.",
+                "cost_per_wear_cents": "cost_cents / wear_count_all. NULL when either is unknown.",
+                "is_stale": "active, acquired >180d ago, and unworn for >180d.",
+                "location_path": "Full nested container path, e.g. 'Bedroom / Under bed / Bin A'.",
+            },
+        },
+        "fact_wear": {
+            "purpose": "One row per (possession, day, context) that an item was used.",
+            "grain": "1 row per item per day per context.",
+            "columns": {
+                "context": "work | gym | travel | social | home.",
+                "worn_on": "Local date.",
+                "_unique": "UNIQUE (possession_id, worn_on, context) — log_wear is safe to call twice.",
+            },
+        },
+        "dim_storage_location": {
+            "purpose": (
+                "Containers, nested via parent_id: Bedroom -> Under bed -> "
+                "Bin A. Query vw_storage_location for the resolved full_path "
+                "and active item count."
+            ),
+            "grain": "1 row per container.",
+            "columns": {
+                "kind": "closet | bin | drawer | bag | rack | shelf | offsite.",
+                "parent_id": "Self-reference. get_storage_contents is nested by default, so asking about a parent finds what's in its children.",
+            },
+        },
+        "dim_trip": {
+            "purpose": "A trip and its destination legs; drives build_packing_list.",
+            "grain": "1 row per trip.",
+            "columns": {
+                "destinations": (
+                    "jsonb array of {city, from, to, weather_tags[], low_c, "
+                    "high_c, formality:[min,max], international}. "
+                    "build_packing_list UNIONS these into one requirement set — "
+                    "a warm rainy city plus a cold one needs both a shell and a "
+                    "warm layer, not the average."
+                ),
+            },
+        },
+        "bridge_trip_packing": {
+            "purpose": "What was shortlisted, packed, actually worn, or carried unused on a trip.",
+            "grain": "1 row per (trip, possession).",
+            "columns": {
+                "state": "candidate | packed | worn | unused. Recording worn/unused after the trip is what makes the next list better.",
+                "slot": "Which packing requirement selected the item.",
+            },
+        },
         "mcp_write_audit": {
             "purpose": (
-                "Forensic log of every generic DB write Claude makes via the "
-                "db_* / execute_sql tools — including dry-runs, blocked attempts, "
-                "and failures. The semantic write tools (log_food etc.) are not "
-                "logged here; only the generic write layer is. Use get_write_audit "
-                "to review or reconstruct changes."
+                "Forensic log of every DB write Claude makes via the generic "
+                "db_* / execute_sql tools and via the possession write tools — "
+                "including dry-runs, blocked attempts, and failures. The older "
+                "semantic write tools (log_food etc.) are not logged here. Use "
+                "get_write_audit to review or reconstruct changes."
             ),
             "grain": "1 row per write-tool call.",
             "columns": {

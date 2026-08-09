@@ -26,6 +26,8 @@ from mcp_server import cronometer_write_tools as CW
 from mcp_server import db_write_tools as DBW
 from mcp_server import hevy_write_tools as HW
 from mcp_server import labs_write_tools as LW
+from mcp_server import possession_tools as PT
+from mcp_server import possession_write_tools as PW
 from mcp_server import tools as T
 from mcp_server import unified_tools as U
 from mcp_server import whoop_lift_write_tools as LWT
@@ -80,6 +82,15 @@ mcp = FastMCP(
         "\n"
         "PushPress = the gym's PROGRAMMED workout, not what he did. Never "
         "present it as performed training.\n"
+        "\n"
+        "POSSESSIONS are a separate inventory of physical things -- clothing, "
+        "tech, toiletries, bags, gear in one table. get_possessions, "
+        "get_storage_contents ('what's under my bed'), get_purge_candidates, "
+        "and build_packing_list, which returns selected items plus gaps[] "
+        "where nothing owned fills a required slot. Call get_possession_vocab "
+        "before any possession write: colour and subcategory are foreign keys. "
+        "Rows with reviewed=false carry unconfirmed vision-tagger output -- "
+        "say so rather than presenting the brand as fact.\n"
         "\n"
         "READ AND WRITE. ask_sql for any SELECT; db_describe_table / db_insert "
         "/ db_update / db_upsert / execute_sql for mutations; log_food, "
@@ -1423,6 +1434,235 @@ def get_tool_stats(window_minutes: int = 1440) -> dict:
     }
 
 
+# ===========================================================================
+# Possession inventory.
+#
+# Photo-backed record of every physical thing owned. Three jobs: decide what
+# to purge, know which container a thing is in, and build a trip packing list
+# with gap analysis. Clothing, tech, toiletries and gear share one table --
+# a charger and a t-shirt both need "where is it" and "did I take it".
+# ===========================================================================
+
+@_tool(description=(
+    "Filtered inventory of physical possessions (clothing, tech, toiletries, "
+    "bags, gear -- one table). Filters: kind, status, location name, "
+    "primary_color, unworn_since (days), reviewed, weather_tags, free-text "
+    "search. Defaults to status='active'. Rows carry wear counts, days since "
+    "worn and cost per wear. Call get_possession_vocab first for legal values."
+))
+def get_possessions(kind: str | None = None, status: str | None = "active",
+                    location: str | None = None, primary_color: str | None = None,
+                    unworn_since: int | None = None, reviewed: bool | None = None,
+                    search: str | None = None, weather_tags: list[str] | None = None,
+                    limit: int = 100) -> dict:
+    return PT.get_possessions(kind, status, location, primary_color,
+                              unworn_since, reviewed, search, weather_tags, limit)
+
+
+@_tool(description=(
+    "One possession in full: every column, its complete wear history, cost per "
+    "wear, and the outfits and trips it belongs to."
+))
+def get_possession(possession_id: str) -> dict:
+    return PT.get_possession(possession_id)
+
+
+@_tool(description=(
+    "What is inside a storage container -- solves 'what's under my bed'. "
+    "Nested by default, so asking about 'Under bed' also returns what's in "
+    "'Bin A' inside it. Also returns the child containers."
+))
+def get_storage_contents(location_name: str, include_nested: bool = True) -> dict:
+    return PT.get_storage_contents(location_name, include_nested)
+
+
+@_tool(description=(
+    "The storage tree: every container with its full path, nesting depth and "
+    "active item count."
+))
+def get_locations() -> dict:
+    return PT.get_locations()
+
+
+@_tool(description=(
+    "Purge candidates: active items not worn in `min_days_unworn` days, "
+    "ordered by days idle then cost per wear -- so a rarely-worn expensive "
+    "item outranks an old t-shirt. Use set_possession_status to act on them."
+))
+def get_purge_candidates(min_days_unworn: int = 180, limit: int = 50) -> dict:
+    return PT.get_purge_candidates(min_days_unworn, limit)
+
+
+@_tool(description="Saved outfits with their member items. Filter by formality or weather_tags.")
+def get_outfits(formality: int | None = None,
+                weather_tags: list[str] | None = None) -> dict:
+    return PT.get_outfits(formality, weather_tags)
+
+
+@_tool(description=(
+    "Trips with their destinations and packing progress. upcoming_only=true "
+    "for trips that haven't ended."
+))
+def get_trips(upcoming_only: bool = False) -> dict:
+    return PT.get_trips(upcoming_only)
+
+
+@_tool(description=(
+    "THE packing tool. Selects items for a trip and reports `gaps[]` -- "
+    "required weather/formality slots nothing in the inventory can fill. "
+    "Requirements union across destinations (a warm city plus a cold one "
+    "needs both layers). `weather_profile` is an optional dict or list of "
+    "dicts with weather_tags, low_c, high_c, formality [min,max], "
+    "international -- merged on top of the trip's stored destinations. "
+    "persist=true writes the selection into the trip's packing list."
+))
+def build_packing_list(trip_id: str, weather_profile: dict | list | None = None,
+                       persist: bool = False) -> dict:
+    return PT.build_packing_list(trip_id, weather_profile, persist)
+
+
+@_tool(description=(
+    "Gap analysis with no trip attached: 'if I went somewhere rainy and cold "
+    "for five nights, what would I be missing?' Returns unfilled slots with "
+    "the reason and what to buy."
+))
+def find_wardrobe_gaps(weather_tags: list[str] | None = None,
+                       formality: int | None = None, nights: int = 5) -> dict:
+    return PT.find_wardrobe_gaps(weather_tags, formality, nights)
+
+
+@_tool(description=(
+    "Legal values for every controlled possession field: kinds, statuses, "
+    "colours, per-kind subcategories, weather tags, patterns. CALL THIS "
+    "BEFORE WRITING a possession -- colour and subcategory are foreign keys, "
+    "so an off-vocabulary value is rejected, not coerced."
+))
+def get_possession_vocab() -> dict:
+    return PT.get_possession_vocab()
+
+
+@_tool(description=(
+    "Inventory counts: total, active, unreviewed, purge candidates, items "
+    "with no location, and total cost of active items."
+))
+def get_possession_stats() -> dict:
+    return PT.get_possession_stats()
+
+
+# ---- possession writes (all audited to mcp_write_audit) --------------------
+
+@_tool(description=(
+    "Record that items were worn. Idempotent per (item, date, context) -- "
+    "calling twice logs once. worn_on defaults to today. context is one of "
+    "work | gym | travel | social | home."
+))
+def log_wear(possession_ids: list[str], worn_on: str | None = None,
+             context: str | None = None, city: str | None = None) -> dict:
+    return PW.log_wear(possession_ids, worn_on, context, city)
+
+
+@_tool(description=(
+    "Add a possession by hand (no photo). name, kind and primary_color are "
+    "required; primary_color and (kind, subcategory) must come from "
+    "get_possession_vocab. Lands reviewed=true because a human supplied it."
+))
+def log_possession(name: str, kind: str, primary_color: str,
+                   subcategory: str | None = None, brand: str | None = None,
+                   colorway: str | None = None, secondary_color: str | None = None,
+                   pattern: str | None = None, material: str | None = None,
+                   size: str | None = None, formality: int | None = None,
+                   warmth: int | None = None, weather_tags: list[str] | None = None,
+                   packed_volume_l: float | None = None, weight_g: float | None = None,
+                   acquired_on: str | None = None, cost_cents: int | None = None,
+                   retailer: str | None = None, condition: int | None = None,
+                   status: str = "active", location: str | None = None,
+                   notes: str | None = None, reviewed: bool = True) -> dict:
+    return PW.log_possession(
+        name, kind, primary_color, subcategory, brand, colorway, secondary_color,
+        pattern, material, size, formality, warmth, weather_tags, packed_volume_l,
+        weight_g, acquired_on, cost_cents, retailer, condition, status, location,
+        notes, reviewed)
+
+
+@_tool(description=(
+    "Edit one possession. `patch` is a map of column -> value; pass "
+    "`location` as a container name to move it. Setting reviewed=true is how "
+    "an item leaves the review queue."
+))
+def update_possession(possession_id: str, patch: dict) -> dict:
+    return PW.update_possession(possession_id, patch)
+
+
+@_tool(description=(
+    "Bulk status change: active | purge_candidate | listed | donated | sold | "
+    "retired. Nothing is deleted -- a donated item keeps its wear history so "
+    "cost-per-wear stays honest."
+))
+def set_possession_status(possession_ids: list[str], status: str) -> dict:
+    return PW.set_possession_status(possession_ids, status)
+
+
+@_tool(description=(
+    "Move items into a storage container, addressed by name (case-insensitive, "
+    "partial names accepted when unambiguous)."
+))
+def move_possession(possession_ids: list[str], location_name: str) -> dict:
+    return PW.move_possession(possession_ids, location_name)
+
+
+@_tool(description=(
+    "Create a storage container. kind is closet | bin | drawer | bag | rack | "
+    "shelf | offsite. `parent` nests it inside another container."
+))
+def create_storage_location(name: str, kind: str, parent: str | None = None,
+                            notes: str | None = None) -> dict:
+    return PW.create_storage_location(name, kind, parent, notes)
+
+
+@_tool(description=(
+    "Save a set of items as a named outfit. Re-using a name replaces that "
+    "outfit's contents."
+))
+def create_outfit(name: str, possession_ids: list[str],
+                  formality: int | None = None,
+                  weather_tags: list[str] | None = None,
+                  notes: str | None = None) -> dict:
+    return PW.create_outfit(name, possession_ids, formality, weather_tags, notes)
+
+
+@_tool(description=(
+    "Create a trip. `destinations` is a list of "
+    '{city, from, to, weather_tags[], low_c, high_c, formality:[min,max], '
+    'international} -- build_packing_list unions them into one requirement set.'
+))
+def create_trip(name: str, start_date: str, end_date: str,
+                destinations: list[dict] | None = None,
+                notes: str | None = None) -> dict:
+    return PW.create_trip(name, start_date, end_date, destinations, notes)
+
+
+@_tool(description=(
+    "Mark one item candidate | packed | worn | unused for a trip. 'worn' and "
+    "'unused' recorded after the trip are what make the next packing list "
+    "better."
+))
+def set_packing_state(trip_id: str, possession_id: str, state: str,
+                      qty: int = 1) -> dict:
+    return PW.set_packing_state(trip_id, possession_id, state, qty)
+
+
+@_tool(description=(
+    "Extend the controlled vocabulary: color + color_family to add a colour, "
+    "or kind + subcategory to add a subcategory. Do this rather than working "
+    "around a rejected value -- the vocabulary is what keeps colour filters "
+    "meaningful."
+))
+def add_possession_vocab(color: str | None = None, color_family: str | None = None,
+                         kind: str | None = None, subcategory: str | None = None,
+                         notes: str | None = None) -> dict:
+    return PW.add_possession_vocab(color, color_family, kind, subcategory, notes)
+
+
 # ---- FastAPI shell ----------------------------------------------------------
 def _make_lifespan(mcp_asgi):
     """Combined lifespan: ours (logging, DB pool teardown) + FastMCP's session
@@ -1588,6 +1828,16 @@ def build_app() -> FastAPI:
         app.include_router(body_image_router)
     except ImportError as e:  # pragma: no cover
         log.warning("mcp.body_image_router_unavailable", error=str(e))
+
+    # Possession inventory: JSON API + the review/grid/purge/packing UI.
+    # Shares the LIFELOG_API_TOKEN bearer; /possessions/* is in
+    # PUBLIC_PREFIXES so the path-secret rewriter leaves the Authorization
+    # header alone. See possessions/RUNBOOK.md.
+    try:
+        from possessions.routes import router as possessions_router
+        app.include_router(possessions_router)
+    except ImportError as e:  # pragma: no cover
+        log.warning("mcp.possessions_router_unavailable", error=str(e))
 
     # Whoop journal token-refresh callback. Sits under /lifelog/whoop/* so it
     # inherits the path-secret exemption, but uses its own X-Shared-Secret

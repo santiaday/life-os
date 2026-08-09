@@ -164,6 +164,27 @@ class Settings(BaseSettings):
     BODY_IMAGE_CALIBRATION_SLOPE: float = 1.0
     BODY_IMAGE_CALIBRATION_OFFSET: float = 0.0
 
+    # ---- Possession inventory ----------------------------------------------
+    # Photo-backed inventory of physical possessions. Shares SUPABASE_URL /
+    # SUPABASE_SERVICE_KEY with body_image; its own private bucket holds
+    # original / cutout / thumb under one prefix each.
+    POSSESSIONS_BUCKET: str = "possessions"
+    # Vision auto-tagger. Opus 5 by default: the expensive failure here is a
+    # confidently-wrong brand or colour on 300 items, which costs an evening
+    # of review to unpick — far more than the model delta on a one-time batch.
+    # Drop to claude-sonnet-5 if re-tagging repeatedly.
+    POSSESSION_TAGGER_MODEL: str = "claude-opus-5"
+    # Reading one photo isn't multi-step reasoning; 'medium' keeps a 300-item
+    # batch affordable without measurably worse tags. Raise if brand/label
+    # legibility on hard shots matters more than cost.
+    POSSESSION_TAGGER_EFFORT: str = "medium"
+    # Fields the model reports below this confidence are flagged in the review
+    # queue and are the only ones Tab walks.
+    POSSESSION_REVIEW_CONFIDENCE_THRESHOLD: float = 0.7
+    # rembg model for background removal (ingest CLI only; never loaded by the
+    # API container). isnet-general-use is the best free general segmenter.
+    POSSESSIONS_REMBG_MODEL: str = "isnet-general-use"
+
     # ---- Coach (WOD parser + load recommender) ----------------------------
     # The coach service uses Anthropic API directly (Sonnet 4.5 for parsing
     # plaintext WOD descriptions, Haiku for movement-name fuzzy matching).

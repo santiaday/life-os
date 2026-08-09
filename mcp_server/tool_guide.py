@@ -231,12 +231,63 @@ RECIPES = {
     ],
 }
 
+POSSESSIONS = {
+    "what_it_is": (
+        "A photo-backed inventory of physical things — clothing, footwear, "
+        "bags, tech, toiletries and gear in ONE table. Separate from the "
+        "health/finance warehouse: nothing here joins to mart_daily."
+    ),
+    "the_three_questions": {
+        "what should I get rid of": "get_purge_candidates(min_days_unworn=180)",
+        "where is X / what's in that bin": "get_storage_contents('Under bed')",
+        "what do I pack": "build_packing_list(trip_id, weather_profile?)",
+    },
+    "before_any_write": (
+        "Call get_possession_vocab. primary_color and (kind, subcategory) are "
+        "FOREIGN KEYS — an off-vocabulary value is rejected, not coerced. "
+        "That constraint is the only thing keeping navy / Navy / dark blue / "
+        "midnight from coexisting and making every colour filter a lie. When "
+        "a value genuinely doesn't exist, add it with add_possession_vocab "
+        "rather than working around it."
+    ),
+    "reviewed_false_means_provisional": (
+        "Rows with reviewed=false carry raw vision-tagger output. Brand is the "
+        "field to distrust most — the prompt forbids guessing from silhouette, "
+        "but the value has still not been confirmed by a human. Say 'the "
+        "tagger read it as Patagonia, unconfirmed', never 'it's a Patagonia'."
+    ),
+    "the_gaps_array_is_the_point": (
+        "build_packing_list returns selected items AND gaps[] — required "
+        "weather/formality slots nothing owned can fill. Lead with the gaps. "
+        "A packing list that quietly omits the rain shell you don't own is "
+        "worse than no list, because it reads as complete. essential=true "
+        "means buy or borrow before departure."
+    ),
+    "requirements_union_across_cities": (
+        "A trip to a warm rainy city and a cold one needs BOTH a shell and a "
+        "warm layer. build_packing_list unions the destination profiles; never "
+        "average them yourself when reasoning about a multi-leg trip."
+    ),
+    "nothing_is_deleted": (
+        "Purging moves status active -> purge_candidate -> listed -> donated/"
+        "sold. Wear history stays, which is what keeps cost-per-wear honest "
+        "after the item is gone. Never DELETE a possession row to 'get rid of' "
+        "something."
+    ),
+    "cost_per_wear_needs_both_halves": (
+        "cost_per_wear_cents is NULL when cost_cents is unknown or the item "
+        "has never been logged as worn. Most items will have neither at first. "
+        "Do not present a NULL as £0 or as 'infinitely expensive'."
+    ),
+}
+
 GUIDE = {
     "start_here": START_HERE,
     "tool_selection": TOOL_SELECTION,
     "gotchas": GOTCHAS,
     "writing": WRITING,
     "recipes": RECIPES,
+    "possessions": POSSESSIONS,
 }
 
 TOPICS = sorted(GUIDE)

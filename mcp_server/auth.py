@@ -29,7 +29,7 @@ PUBLIC_PATHS = {"/health"}
 # their own bearer auth (LIFELOG_API_TOKEN) per route via
 # Depends(require_token) — the MCP path-secret rewriter must skip these
 # prefixes entirely so the iOS Authorization header reaches the route.
-PUBLIC_PREFIXES = ("/webhooks/", "/lifelog/", "/body-image/")
+PUBLIC_PREFIXES = ("/webhooks/", "/lifelog/", "/body-image/", "/possessions/")
 MCP_MOUNT = "/mcp"
 
 

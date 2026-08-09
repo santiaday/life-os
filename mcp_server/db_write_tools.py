@@ -34,12 +34,12 @@ don't cover (DDL, multi-table CTEs, ON CONFLICT, window updates, ...).
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from psycopg import sql
 from psycopg.types.json import Jsonb
 
+from lifeos_core.audit import record_write
 from lifeos_core.db import conn
 from lifeos_core.logging import get_logger
 from mcp_server.sql_safety import (
@@ -74,47 +74,11 @@ def _coerce_param(v: Any) -> Any:
     return v
 
 
-def _params_summary(params: Any) -> Any:
-    """Trim params for the audit log so we don't store megabytes."""
-    if params is None:
-        return None
-    try:
-        s = json.dumps(params, default=str)
-    except (TypeError, ValueError):
-        s = str(params)
-    return (s[:4000] + "…") if len(s) > 4000 else s
-
-
-def _audit(
-    *, tool: str, operation: str | None, target_table: str | None,
-    statement: str, params: Any, affected_rows: int | None,
-    dry_run: bool, committed: bool, ok: bool, error: str | None,
-    result_sample: list | None,
-) -> None:
-    """Record a write attempt. Never raises — audit failure must not break the
-    tool. Runs in its own transaction so it persists even when the main
-    statement rolled back."""
-    try:
-        with conn() as c:
-            with c.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO mcp_write_audit
-                      (tool, operation, target_table, statement, params,
-                       affected_rows, dry_run, committed, ok, error, result_sample)
-                    VALUES (%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s,%s,%s::jsonb)
-                    """,
-                    [
-                        tool, operation, target_table, statement,
-                        # Always valid JSON (a truncated raw string would fail ::jsonb).
-                        json.dumps({"params": _params_summary(params)}),
-                        affected_rows, dry_run, committed, ok, error,
-                        json.dumps(result_sample, default=str) if result_sample is not None else None,
-                    ],
-                )
-            c.commit()
-    except Exception as e:
-        log.warning("db_write.audit_failed", error=str(e), tool=tool)
+# The audit writer moved to lifeos_core.audit so every service that mutates
+# the warehouse — these generic tools, the semantic write tools, and the
+# possession module — records through one implementation instead of a copy
+# each. Signature is unchanged; call sites here are untouched.
+_audit = record_write
 
 
 def _render(statement: Any, c) -> str:
