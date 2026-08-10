@@ -23,8 +23,12 @@ dependencies = [
     "apscheduler>=3.10",
     # Logging
     "structlog>=24.4",
-    # MCP
-    "mcp>=1.0",
+    # MCP. Pinned below 2.0: mcp 2.0 removed `mcp.server.fastmcp` (the server
+    # class moved to mcp.server.mcpserver with a different API), so an
+    # unpinned `>=1.0` turns any rebuild into a crash-looping container the
+    # moment a major version ships. Lifting this is a port of
+    # mcp_server/server.py, not a version bump.
+    "mcp>=1.0,<2",
     # Stats
     "scipy>=1.14",
     "numpy>=2.1",
