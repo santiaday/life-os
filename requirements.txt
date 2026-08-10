@@ -11,7 +11,8 @@ pydantic>=2.9
 pydantic-settings>=2.5
 apscheduler>=3.10
 structlog>=24.4
-mcp>=1.0
+# Pinned below 2.0 — mcp 2.0 removed mcp.server.fastmcp. See pyproject.toml.
+mcp>=1.0,<2
 scipy>=1.14
 numpy>=2.1
 google-api-python-client>=2.140

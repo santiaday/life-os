@@ -24,6 +24,10 @@ COPY --from=cron_builder /out/cronometer-export /usr/local/bin/cronometer-export
 RUN chmod +x /usr/local/bin/cronometer-export
 
 COPY pyproject.toml ./
+# NOTE: this list is a hand-maintained third copy of the dependency set
+# (pyproject.toml and requirements.txt are the others). Version constraints
+# must be changed in all three — pinning only pyproject.toml does nothing to
+# what actually gets installed here.
 RUN pip install --upgrade pip \
  && pip install \
       'psycopg[binary,pool]>=3.2' \
@@ -35,7 +39,7 @@ RUN pip install --upgrade pip \
       'pydantic-settings>=2.5' \
       'structlog>=24.4' \
       'sentry-sdk>=2.14' \
-      'mcp>=1.0' \
+      'mcp>=1.0,<2' \
       'scipy>=1.14' \
       'numpy>=2.1' \
       'apscheduler>=3.10' \
@@ -56,6 +60,13 @@ COPY lifeos_core ./lifeos_core
 COPY mcp_server ./mcp_server
 COPY lifelog_api ./lifelog_api
 COPY body_image ./body_image
+# Possession inventory. mcp_server.possession_tools imports it at module
+# level, so omitting this package doesn't degrade to a missing route — the
+# server fails to import and the container crash-loops. Its heavy dependency
+# (rembg, for background removal) is deliberately absent: segmentation runs
+# from the CLI on the machine holding the photos, and possessions.ingest is
+# never imported by the API surface.
+COPY possessions ./possessions
 COPY ingest_whoop ./ingest_whoop
 COPY ingest_calendar ./ingest_calendar
 COPY ingest_cronometer ./ingest_cronometer
