@@ -1,0 +1,7 @@
+-- 0063 (applied 2026-10-20): Hevy moves off the droplet to edge fn `hevy-sync` on pg_cron.
+-- See supabase/functions/hevy-sync. Tables: ingest_cursor, dim_exercise_vocab
+-- (unify/taxonomy.ALIAS_TO_KEY, 336 aliases, loaded separately), function
+-- merge_apple_watch_overlaps(date) that demotes Apple Watch duplicates of
+-- higher-priority sessions and donates HR/kcal to them.
+-- 0064: cron_key in Vault (hash in ingest_token 'cron'), call_edge_function(),
+-- cron job 'hevy-sync' at :07 and :37.
