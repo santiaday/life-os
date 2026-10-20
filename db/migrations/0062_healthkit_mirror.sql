@@ -1,0 +1,4 @@
+-- 0062 (applied 2026-10-20): hk_sample, hk_hourly, hk_workout, hk_object,
+-- hk_activity_summary, hk_characteristics + vw_hk_coverage. Written by edge fn
+-- health-mirror from the Tributary app. RLS on, anon/authenticated revoked,
+-- SELECT granted to lifeos_mcp. Full DDL lives in the Supabase migration history.
