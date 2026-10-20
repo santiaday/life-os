@@ -38,6 +38,65 @@ async function sha256(x: string) {
   return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+// Vendor biomarker ids (FK target of fact_lab_result) and canonical aliases.
+let vocab: { at: number; ids: Set<string>; alias: Map<string, string> } | null = null;
+async function loadVocab() {
+  if (vocab && Date.now() - vocab.at < 5 * 60_000) return vocab;
+  const ids = new Set<string>();
+  const alias = new Map<string, string>();
+  const a = await sb.from("dim_lab_biomarker").select("biomarker_id");
+  if (a.error) throw new Error(`dim_lab_biomarker: ${a.error.message}`);
+  for (const r of a.data ?? []) ids.add(r.biomarker_id);
+  const b = await sb.from("dim_biomarker_alias").select("alias,biomarker_key");
+  if (!b.error) for (const r of b.data ?? []) alias.set(r.alias, r.biomarker_key);
+  vocab = { at: Date.now(), ids, alias };
+  return vocab;
+}
+
+// Lab-method suffixes Quest/LabCorp append to analyte names.
+const SUFFIXES = [/_lc_ms_ms$/, /_ms_ms$/, /_ms$/, /_calc(ulated)?$/, /_serum$/, /_plasma$/, /_whole_blood$/,
+  /_blood$/, /_ia$/, /_eia$/, /_immunoassay$/, /_direct$/, /_automated$/, /_auto$/];
+
+function candidates(slugged: string): string[] {
+  const out = [slugged];
+  let cur = slugged;
+  for (let i = 0; i < 3; i++) {
+    const next = SUFFIXES.reduce((x, re) => x.replace(re, ""), cur);
+    if (next === cur || !next) break;
+    out.push(next);
+    cur = next;
+  }
+  return out;
+}
+
+/** Existing vendor id when one matches (directly or via a known alias), else
+ *  the slug itself, registered so the FK holds and nothing is ever dropped. */
+async function resolveBiomarkers(rows: Json[]) {
+  const v = await loadVocab();
+  const fresh = new Map<string, Json>();
+  for (const r of rows) {
+    const slugged = r.biomarker_id as string;
+    let hit: string | null = null;
+    for (const c of candidates(slugged)) {
+      if (v.ids.has(c)) { hit = c; break; }
+      const key = v.alias.get(c);
+      if (key && v.ids.has(key)) { hit = key; break; }
+    }
+    if (hit) {
+      r.biomarker_id = hit;
+    } else if (!fresh.has(slugged)) {
+      fresh.set(slugged, { biomarker_id: slugged, title: r.reference_ranges?.name ?? slugged, unit: r.unit,
+        category: "Health Records", notes: `Auto-added from Apple Health Records (LOINC ${r.reference_ranges?.loinc ?? "?"})` });
+    }
+  }
+  if (fresh.size) {
+    const { error } = await sb.from("dim_lab_biomarker").upsert([...fresh.values()], { onConflict: "biomarker_id", ignoreDuplicates: true });
+    if (error) throw new Error(`dim_lab_biomarker: ${error.message}`);
+    for (const k of fresh.keys()) v.ids.add(k);
+  }
+  return fresh.size;
+}
+
 const OUT = new Set(["H", "HH", "HU", "L", "LL", "LU", "A", "AA", "POS", ">", "<"]);
 
 async function labRow(o: Json, now: string): Promise<Json | null> {
@@ -128,8 +187,18 @@ Deno.serve(async (req) => {
         uuid: o.uuid, type: o.type, start_ts: o.start, end_ts: o.end, source_name: o.source ?? null,
         source_bundle: o.bundle ?? null, device: o.device ?? null, data: o.data ?? {}, synced_at: now,
       })), "uuid");
+      // Labs are derived data: a mapping problem is logged and reported but
+      // never fails the request, so the app's mirror keeps moving.
       const labs = (await Promise.all(objects.map((o) => labRow(o, now)))).filter(Boolean) as Json[];
-      if (labs.length) out.labs = await upsert("fact_lab_result", labs, "test_id,biomarker_id");
+      if (labs.length) {
+        try {
+          out.new_biomarkers = await resolveBiomarkers(labs);
+          out.labs = await upsert("fact_lab_result", labs, "test_id,biomarker_id");
+        } catch (e) {
+          console.error("labs", e);
+          out.lab_errors = labs.length;
+        }
+      }
     }
     const summaries = (body.summaries ?? []) as Json[];
     if (summaries.length) {
