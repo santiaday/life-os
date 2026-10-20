@@ -2,7 +2,8 @@
 //
 // Receives Tributary's full HealthKit export and writes it verbatim to the
 // hk_* tables (see migration 0062). Upserts by HealthKit UUID, applies deletes,
-// never transforms values beyond what the app already canonicalised.
+// never transforms values beyond what the app already canonicalised — except
+// Health Records lab Observations, which are also written to fact_lab_result.
 // Auth: same x-ingest-key as apple-health-ingest.
 
 import { createClient } from "jsr:@supabase/supabase-js@2";
@@ -22,6 +23,61 @@ async function upsert(table: string, rows: Json[], onConflict: string) {
     if (error) throw new Error(`${table}: ${error.message}`);
   }
   return list.length;
+}
+
+// ---- Health Records → life-os labs -------------------------------------
+// FHIR lab Observations (DSTU2 or R4) become fact_lab_result rows with
+// source 'apple_health'; unify/labs.py projects them into fact_lab_measurement
+// and clusters them with Whoop / external panels from the same draw.
+
+const slug = (x: string) =>
+  x.toLowerCase().normalize("NFKD").replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 80);
+
+async function sha256(x: string) {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(x));
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+const OUT = new Set(["H", "HH", "HU", "L", "LL", "LU", "A", "AA", "POS", ">", "<"]);
+
+async function labRow(o: Json, now: string): Promise<Json | null> {
+  const d = o.data ?? {};
+  if (!String(d.clinical_type ?? "").includes("LabResultRecord")) return null;
+  const r = d.resource;
+  if (!r || typeof r !== "object" || r.resourceType !== "Observation") return null;
+  if (["entered-in-error", "cancelled"].includes(r.status)) return null;
+  const when: string = r.effectiveDateTime ?? r.effectivePeriod?.start ?? r.issued ?? o.start;
+  if (!when) return null;
+  const codings: Json[] = r.code?.coding ?? [];
+  const name: string = r.code?.text || codings.find((c) => c.display)?.display || d.display_name;
+  if (!name) return null;
+  const loinc = codings.find((c) => String(c.system ?? "").includes("loinc"))?.code ?? null;
+  const vq = r.valueQuantity;
+  const num = typeof vq?.value === "number" ? vq.value : null;
+  const text = num === null
+    ? (r.valueString ?? r.valueCodeableConcept?.text ?? r.valueCodeableConcept?.coding?.[0]?.display ??
+      (r.valueBoolean !== undefined ? String(r.valueBoolean) : null) ?? (vq ? `${vq.comparator ?? ""}${vq.value ?? ""}` : null))
+    : null;
+  const rr = (r.referenceRange ?? [])[0] ?? {};
+  const interp = Array.isArray(r.interpretation) ? r.interpretation[0] : r.interpretation;
+  const flag = String(interp?.coding?.[0]?.code ?? "").toUpperCase();
+  const provider = o.source ?? "Health Records";
+  const date = String(when).slice(0, 10);
+  return {
+    test_id: `apple_health:${slug(provider)}:${date}`,
+    test_date: date,
+    biomarker_id: slug(name),
+    value_numeric: num,
+    value_text: text ?? (num !== null ? String(num) : null),
+    unit: vq?.unit ?? vq?.code ?? null,
+    status_type: OUT.has(flag) ? "OUT_OF_RANGE" : null,
+    source: "apple_health",
+    lab_provider: provider,
+    reference_ranges: { low: rr.low?.value ?? null, high: rr.high?.value ?? null, text: rr.text ?? null,
+      loinc, name, flag: flag || null, fhir_id: d.fhir_id ?? null, hk_uuid: o.uuid },
+    source_row_hash: await sha256(`apple_health:${o.uuid}`),
+    updated_at: now,
+  };
 }
 
 Deno.serve(async (req) => {
@@ -72,6 +128,8 @@ Deno.serve(async (req) => {
         uuid: o.uuid, type: o.type, start_ts: o.start, end_ts: o.end, source_name: o.source ?? null,
         source_bundle: o.bundle ?? null, device: o.device ?? null, data: o.data ?? {}, synced_at: now,
       })), "uuid");
+      const labs = (await Promise.all(objects.map((o) => labRow(o, now)))).filter(Boolean) as Json[];
+      if (labs.length) out.labs = await upsert("fact_lab_result", labs, "test_id,biomarker_id");
     }
     const summaries = (body.summaries ?? []) as Json[];
     if (summaries.length) {
@@ -84,12 +142,16 @@ Deno.serve(async (req) => {
     }
     const deleted = ((body.deleted ?? []) as string[]).filter(Boolean);
     if (deleted.length) {
-      for (let i = 0; i < deleted.length; i += 500) {
-        const chunk = deleted.slice(i, i + 500);
+      for (let i = 0; i < deleted.length; i += 150) {
+        // Kept small: PostgREST puts the id list in the URL.
+        const chunk = deleted.slice(i, i + 150);
         for (const t of ["hk_sample", "hk_workout", "hk_object"]) {
           const { error } = await sb.from(t).delete().in("uuid", chunk);
           if (error) throw new Error(`${t} delete: ${error.message}`);
         }
+        const hashes = await Promise.all(chunk.map((u) => sha256(`apple_health:${u}`)));
+        const { error } = await sb.from("fact_lab_result").delete().in("source_row_hash", hashes);
+        if (error) throw new Error(`fact_lab_result delete: ${error.message}`);
       }
       out.deleted = deleted.length;
     }
