@@ -4,7 +4,7 @@
 // export version 2) and lands them in the life-os canonical tables:
 //
 //   metrics  -> fact_daily_metric     (source 'apple_watch', one row per day/metric)
-//   sleep    -> fact_sleep_session    (one row per night, day = local wake date)
+//   sleep    -> fact_sleep_session    (one row per night, day = NY date of start - 6h)
 //   weight   -> fact_body_composition (method 'scale')
 //   workouts -> fact_activity
 //   whole batch -> raw_import (immutable, natural key = sha256 of body)
@@ -33,6 +33,18 @@ const toIso = (s: string) => {
   const m = s.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})\s*([+-]\d{2}):?(\d{2})$/);
   return m ? `${m[1]}T${m[2]}${m[3]}:${m[4]}` : new Date(s).toISOString();
 };
+// life-os convention: activity day = America/New_York date of start; sleep day =
+// NY date of (start - 6h), i.e. the evening the night began (matches Whoop).
+const nyFmt = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York", year: "numeric", month: "2-digit", day: "2-digit" });
+const nyDay = (iso: string, shiftHours = 0) => nyFmt.format(new Date(Date.parse(iso) + shiftHours * 3600_000));
+
+// Before the Apple Watch (Oct 23 2026) Health only held Whoop echoes and iPhone
+// estimates. Keep what the phone measures itself; drop the rest so Whoop's
+// data isn't duplicated under a second source.
+const WATCH_SINCE = "2026-10-23";
+const PRE_WATCH_METRICS = new Set(["steps", "distance", "flights_climbed", "daylight_minutes"]);
+const preWatch = (day: string) => day < WATCH_SINCE;
+
 const num = (v: unknown) => (typeof v === "number" && isFinite(v) ? v : typeof v === "string" && v !== "" && isFinite(+v) ? +v : null);
 
 // HAE metric name -> [canonical metric, unit, aggregation, converter]
@@ -168,9 +180,9 @@ Deno.serve(async (req) => {
           const end = String(p.sleepEnd ?? p.inBedEnd ?? p.date);
           const h = (k: string) => { const v = num(p[k]); return v == null ? null : Math.round(v * 3600); };
           const asleep = h("totalSleep") ?? h("asleep");
-          // Tributary sends the wake day as `date`; sleepEnd can fall on the previous
-          // calendar day (evening naps, time-zone changes), so prefer `date`.
-          const day = p.date ? localDay(String(p.date)) : localDay(end);
+          // Day = evening the night began, NY time (Whoop's convention), not the wake date.
+          const day = nyDay(toIso(start), -6);
+          if (preWatch(day)) continue;
           const inBedS = h("inBed");
           const tib = inBedS && inBedS > 0 ? inBedS : Math.round((Date.parse(toIso(end)) - Date.parse(toIso(start))) / 1000);
           sleepRows.push({
@@ -193,6 +205,7 @@ Deno.serve(async (req) => {
       for (const p of pts) {
         if (!p.date) continue;
         const day = localDay(String(p.date));
+        if (preWatch(day)) continue;
         for (const [k, metric, agg] of [["Avg", "avg_hr_day", "avg"], ["Max", "max_hr_day", "max"], ["Min", "min_hr", "min"]] as const) {
           const v = num(p[k]);
           if (v == null) continue;
@@ -212,6 +225,7 @@ Deno.serve(async (req) => {
       const v = num(p.qty);
       if (v == null || !p.date) continue;
       const day = localDay(String(p.date));
+      if (preWatch(day) && !PRE_WATCH_METRICS.has(metric)) continue;
       const key = `${day}|${metric}`;
       const e = daily.get(key) ?? { metric, unit, agg, vals: [], day };
       e.vals.push(conv(v, units));
@@ -220,7 +234,7 @@ Deno.serve(async (req) => {
   }
 
   // unaggregated sleep segments -> one session per wake day
-  for (const [day, segs] of sleepSegs) {
+  for (const [, segs] of sleepSegs) {
     let start = Infinity, end = -Infinity;
     const s: Record<string, number> = {};
     for (const p of segs) {
@@ -231,6 +245,8 @@ Deno.serve(async (req) => {
     }
     const asleep = (s.core ?? 0) + (s.deep ?? 0) + (s.rem ?? 0) + (s.asleep ?? 0) + (s.unspecified ?? 0);
     const tib = s["in bed"] ?? s.inbed ?? (end - start) / 1000;
+    const day = nyDay(new Date(start).toISOString(), -6);
+    if (preWatch(day)) continue;
     sleepRows.push({
       sleep_uid: `${SOURCE}:${day}`, source: SOURCE, source_sleep_id: day,
       start_ts: new Date(start).toISOString(), end_ts: new Date(end).toISOString(), day, is_nap: false,
@@ -264,6 +280,7 @@ Deno.serve(async (req) => {
   const actRows: Row[] = workouts.flatMap((w) => {
     const startRaw = String(w.start ?? ""), endRaw = String(w.end ?? "");
     if (!startRaw) return [];
+    if (preWatch(nyDay(toIso(startRaw)))) return [];
     const name = String(w.name ?? "Workout");
     const [type, resist] = activityType(name);
     const id = String(w.id ?? `${startRaw}|${name}`);
@@ -275,7 +292,7 @@ Deno.serve(async (req) => {
     const dist = w.distance;
     return [{
       activity_uid: `${SOURCE}:${id}`, source: SOURCE, source_activity_id: id,
-      start_ts: start, end_ts: end, day: localDay(startRaw), duration_s: dur,
+      start_ts: start, end_ts: end, day: nyDay(start), duration_s: dur,
       activity_type: type, vendor_type: name.toLowerCase(), name, is_resistance: resist,
       avg_hr: Math.round(qty(w.avgHeartRate) ?? qty(hr.avg) ?? 0) || null,
       max_hr: Math.round(qty(w.maxHeartRate) ?? qty(hr.max) ?? 0) || null,
