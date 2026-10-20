@@ -39,6 +39,8 @@ const num = (v: unknown) => (typeof v === "number" && isFinite(v) ? v : typeof v
 type Agg = "avg" | "sum" | "min" | "max" | "last";
 const METRICS: Record<string, [string, string, Agg, (v: number, u: string) => number]> = {
   heart_rate_variability: ["hrv_sdnn", "ms", "avg", (v) => v],
+  // Computed on-device by Tributary from overnight beat-to-beat series; same statistic as Whoop.
+  heart_rate_variability_rmssd: ["hrv", "ms", "avg", (v) => v],
   resting_heart_rate: ["resting_hr", "bpm", "avg", (v) => v],
   walking_heart_rate_average: ["walking_hr", "bpm", "avg", (v) => v],
   respiratory_rate: ["respiratory_rate", "rpm", "avg", (v) => v],
