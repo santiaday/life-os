@@ -55,14 +55,43 @@ async function loadVocab() {
 
 // Lab-method suffixes Quest/LabCorp append to analyte names.
 const SUFFIXES = [/_lc_ms_ms$/, /_ms_ms$/, /_ms$/, /_calc(ulated)?$/, /_serum$/, /_plasma$/, /_whole_blood$/,
-  /_blood$/, /_ia$/, /_eia$/, /_immunoassay$/, /_direct$/, /_automated$/, /_auto$/];
+  /_blood$/, /_ia$/, /_eia$/, /_immunoassay$/, /_direct$/, /_automated$/, /_auto$/, /_total$/];
 
+// Quest names with no alias in the catalogue, pinned to the id already used for them.
+const PINNED: Record<string, string> = {
+  chol_hdlc_ratio: "cholesterol_hdl_ratio",
+  sed_rate_by_modified_westergren: "erythrocyte_sedimentation_rate_esr_westergren",
+  saturation: "iron_percent_saturation",
+  iron_binding_capacity: "total_iron_binding_capacity",
+};
+
+/** Numeric bounds from FHIR low/high, or from text such as "<8.0", "> OR = 40", "3.5-5.3". */
+function bounds(rr: Json): { low: number | null; high: number | null } {
+  let low = typeof rr.low?.value === "number" ? rr.low.value : null;
+  let high = typeof rr.high?.value === "number" ? rr.high.value : null;
+  const t = String(rr.text ?? "").replace(/,/g, "").trim();
+  if (low === null && high === null && t) {
+    let m;
+    if ((m = t.match(/^([\d.]+)\s*-\s*([\d.]+)/))) { low = +m[1]; high = +m[2]; }
+    else if ((m = t.match(/^<\s*(?:or\s*=\s*)?=?\s*([\d.]+)/i))) high = +m[1];
+    else if ((m = t.match(/^>\s*(?:or\s*=\s*)?=?\s*([\d.]+)/i))) low = +m[1];
+  }
+  return { low: Number.isFinite(low as number) ? low : null, high: Number.isFinite(high as number) ? high : null };
+}
+
+// Report plumbing that Quest ships as Observations; not results.
+const ADMIN = /^(comment|comments|copy_ies_sent_to|copies_sent_to|tracking_house_account|note|notes|fasting|specimen|reviewed_by|performing_lab|report_status|lab_comment)/;
+
+/** The slug, then one method suffix stripped at a time
+ *  (testosterone_total_ms → testosterone_total → testosterone). */
 function candidates(slugged: string): string[] {
   const out = [slugged];
   let cur = slugged;
-  for (let i = 0; i < 3; i++) {
-    const next = SUFFIXES.reduce((x, re) => x.replace(re, ""), cur);
-    if (next === cur || !next) break;
+  for (let i = 0; i < 4; i++) {
+    const re = SUFFIXES.find((x) => x.test(cur));
+    if (!re) break;
+    const next = cur.replace(re, "");
+    if (!next || next === cur) break;
     out.push(next);
     cur = next;
   }
@@ -76,11 +105,18 @@ async function resolveBiomarkers(rows: Json[]) {
   const fresh = new Map<string, Json>();
   for (const r of rows) {
     const slugged = r.biomarker_id as string;
-    let hit: string | null = null;
-    for (const c of candidates(slugged)) {
+    let hit: string | null = PINNED[slugged] ?? null;
+    // Prefer an existing vendor id; otherwise any name the canonical alias
+    // table knows (unify maps it onto the shared biomarker key).
+    for (const c of hit ? [] : candidates(slugged)) {
       if (v.ids.has(c)) { hit = c; break; }
-      const key = v.alias.get(c);
-      if (key && v.ids.has(key)) { hit = key; break; }
+    }
+    for (const c of hit ? [] : candidates(slugged)) {
+      if (v.alias.has(c)) { hit = c; break; }
+    }
+    if (hit && !v.ids.has(hit) && !fresh.has(hit)) {
+      fresh.set(hit, { biomarker_id: hit, title: r.reference_ranges?.name ?? hit, unit: r.unit,
+        category: "Health Records", notes: `Auto-added from Apple Health Records (LOINC ${r.reference_ranges?.loinc ?? "?"})` });
     }
     if (hit) {
       r.biomarker_id = hit;
@@ -109,7 +145,7 @@ async function labRow(o: Json, now: string): Promise<Json | null> {
   if (!when) return null;
   const codings: Json[] = r.code?.coding ?? [];
   const name: string = r.code?.text || codings.find((c) => c.display)?.display || d.display_name;
-  if (!name) return null;
+  if (!name || ADMIN.test(slug(name))) return null;
   const loinc = codings.find((c) => String(c.system ?? "").includes("loinc"))?.code ?? null;
   const vq = r.valueQuantity;
   const num = typeof vq?.value === "number" ? vq.value : null;
@@ -120,6 +156,10 @@ async function labRow(o: Json, now: string): Promise<Json | null> {
   const rr = (r.referenceRange ?? [])[0] ?? {};
   const interp = Array.isArray(r.interpretation) ? r.interpretation[0] : r.interpretation;
   const flag = String(interp?.coding?.[0]?.code ?? "").toUpperCase();
+  const { low, high } = bounds(rr);
+  // Quest sends no interpretation codes, so the range decides when the lab didn't.
+  const outOfRange = OUT.has(flag) ||
+    (num !== null && ((low !== null && num < low) || (high !== null && num > high)));
   const provider = o.source ?? "Health Records";
   const date = String(when).slice(0, 10);
   return {
@@ -129,10 +169,10 @@ async function labRow(o: Json, now: string): Promise<Json | null> {
     value_numeric: num,
     value_text: text ?? (num !== null ? String(num) : null),
     unit: vq?.unit ?? vq?.code ?? null,
-    status_type: OUT.has(flag) ? "OUT_OF_RANGE" : null,
+    status_type: outOfRange ? "OUT_OF_RANGE" : null,
     source: "apple_health",
     lab_provider: provider,
-    reference_ranges: { low: rr.low?.value ?? null, high: rr.high?.value ?? null, text: rr.text ?? null,
+    reference_ranges: { low, high, text: rr.text ?? null,
       loinc, name, flag: flag || null, fhir_id: d.fhir_id ?? null, hk_uuid: o.uuid },
     source_row_hash: await sha256(`apple_health:${o.uuid}`),
     updated_at: now,
@@ -154,6 +194,31 @@ Deno.serve(async (req) => {
   }
   const now = new Date().toISOString();
   const out: Record<string, number> = {};
+  if (body.reprocess_labs === true) {
+    // Rebuild fact_lab_result (source apple_health) from the stored FHIR records.
+    try {
+      const all: Json[] = [];
+      for (let from = 0; ; from += 500) {
+        const { data, error } = await sb.from("hk_object")
+          .select("uuid,start_ts,source_name,data").eq("type", "clinical_record").range(from, from + 499);
+        if (error) throw new Error(error.message);
+        all.push(...(data ?? []));
+        if ((data ?? []).length < 500) break;
+      }
+      const labs = (await Promise.all(all.map((o) => labRow({ uuid: o.uuid, start: o.start_ts, source: o.source_name, data: o.data }, now))))
+        .filter(Boolean) as Json[];
+      vocab = null;
+      out.records = all.length;
+      out.new_biomarkers = await resolveBiomarkers(labs);
+      const del = await sb.from("fact_lab_result").delete().eq("source", "apple_health");
+      if (del.error) throw new Error(del.error.message);
+      out.labs = await upsert("fact_lab_result", labs, "test_id,biomarker_id");
+      return Response.json({ ok: true, ...out });
+    } catch (e) {
+      console.error("reprocess", e);
+      return Response.json({ ok: false, error: String(e) }, { status: 500 });
+    }
+  }
   try {
     const samples = (body.samples ?? []) as Json[];
     if (samples.length) {
