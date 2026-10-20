@@ -88,6 +88,11 @@ function toKcal(v: number, u: string) {
 }
 
 async function upsert(table: string, rows: Row[], onConflict: string) {
+  // Postgres rejects a batch that hits the same conflict key twice; last one wins.
+  const keys = onConflict.split(",");
+  const unique = new Map<string, Row>();
+  for (const r of rows) unique.set(keys.map((k) => String(r[k])).join("|"), r);
+  rows = [...unique.values()];
   for (let i = 0; i < rows.length; i += 500) {
     const { error } = await sb.from(table).upsert(rows.slice(i, i + 500), { onConflict });
     if (error) throw new Error(`${table}: ${error.message}`);
@@ -163,7 +168,9 @@ Deno.serve(async (req) => {
           const end = String(p.sleepEnd ?? p.inBedEnd ?? p.date);
           const h = (k: string) => { const v = num(p[k]); return v == null ? null : Math.round(v * 3600); };
           const asleep = h("totalSleep") ?? h("asleep");
-          const day = localDay(end);
+          // Tributary sends the wake day as `date`; sleepEnd can fall on the previous
+          // calendar day (evening naps, time-zone changes), so prefer `date`.
+          const day = p.date ? localDay(String(p.date)) : localDay(end);
           const inBedS = h("inBed");
           const tib = inBedS && inBedS > 0 ? inBedS : Math.round((Date.parse(toIso(end)) - Date.parse(toIso(start))) / 1000);
           sleepRows.push({
