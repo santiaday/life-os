@@ -9,3 +9,4 @@ id = "c9206d67e1a54f6daec73367f64ae529"
 
 [vars]
 DEFAULT_TZ = "America/New_York"
+DEFAULT_CALENDAR = "Santi"

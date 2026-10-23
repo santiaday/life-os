@@ -7,7 +7,8 @@
 //
 // Bindings: KV  (discovered calendar-home URL)
 // Secrets:  ICLOUD_USERNAME, ICLOUD_APP_PASSWORD, MCP_TOKEN
-// Vars:     DEFAULT_TZ (default America/New_York)
+// Vars:     DEFAULT_TZ (default America/New_York), DEFAULT_CALENDAR (name or
+//           calendar_id used when a tool call names none)
 
 import { DAY, ToolError, mcpHandler, str } from "../../lib/mcp.js";
 import {
@@ -97,6 +98,7 @@ async function listCalendars(env) {
 
 async function resolveCalendar(env, ref) {
   const cals = await listCalendars(env);
+  ref ??= env.DEFAULT_CALENDAR;
   if (!ref) {
     const first = cals.find((c) => c.writable);
     if (!first) throw new ToolError("no writable calendar found");
@@ -252,7 +254,7 @@ const tools = [
     inputSchema: { type: "object", properties: {
       title: { type: "string" },
       ...timeArgs,
-      calendar: { type: "string", description: "Calendar name or calendar_id. Default: the first writable calendar." },
+      calendar: { type: "string", description: "Calendar name or calendar_id. Default: Santi. Use \"Shared\" for events Paulina should see." },
       location: { type: "string" },
       notes: { type: "string" },
       url: { type: "string" },
@@ -357,7 +359,7 @@ export default {
   fetch: mcpHandler({
     name: "apple-calendar",
     version: "1.0.0",
-    instructions: "Read and write Santi's Apple (iCloud) calendars. Naive times are America/New_York unless a timezone is passed. Use list_events before update_event/delete_event to get a current event_id.",
+    instructions: "Read and write Santi's Apple (iCloud) calendars. Naive times are America/New_York unless a timezone is passed. New events go on the Santi calendar; pass calendar: \"Shared\" for events Paulina should see. Use list_events before update_event/delete_event to get a current event_id.",
     tools,
   }),
 };
