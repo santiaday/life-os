@@ -17,7 +17,7 @@
 -- fact_food_log, which only the droplet's cronometer-export binary wrote.
 --
 --   job unify            hourly at :15  unify_run()
---   job cronometer-sync  hourly at :25  edge function cronometer-sync, last 3 days
+--   job cronometer-sync  every 15 min   edge function cronometer-sync, last 3 days
 
 CREATE OR REPLACE FUNCTION unify_quality()
 RETURNS jsonb LANGUAGE plpgsql AS $$
@@ -251,4 +251,4 @@ END
 $$;
 
 SELECT cron.schedule('unify', '15 * * * *', $$SELECT public.unify_run()$$);
-SELECT cron.schedule('cronometer-sync', '25 * * * *', $$SELECT public.call_edge_function('cronometer-sync', '?days=3')$$);
+SELECT cron.schedule('cronometer-sync', '*/15 * * * *', $$SELECT public.call_edge_function('cronometer-sync', '?days=3')$$);
