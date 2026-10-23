@@ -127,7 +127,7 @@ class Cronometer {
     this.userId = Number(data.id);
     this.token = String(data.sessionKey);
     must(await sb.from("oauth_tokens").upsert({
-      service: "cronometer_mobile", access_token: this.token, refresh_token: null,
+      service: "cronometer_mobile", access_token: this.token, refresh_token: "", // column is NOT NULL; Cronometer sessions have no refresh token
       metadata: { user_id: this.userId }, updated_at: new Date().toISOString(),
     }, { onConflict: "service" }), "session save");
   }
