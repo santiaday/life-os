@@ -39,12 +39,12 @@ BEGIN
 END
 $$;
 
-CREATE OR REPLACE FUNCTION refresh_marts(p_since date DEFAULT CURRENT_DATE - 60)
+-- mart_daily columns only; no deletes. refresh_marts() below wraps it.
+CREATE OR REPLACE FUNCTION refresh_mart_daily(p_since date DEFAULT CURRENT_DATE - 60)
 RETURNS jsonb LANGUAGE plpgsql AS $$
 DECLARE
   result jsonb := '{}';
   cnt int;
-  wk date := date_trunc('week', p_since)::date;
 BEGIN
   INSERT INTO mart_daily (day, refreshed_at)
   SELECT d::date, now()
@@ -214,6 +214,17 @@ BEGIN
          WHERE d.day >= p_since GROUP BY d.day) q
   WHERE m.day = q.day;
 
+  RETURN result;
+END
+$$;
+
+CREATE OR REPLACE FUNCTION refresh_marts(p_since date DEFAULT CURRENT_DATE - 60)
+RETURNS jsonb LANGUAGE plpgsql AS $$
+DECLARE
+  result jsonb := refresh_mart_daily(p_since);
+  cnt int;
+  wk date := date_trunc('week', p_since)::date;
+BEGIN
   -- mart_meal ---------------------------------------------------------------
   DELETE FROM mart_meal WHERE day >= p_since;
   INSERT INTO mart_meal (day, meal_window, start_ts, end_ts, duration_min, item_count,
