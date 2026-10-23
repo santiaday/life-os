@@ -1,0 +1,8 @@
+name = "cronometer-mcp"
+main = "src/index.js"
+compatibility_date = "2026-07-11"
+workers_dev = true
+
+[[kv_namespaces]]
+binding = "KV"
+id = "9fd2e8c655ed4492af124baaf26a9597"
