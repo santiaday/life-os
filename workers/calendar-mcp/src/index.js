@@ -302,7 +302,9 @@ const tools = [
       const res = await dav(env, "GET", href);
       if (res.status === 404) throw new ToolError("event not found; list_events again for a current event_id");
       if (!res.ok) throw new ToolError(`fetch failed: HTTP ${res.status}`);
-      const etag = res.headers.get("etag");
+      // iCloud answers GET with a weak ETag (W/"..."). If-Match compares strongly, so a weak
+      // tag never matches and every save would 412; send the opaque tag without the W/ prefix.
+      const etag = res.headers.get("etag")?.replace(/^W\//, "") ?? null;
       const ics = await res.text();
       const [current] = parseEvents(ics);
       const times = eventTimes(args, tz, { required: false });
