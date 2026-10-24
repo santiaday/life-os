@@ -31,5 +31,5 @@ UPDATE ai_guide SET body = replace(body,
   :50        ingest_watchdog_run()')
 WHERE topic = 'jobs' AND body NOT LIKE '%withings%';
 
--- Scheduled after the account is connected (the poll needs tokens):
--- SELECT cron.schedule('withings-sync', '22 * * * *', $$SELECT public.call_edge_function('withings-ingest', '/sync')$$);
+-- Applied separately once the account was connected (2026-10-24), since the poll needs tokens:
+SELECT cron.schedule('withings-sync', '22 * * * *', $$SELECT public.call_edge_function('withings-ingest', '/sync')$$);
