@@ -147,7 +147,8 @@ function fakeICloud() {
     }
     if (req.method === "GET") {
       const v = store.get(url);
-      return v ? new Response(v.ics, { headers: { etag: v.etag } }) : new Response("", { status: 404 });
+      // iCloud serves a weak ETag on GET but compares If-Match strongly against the stored tag.
+      return v ? new Response(v.ics, { headers: { etag: `W/${v.etag}` } }) : new Response("", { status: 404 });
     }
     if (req.method === "DELETE") return new Response(null, { status: store.delete(url) ? 204 : 404 });
     return new Response(`unexpected ${req.method} ${url}`, { status: 500 });
