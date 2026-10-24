@@ -13,15 +13,16 @@ Cronometer ◀─ pg_cron ─ cronometer-sync ────┘        │
                        ingest_watchdog_run() ◀───────┘  ingest_alert / v_ingest_alert_open
 
 Claude ──▶ Supabase connector (read)
-       ──▶ hevy-mcp, cronometer-mcp, calendar-mcp on Cloudflare (write)
+       ──▶ hevy-mcp, cronometer-mcp, calendar-mcp, apple-music-mcp on Cloudflare
 ```
 
 | Path | What |
 |---|---|
 | `db/migrations/` | Every schema change, in order. Applied to Supabase; the files are the record. |
 | `supabase/functions/` | Edge functions. `hevy-sync` and `health-mirror` live only in Supabase; pull them with `supabase functions download <name> --project-ref dqnrcarouldholuqfxbb`. |
-| `workers/` | Cloudflare Workers: `cronometer-mcp` and `calendar-mcp` (iCloud CalDAV), sharing `workers/lib/mcp.js`. Tests: `deno test --allow-env workers/test/workers.test.js`. |
+| `workers/` | Cloudflare Workers: `cronometer-mcp`, `calendar-mcp` (iCloud CalDAV) and `apple-music-mcp`, sharing `workers/lib/mcp.js`. Tests: `deno test --allow-env workers/test/workers.test.js`. |
 | `docs/CUTOVER.md` | Job map, secrets, connector URLs, and how the move off the droplet was done. |
+| `docs/APPLE_MUSIC.md` | Apple Music MCP: Apple Developer key, Worker secrets, and the browser step that mints the Music User Token. |
 
 The schema documents itself: `SELECT topic, body FROM ai_guide ORDER BY ord`
 and the table and column comments.

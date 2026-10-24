@@ -1,0 +1,11 @@
+name = "apple-music-mcp"
+main = "src/index.js"
+compatibility_date = "2026-07-11"
+workers_dev = true
+
+[[kv_namespaces]]
+binding = "KV"
+id = "d7e62ead813e418fb6f0d0400c520e79"
+
+[vars]
+DEFAULT_STOREFRONT = "us"

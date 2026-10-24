@@ -38,6 +38,10 @@ cd workers/cronometer-mcp && npx wrangler secret put CRONOMETER_USERNAME && npx 
 cd ../calendar-mcp && npx wrangler secret put ICLOUD_USERNAME && npx wrangler secret put ICLOUD_APP_PASSWORD
 ```
 
+`apple-music-mcp` needs four secrets of its own and a one-time browser step;
+see `docs/APPLE_MUSIC.md`. It was never on the droplet -- it is new -- but it
+lands here because this is where the connector URLs live.
+
 `ICLOUD_APP_PASSWORD` is an app-specific password from appleid.apple.com ->
 Sign-In and Security -> App-Specific Passwords. The normal Apple ID password is
 rejected.
@@ -60,6 +64,7 @@ that prompt doesn't arrive, run the file in the SQL editor.
 | Hevy | `https://hevy-mcp.santiagoaday7.workers.dev/mcp` (OAuth) | OAuth |
 | Cronometer | `https://cronometer-mcp.santiagoaday7.workers.dev/mcp/<MCP_TOKEN>` | `POST /mcp` with `Authorization: Bearer <MCP_TOKEN>` |
 | Apple Calendar | `https://calendar-mcp.santiagoaday7.workers.dev/mcp/<MCP_TOKEN>` | same |
+| Apple Music | `https://apple-music-mcp.santiagoaday7.workers.dev/mcp/<MCP_TOKEN>` | same |
 
 Claude Code on the laptop:
 
