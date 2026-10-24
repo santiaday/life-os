@@ -13,7 +13,8 @@
 // Writes raw_import (source withings, entity measuregrp) and
 // fact_body_composition (source withings, one row per weigh-in).
 //
-// Secrets: WITHINGS_CLIENT_ID, WITHINGS_CLIENT_SECRET. Tokens live in
+// Credentials: WITHINGS_CLIENT_ID / WITHINGS_CLIENT_SECRET edge secrets, or the
+// same values in Vault (withings_client_id / withings_client_secret). Tokens live in
 // oauth_tokens (service 'withings'); the refresh token rotates on every refresh.
 // The connect state is a one-time value in ingest_cursor ('withings.connect_state').
 
@@ -59,9 +60,12 @@ async function withings(path: string, params: Record<string, string | number>, t
 }
 
 // ---- tokens --------------------------------------------------------------------
-function clientCreds() {
-  const id = Deno.env.get("WITHINGS_CLIENT_ID"), secret = Deno.env.get("WITHINGS_CLIENT_SECRET");
-  if (!id || !secret) throw new Error("WITHINGS_CLIENT_ID / WITHINGS_CLIENT_SECRET secrets are not set");
+/** Edge secrets first, then Vault (withings_client_id / withings_client_secret, see 0072). */
+async function clientCreds() {
+  const vault = async (name: string) => (must(await sb.rpc("withings_secret", { p_name: name }), "vault") as string | null) ?? undefined;
+  const id = Deno.env.get("WITHINGS_CLIENT_ID") ?? await vault("withings_client_id");
+  const secret = Deno.env.get("WITHINGS_CLIENT_SECRET") ?? await vault("withings_client_secret");
+  if (!id || !secret) throw new Error("Withings client id / secret are in neither the edge secrets nor Vault");
   return { client_id: id, client_secret: secret };
 }
 
@@ -82,7 +86,7 @@ async function accessToken(): Promise<{ token: string; userid: string }> {
     return { token: row.access_token, userid: String(row.metadata?.userid) };
   }
   const body = await withings("/v2/oauth2", {
-    action: "requesttoken", grant_type: "refresh_token", refresh_token: row.refresh_token, ...clientCreds(),
+    action: "requesttoken", grant_type: "refresh_token", refresh_token: row.refresh_token, ...(await clientCreds()),
   });
   await saveTokens(body);
   return { token: body.access_token, userid: String(body.userid) };
@@ -186,7 +190,7 @@ Deno.serve(async (req) => {
       const state = url.searchParams.get("state");
       if (!(await checkState(state))) return html("This connect link has expired. Ask Claude for a new one.", 403);
       const auth = new URL("https://account.withings.com/oauth2_user/authorize2");
-      auth.search = new URLSearchParams({ response_type: "code", client_id: clientCreds().client_id,
+      auth.search = new URLSearchParams({ response_type: "code", client_id: (await clientCreds()).client_id,
         scope: "user.metrics", redirect_uri: REDIRECT, state: state! }).toString();
       return Response.redirect(auth.toString(), 302);
     }
@@ -196,7 +200,7 @@ Deno.serve(async (req) => {
       if (!code || !(await checkState(state))) return html("This sign-in link has expired. Ask Claude for a new one.", 403);
       await sb.from("ingest_cursor").update({ cursor: null, updated_at: new Date().toISOString() }).eq("name", STATE_KEY);
       const body = await withings("/v2/oauth2", {
-        action: "requesttoken", grant_type: "authorization_code", code, redirect_uri: REDIRECT, ...clientCreds(),
+        action: "requesttoken", grant_type: "authorization_code", code, redirect_uri: REDIRECT, ...(await clientCreds()),
       });
       await saveTokens(body);
       await withings("/notify", { action: "subscribe", callbackurl: BASE, appli: 1 }, body.access_token);
