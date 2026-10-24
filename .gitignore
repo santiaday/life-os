@@ -1,74 +1,20 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-*.egg-info/
-.eggs/
-dist/
-build/
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
-.coverage
-htmlcov/
-.venv/
-venv/
-env/
-
-# uv
-.uv/
-
-# Editors
-.vscode/
-.idea/
-*.swp
-*.swo
-.DS_Store
-
-# Environment
+# Secrets
 .env
-.env.local
-.env.*.local
-!.env.example
-
-# Logs
-*.log
-logs/
-
-# Local data / fixtures with secrets
-tests/fixtures/private/
-data/
+.env.*
+.dev.vars
 *.dump
 *.sql.gz
 
-# Whoop bootstrap secrets — written by ingest_whoop_journal.bootstrap_from_capture
-whoop_refresh_token.txt
-*.flow
-proxyflow*
+# Tooling
+node_modules/
+.wrangler/
+dist/
 
-# Personal screenshots (PR baseline imports etc.) — keep local only.
-IMG_*.PNG
-IMG_*.JPG
-IMG_*.HEIC
-*.heic
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
 
 # Claude Code local state
 .claude/
-
-# Docker
-.docker/
-copilot-money-cli/
-copilot-money-mcp/
-JSON Formatter and Validator.txt
-
-# scratch files from audit/analysis agents
-_audit*.py
-_tmp*.py
-
-# Cal AI personal CoreData store (extracted from device backup — never commit)
-Model.sqlite
-Model.sqlite-*
-*.sqlite-wal
-*.sqlite-shm

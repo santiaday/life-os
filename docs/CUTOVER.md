@@ -1,7 +1,8 @@
 # Cutover: DigitalOcean droplet -> Supabase + Cloudflare
 
-Everything the droplet ran either moved or was retired. After the steps below
-the droplet can be destroyed.
+Everything the droplet ran either moved or was retired. Done 2026-10-24: the
+droplet is shut down, 0067 and 0070 are applied, and the Python code is gone
+from the repo (it is in git history before this change).
 
 ## Where things live now
 
@@ -20,10 +21,10 @@ the droplet can be destroyed.
 | Calendar | Google Calendar ingest + `calendar_sync` | Cloudflare Worker `calendar-mcp` (iCloud CalDAV, read/write) |
 | Whoop, PushPress, Lose It, Copilot, Google Calendar, body-image, lifelog, possessions | droplet | retired; history stays in Supabase |
 
-Code: `db/migrations/0060`-`0070`, `supabase/functions/cronometer-sync`,
-`workers/`. The other three edge functions were written directly in Supabase;
-`supabase functions download <name> --project-ref dqnrcarouldholuqfxbb` pulls
-them into `supabase/functions/`.
+Code: `db/migrations/0060`-`0070`, `supabase/functions/` (`cronometer-sync`,
+`apple-health-ingest`), `workers/`. `hevy-sync` and `health-mirror` were written
+directly in Supabase; `supabase functions download <name> --project-ref
+dqnrcarouldholuqfxbb` pulls them into `supabase/functions/`.
 
 ## 1. Secrets
 
@@ -44,13 +45,13 @@ rejected.
 Each Worker's `MCP_TOKEN` is already set. Rotate with
 `npx wrangler secret put MCP_TOKEN` and update the connector URL.
 
-## 2. Approve migration 0067
+## 2. Migration 0067 (applied 2026-10-23)
 
 `db/migrations/0067_unify_rewrite_steps_and_schedule.sql` creates
-`unify_quality()` and `refresh_marts()` (both delete-and-rewrite derived rows)
-and schedules the `unify` and `cronometer-sync` jobs. Apply it from the
-Supabase SQL editor, or approve it when Claude applies it. Until it is applied,
-the droplet is still the only thing refreshing `mart_daily`.
+`unify_quality()`, `refresh_mart_daily()` and `refresh_marts()` and schedules
+the `unify` and `cronometer-sync` jobs. Statements containing DELETE need an
+in-app approval when Claude applies them through the Supabase connector; when
+that prompt doesn't arrive, run the file in the SQL editor.
 
 ## 3. Connect the MCPs
 
@@ -69,7 +70,7 @@ claude mcp add --transport http apple-calendar https://calendar-mcp.santiagoaday
 
 Then remove the old `life-os` connector.
 
-## 4. Shut the droplet down
+## 4. Shut the droplet down (done 2026-10-24)
 
 ```sh
 ssh lifeos-droplet
