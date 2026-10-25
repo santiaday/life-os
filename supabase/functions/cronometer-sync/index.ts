@@ -20,9 +20,9 @@
 //
 // Invoked by pg_cron (job cronometer-sync, hourly) with header x-cron-key.
 // ?days=N re-reads the last N days (default 3). ?start=YYYY-MM-DD&end=YYYY-MM-DD
-// re-reads a range; keep it under ~90 days per call, because Cronometer answers
-// a throttled request with HTTP 200 and an empty diary, so days are spaced
-// DAY_DELAY_MS apart.
+// re-reads a range; keep it under ~90 days per call. Cronometer throttles with
+// {"error":"Too Many Requests","result":"FAIL"}, so days are spaced DAY_DELAY_MS
+// apart and a throttled diary read stops the run rather than project an empty day.
 //
 // Secrets: CRONOMETER_USERNAME, CRONOMETER_PASSWORD. The session token is
 // cached in oauth_tokens (service 'cronometer_mobile') because Cronometer
@@ -36,6 +36,7 @@ const SOURCE = "cronometer";
 const BASE = "https://mobile.cronometer.com";
 const TZ = "America/New_York";
 const DAY_DELAY_MS = 1200;
+const FOOD_DELAY_MS = 600;
 const APP_AUTH = { api: 3, os: "Android", build: "2807", flavour: "free" };
 
 const sb = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!, {
@@ -140,7 +141,11 @@ class Cronometer {
       body: JSON.stringify({ ...payload, auth: { userId: this.userId, token: this.token, ...APP_AUTH }, lastSeen: 0 }),
     });
     const data = await res.json().catch(() => null);
-    const failed = res.status === 401 || res.status === 403 || data?.result === "FAILURE";
+    // Throttling is not an auth problem: logging in again would only add to it.
+    if (res.status === 429 || /too many requests/i.test(String(data?.error ?? ""))) {
+      throw new Error(`Cronometer ${endpoint}: throttled (HTTP ${res.status})`);
+    }
+    const failed = res.status === 401 || res.status === 403 || data?.result === "FAILURE" || data?.result === "FAIL";
     if (failed && !retried) {
       this.token = null;
       return this.post(endpoint, payload, true);
@@ -156,7 +161,11 @@ class Cronometer {
 }
 
 // ---- projection --------------------------------------------------------------
-type Food = { name: string; nutrients: Record<string, number | null> };
+type Food = { name: string; nutrients: Record<string, number | null>; resolved: boolean };
+
+/** A real food record. The droplet once cached Cronometer's throttling reply
+ *  ({"error":"Too Many Requests","result":"FAIL"}) as if it were the food. */
+const isFoodRecord = (p: Json | null) => !!p && Array.isArray(p.nutrients) && !p.error;
 
 function parseFood(payload: Json, id: number): Food {
   const nutrients: Record<string, number | null> = {};
@@ -164,7 +173,7 @@ function parseFood(payload: Json, id: number): Food {
     const name = NUTRIENT_IDS[n.id];
     if (name) nutrients[name] = num(n.amount);
   }
-  return { name: payload.name || `food:${id}`, nutrients };
+  return { name: payload.name || `food:${id}`, nutrients, resolved: true };
 }
 
 function entryRows(day: string, diary: Json[], foods: Map<number, Food>, now: string) {
@@ -183,7 +192,7 @@ function entryRows(day: string, diary: Json[], foods: Map<number, Food>, now: st
       entry_uid: `${SOURCE}:${id}`, source: SOURCE, source_entry_id: e.servingId ? String(e.servingId) : "",
       eaten_at: nyInstant(day, clock), day, meal: MEALS[Number(e.order ?? 0) >> 16] ?? null,
       food_name: food.name, brand: null, amount: grams, unit: "g", raw_id: null,
-      payload: { foodId: fid, measureId: e.measureId ?? null },
+      payload: { foodId: fid, measureId: e.measureId ?? null, ...(food.resolved ? {} : { nutrition_missing: true }) },
       micros: Object.fromEntries(Object.entries(food.nutrients)
         .filter(([k, v]) => v !== null && !ENTRY_FIELDS.includes(k))
         .map(([k, v]) => [k, r4((v as number) * factor)])),
@@ -231,7 +240,7 @@ Deno.serve(async (req) => {
   }).select("id").single(), "run insert") as Json;
 
   const api = new Cronometer();
-  const counts = { days: 0, servings: 0, new_foods: 0, missing_foods: 0, entries_deleted: 0 };
+  const counts = { days: 0, servings: 0, new_foods: 0, missing_foods: 0, unresolved_foods: 0, entries_deleted: 0 };
   try {
     await api.loadSession();
 
@@ -255,10 +264,21 @@ Deno.serve(async (req) => {
     if (ids.length) {
       const cached = must(await sb.from("raw_import").select("natural_key, payload")
         .eq("source", SOURCE).eq("entity", "food").in("natural_key", ids.map(String)), "food cache") as Json[];
-      for (const c of cached) foods.set(Number(c.natural_key), parseFood(c.payload, Number(c.natural_key)));
+      for (const c of cached) {
+        if (isFoodRecord(c.payload)) foods.set(Number(c.natural_key), parseFood(c.payload, Number(c.natural_key)));
+      }
+      let fetched = 0;
       for (const id of ids.filter((i) => !foods.has(i))) {
-        const f = await api.food(id);
-        foods.set(id, parseFood(f, id));
+        if (fetched++) await sleep(FOOD_DELAY_MS);
+        // A food Cronometer won't hand over this run still gets its entry (nutrition NULL,
+        // payload.nutrition_missing), so nothing is deleted; it isn't cached, so the next run retries.
+        const f = await api.food(id).catch((e) => { console.error(`food ${id}`, e); return null; });
+        if (!isFoodRecord(f)) {
+          foods.set(id, { name: `food:${id}`, nutrients: {}, resolved: false });
+          counts.unresolved_foods++;
+          continue;
+        }
+        foods.set(id, parseFood(f!, id));
         must(await sb.from("raw_import").upsert({
           source: SOURCE, entity: "food", natural_key: String(id), occurred_on: null,
           payload: f, file_name: "mobile_api", imported_at: now,
