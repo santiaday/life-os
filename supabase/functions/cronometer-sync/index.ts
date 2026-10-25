@@ -161,7 +161,9 @@ class Cronometer {
 }
 
 // ---- projection --------------------------------------------------------------
-type Food = { name: string; nutrients: Record<string, number | null>; resolved: boolean };
+// perUnit: a recipe. Its nutrient amounts are per "full recipe" and the diary's
+// `grams` counts recipes, so an entry is amount x grams, not amount x grams / 100.
+type Food = { name: string; nutrients: Record<string, number | null>; resolved: boolean; perUnit: boolean };
 
 /** A real food record. The droplet once cached Cronometer's throttling reply
  *  ({"error":"Too Many Requests","result":"FAIL"}) as if it were the food. */
@@ -173,7 +175,8 @@ function parseFood(payload: Json, id: number): Food {
     const name = NUTRIENT_IDS[n.id];
     if (name) nutrients[name] = num(n.amount);
   }
-  return { name: payload.name || `food:${id}`, nutrients, resolved: true };
+  const perUnit = (payload.measures ?? []).some((m: Json) => m.type === "Recipe");
+  return { name: payload.name || `food:${id}`, nutrients, resolved: true, perUnit };
 }
 
 function entryRows(day: string, diary: Json[], foods: Map<number, Food>, now: string) {
@@ -185,13 +188,13 @@ function entryRows(day: string, diary: Json[], foods: Map<number, Food>, now: st
     const food = foods.get(fid);
     if (!food) { missing.add(fid); continue; }
     const grams = num(e.grams);
-    const factor = (grams ?? 0) / 100;
+    const factor = food.perUnit ? (grams ?? 0) : (grams ?? 0) / 100;
     const clock = String(e.time || "12:00:00");
     const id = e.servingId ? String(e.servingId) : `s:${day}:${fid}:${clock}`;
     const row: Json = {
       entry_uid: `${SOURCE}:${id}`, source: SOURCE, source_entry_id: e.servingId ? String(e.servingId) : "",
       eaten_at: nyInstant(day, clock), day, meal: MEALS[Number(e.order ?? 0) >> 16] ?? null,
-      food_name: food.name, brand: null, amount: grams, unit: "g", raw_id: null,
+      food_name: food.name, brand: null, amount: grams, unit: food.perUnit ? "recipe" : "g", raw_id: null,
       payload: { foodId: fid, measureId: e.measureId ?? null, ...(food.resolved ? {} : { nutrition_missing: true }) },
       micros: Object.fromEntries(Object.entries(food.nutrients)
         .filter(([k, v]) => v !== null && !ENTRY_FIELDS.includes(k))
@@ -241,6 +244,8 @@ Deno.serve(async (req) => {
 
   const api = new Cronometer();
   const counts = { days: 0, servings: 0, new_foods: 0, missing_foods: 0, unresolved_foods: 0, entries_deleted: 0 };
+  // Days whose stored total differs from Cronometer's own (summary.consumed.total) by more than 5 kcal.
+  const mismatches: { day: string; ours: number; cronometer: number }[] = [];
   try {
     await api.loadSession();
 
@@ -274,7 +279,7 @@ Deno.serve(async (req) => {
         // payload.nutrition_missing), so nothing is deleted; it isn't cached, so the next run retries.
         const f = await api.food(id).catch((e) => { console.error(`food ${id}`, e); return null; });
         if (!isFoodRecord(f)) {
-          foods.set(id, { name: `food:${id}`, nutrients: {}, resolved: false });
+          foods.set(id, { name: `food:${id}`, nutrients: {}, resolved: false, perUnit: false });
           counts.unresolved_foods++;
           continue;
         }
@@ -301,6 +306,10 @@ Deno.serve(async (req) => {
       if (gone.error) throw new Error(`entry delete: ${gone.error.message}`);
       counts.entries_deleted += gone.count ?? 0;
 
+      const theirs = num(d.summary?.consumed?.total);
+      const ours = rows.reduce((a, r) => a + (r.energy_kcal ?? 0), 0);
+      if (theirs !== null && Math.abs(ours - theirs) > 5) mismatches.push({ day: d.day, ours: r2(ours), cronometer: r2(theirs) });
+
       if (rows.length) {
         must(await sb.from("fact_nutrition_daily").upsert(rollup(d.day, rows, now), { onConflict: "day,source" }), "daily upsert");
       } else {
@@ -316,9 +325,9 @@ Deno.serve(async (req) => {
 
     await sb.from("ingestion_runs").update({
       finished_at: new Date().toISOString(), status: "success",
-      rows_fetched: counts.days, rows_upserted: counts.servings, metadata: { start, end, ...counts },
+      rows_fetched: counts.days, rows_upserted: counts.servings, metadata: { start, end, ...counts, mismatches },
     }).eq("id", run.id);
-    return Response.json({ ok: true, start, end, ...counts });
+    return Response.json({ ok: true, start, end, ...counts, mismatches });
   } catch (e) {
     console.error(e);
     await sb.from("ingestion_runs").update({
